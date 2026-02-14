@@ -163,7 +163,7 @@ Two implementations for v0.2: `MdnsDiscovery` and `StaticDiscovery`. Both feed t
 ```json
 {
   "kind": "delegate",
-  "task": "Send Grace a message about dinner plans",
+  "task": "Send a message to the family chat about dinner plans",
   "context": { "dinner_time": "7pm" },
   "priority": "normal",
   "report_back": true

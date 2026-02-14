@@ -88,7 +88,7 @@ Agents publish events to a shared local stream (like a minimal Kafka):
 ```json
 {
   "kind": "delegate",
-  "task": "Send Grace a message about dinner plans",
+  "task": "Send a message to the family chat about dinner plans",
   "context": { "dinnerTime": "7pm", "restaurant": "none, cooking at home" },
   "priority": "normal|urgent",
   "reportBack": true
@@ -212,7 +212,7 @@ family:
 ## Open Questions
 
 1. Should agents share a memory store (e.g., shared Graphiti instance) or keep separate memories with sync?
-2. How to handle conflicting information? (Kit says Hans is at gym, Agent Two says Hans is at dinner)
+2. How to handle conflicting information? (Agent A says user is at gym, Agent B says user is at dinner)
 3. Should the protocol support multi-agent broadcast? (Future: 3+ agents)
 4. How much personality should bleed through? Should agent-to-agent messages be purely structured, or is some natural language useful for ambiguous queries?
 5. Can we piggyback on OpenClaw's existing webhook/gateway infrastructure instead of building a separate server?
