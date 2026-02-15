@@ -74,7 +74,11 @@ pub(crate) fn spawn_daemon_with_config(
     }
 }
 
-pub(crate) fn spawn_daemon(dir: &std::path::Path, port: u16, peers: Vec<StaticPeerConfig>) -> DaemonHandle {
+pub(crate) fn spawn_daemon(
+    dir: &std::path::Path,
+    port: u16,
+    peers: Vec<StaticPeerConfig>,
+) -> DaemonHandle {
     spawn_daemon_with_config(
         dir,
         port,
@@ -125,7 +129,10 @@ pub(crate) async fn wait_for_peer_connected(
     }
 }
 
-pub(crate) async fn ipc_command(socket_path: &std::path::Path, command: Value) -> anyhow::Result<Value> {
+pub(crate) async fn ipc_command(
+    socket_path: &std::path::Path,
+    command: Value,
+) -> anyhow::Result<Value> {
     let mut stream = UnixStream::connect(socket_path).await?;
     let line = serde_json::to_string(&command)?;
     stream.write_all(line.as_bytes()).await?;

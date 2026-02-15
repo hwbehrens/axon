@@ -11,3 +11,10 @@ mutants.out/
 *.swp
 *.swo
 *~
+
+# Local tool settings
+.claude/
+
+# Secrets / certs (safety net)
+*.pem
+*.key
