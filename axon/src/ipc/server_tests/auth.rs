@@ -43,51 +43,74 @@ async fn hello_handshake() {
 
 #[tokio::test]
 async fn auth_with_token() {
+    // Use direct handle_command calls to test token validation
+    // without peer-credential auto-auth interfering
     let dir = tempdir().expect("tempdir");
     let socket_path = dir.path().join("axon.sock");
+    let token = "ab".repeat(32); // Valid 64-char hex token
     let config = IpcServerConfig {
         agent_id: "ed25519.test".to_string(),
         public_key: "key".to_string(),
-        token: Some("secret123".to_string()),
+        token: Some(token.clone()),
         ..Default::default()
     };
-    let (server, mut cmd_rx) = IpcServer::bind(socket_path.clone(), 64, config)
+    let (server, _rx) = IpcServer::bind(socket_path.clone(), 64, config)
         .await
         .expect("bind IPC server");
 
-    let client = UnixStream::connect(&socket_path).await.expect("connect");
-    let (read_half, mut write_half) = client.into_split();
-    let mut reader = BufReader::new(read_half);
-
-    // Send hello first
-    write_half
-        .write_all(b"{\"cmd\":\"hello\",\"version\":2}\n")
+    // Step 1: Hello handshake
+    let hello_event = CommandEvent {
+        client_id: 999,
+        command: IpcCommand::Hello { version: 2 },
+    };
+    let reply = server
+        .handle_command(hello_event)
         .await
-        .expect("write");
+        .expect("handle hello");
+    match &reply {
+        DaemonReply::Hello { ok, version, .. } => {
+            assert!(ok);
+            assert_eq!(*version, 2);
+        }
+        _ => panic!("Expected Hello reply, got {:?}", reply),
+    }
 
-    let cmd = cmd_rx.recv().await.expect("recv hello");
-    let reply = server.handle_command(cmd).await.expect("handle");
-    server.send_reply(1, &reply).await.expect("send reply");
-
-    let mut line = String::new();
-    reader.read_line(&mut line).await.expect("read hello reply");
-
-    // Send auth with correct token
-    write_half
-        .write_all(b"{\"cmd\":\"auth\",\"token\":\"secret123\"}\n")
+    // Step 2: Auth with correct token
+    let auth_event = CommandEvent {
+        client_id: 999,
+        command: IpcCommand::Auth {
+            token: token.clone(),
+        },
+    };
+    let reply = server
+        .handle_command(auth_event)
         .await
-        .expect("write");
+        .expect("handle auth");
+    match reply {
+        DaemonReply::Auth { ok, auth } => {
+            assert!(ok);
+            assert_eq!(auth, "accepted");
+        }
+        _ => panic!("Expected Auth reply, got {:?}", reply),
+    }
 
-    let cmd = cmd_rx.recv().await.expect("recv auth");
-    let reply = server.handle_command(cmd).await.expect("handle");
-    server.send_reply(1, &reply).await.expect("send reply");
-
-    line.clear();
-    reader.read_line(&mut line).await.expect("read auth reply");
-
-    let v: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
-    assert_eq!(v["ok"], true);
-    assert_eq!(v["auth"], "accepted");
+    // Step 3: Verify authenticated client can use v2 commands
+    let inbox_event = CommandEvent {
+        client_id: 999,
+        command: IpcCommand::Inbox {
+            limit: 10,
+            since: None,
+            kinds: None,
+        },
+    };
+    let reply = server
+        .handle_command(inbox_event)
+        .await
+        .expect("handle inbox");
+    match reply {
+        DaemonReply::Inbox { ok, .. } => assert!(ok),
+        _ => panic!("Expected Inbox reply, got {:?}", reply),
+    }
 }
 
 #[tokio::test]
@@ -100,7 +123,7 @@ async fn auth_with_peer_credentials_succeeds_even_with_wrong_token() {
     let config = IpcServerConfig {
         agent_id: "ed25519.test".to_string(),
         public_key: "key".to_string(),
-        token: Some("secret123".to_string()),
+        token: Some("ab".repeat(32)),
         ..Default::default()
     };
     let (server, mut cmd_rx) = IpcServer::bind(socket_path.clone(), 64, config)
@@ -163,20 +186,44 @@ async fn whoami_returns_identity() {
         .await
         .expect("bind IPC server");
 
-    let mut client = UnixStream::connect(&socket_path).await.expect("connect");
+    let client = UnixStream::connect(&socket_path).await.expect("connect");
+    let (read_half, mut write_half) = client.into_split();
+    let mut reader = BufReader::new(read_half);
 
-    client
-        .write_all(b"{\"cmd\":\"whoami\"}\n")
+    // Send hello first (required for v2 commands)
+    write_half
+        .write_all(b"{\"cmd\":\"hello\",\"version\":2}\n")
         .await
-        .expect("write");
+        .expect("write hello");
 
-    let cmd = cmd_rx.recv().await.expect("recv");
-    let reply = server.handle_command(cmd).await.expect("handle");
-    server.send_reply(1, &reply).await.expect("send reply");
+    let cmd = cmd_rx.recv().await.expect("recv hello");
+    let reply = server.handle_command(cmd).await.expect("handle hello");
+    server
+        .send_reply(1, &reply)
+        .await
+        .expect("send hello reply");
 
     let mut line = String::new();
-    let mut reader = BufReader::new(&mut client);
-    reader.read_line(&mut line).await.expect("read");
+    reader.read_line(&mut line).await.expect("read hello reply");
+
+    // Now send whoami
+    write_half
+        .write_all(b"{\"cmd\":\"whoami\"}\n")
+        .await
+        .expect("write whoami");
+
+    let cmd = cmd_rx.recv().await.expect("recv whoami");
+    let reply = server.handle_command(cmd).await.expect("handle whoami");
+    server
+        .send_reply(1, &reply)
+        .await
+        .expect("send whoami reply");
+
+    line.clear();
+    reader
+        .read_line(&mut line)
+        .await
+        .expect("read whoami reply");
 
     let v: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
     assert_eq!(v["ok"], true);
@@ -238,20 +285,20 @@ async fn auth_gating_v2_client_needs_auth() {
 }
 
 #[tokio::test]
-async fn auth_bypass_v2_without_hello() {
-    // This test verifies that v2 commands (inbox) sent without hello are handled correctly
-    // v1 clients (no hello) should not get auth_required errors
+async fn v2_command_without_hello_returns_hello_required() {
+    // v2 commands (inbox, whoami, ack, subscribe) sent without hello
+    // should return hello_required error
     let dir = tempdir().expect("tempdir");
     let socket_path = dir.path().join("axon.sock");
     let config = IpcServerConfig {
-        token: Some("test_token".to_string()),
+        token: Some("a".repeat(64)),
         ..Default::default()
     };
     let (server, _rx) = IpcServer::bind(socket_path.clone(), 64, config)
         .await
         .expect("bind IPC server");
 
-    // Simulate a client sending inbox without hello (v1 behavior)
+    // Try inbox without hello
     let inbox_event = CommandEvent {
         client_id: 999,
         command: IpcCommand::Inbox {
@@ -261,25 +308,26 @@ async fn auth_bypass_v2_without_hello() {
         },
     };
     let reply = server.handle_command(inbox_event).await.expect("handle");
-
-    // v1 clients (no hello, version=None) are NOT auth-gated
-    // So inbox should return an error saying the command must be handled by daemon
-    // (since inbox is a v2 command that returns data from the buffer)
-    // But it should NOT return auth_required
     match reply {
-        DaemonReply::Error { error, .. } => {
-            // Should not be auth_required (v1 clients bypass auth)
-            assert_ne!(
-                error, "auth_required",
-                "v1 clients should not get auth_required"
-            );
+        DaemonReply::Error { ok, error } => {
+            assert!(!ok);
+            assert_eq!(error, "hello_required");
         }
-        DaemonReply::Inbox { .. } => {
-            // If it succeeds, that's also fine - v1 client got inbox results
+        _ => panic!("Expected hello_required error, got {:?}", reply),
+    }
+
+    // Try whoami without hello
+    let whoami_event = CommandEvent {
+        client_id: 1000,
+        command: IpcCommand::Whoami,
+    };
+    let reply = server.handle_command(whoami_event).await.expect("handle");
+    match reply {
+        DaemonReply::Error { ok, error } => {
+            assert!(!ok);
+            assert_eq!(error, "hello_required");
         }
-        _ => {
-            // Any other reply is acceptable as long as it's not auth_required
-        }
+        _ => panic!("Expected hello_required error, got {:?}", reply),
     }
 }
 
@@ -331,7 +379,7 @@ async fn auth_oversized_token() {
     let dir = tempdir().expect("tempdir");
     let socket_path = dir.path().join("axon.sock");
     let config = IpcServerConfig {
-        token: Some("test_token".to_string()),
+        token: Some("ab".repeat(32)),
         ..Default::default()
     };
     let (server, _rx) = IpcServer::bind(socket_path.clone(), 64, config)
@@ -485,6 +533,51 @@ async fn auth_malformed_token_wrong_length() {
                 error, "auth_failed",
                 "wrong-length token should be rejected"
             );
+        }
+        _ => panic!("Expected auth_failed error, got {:?}", reply),
+    }
+}
+
+#[tokio::test]
+async fn auth_fails_closed_when_no_token_configured() {
+    // When config.token is None (no token file), token auth should be rejected.
+    // Only peer-credential auth works in this mode.
+    let dir = tempdir().expect("tempdir");
+    let socket_path = dir.path().join("axon.sock");
+    let config = IpcServerConfig {
+        token: None, // No token configured
+        ..Default::default()
+    };
+    let (server, _rx) = IpcServer::bind(socket_path.clone(), 64, config)
+        .await
+        .expect("bind IPC server");
+
+    // Hello first
+    let hello_event = CommandEvent {
+        client_id: 999,
+        command: IpcCommand::Hello { version: 2 },
+    };
+    let _ = server
+        .handle_command(hello_event)
+        .await
+        .expect("handle hello");
+
+    // Try auth with any token — should fail because no token is configured
+    let auth_event = CommandEvent {
+        client_id: 999,
+        command: IpcCommand::Auth {
+            token: "a".repeat(64),
+        },
+    };
+    let reply = server
+        .handle_command(auth_event)
+        .await
+        .expect("handle auth");
+
+    match reply {
+        DaemonReply::Error { ok, error } => {
+            assert!(!ok);
+            assert_eq!(error, "auth_failed");
         }
         _ => panic!("Expected auth_failed error, got {:?}", reply),
     }

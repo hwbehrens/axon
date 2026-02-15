@@ -167,6 +167,8 @@ Located at `~/.axon/config.toml` (or `<axon_root>/config.toml`).
 | `reconnect_max_backoff_secs` | `u64` | `30` | Maximum backoff between reconnection attempts to unreachable peers. Backoff starts at 1s and doubles. |
 | `handshake_timeout_secs` | `u64` | `5` | Maximum time to wait for a hello handshake on a new inbound connection before closing it. |
 | `inbound_read_timeout_secs` | `u64` | `10` | Maximum time to wait for data on an inbound QUIC stream before timing out. |
+| `ipc.buffer_size` | `usize` | `1000` | Maximum number of messages in the IPC receive buffer. Set to `0` to disable buffering. |
+| `ipc.buffer_ttl_secs` | `u64` | `86400` | Time-to-live for buffered messages in seconds (default: 24 hours). Expired messages are evicted lazily. |
 
 #### Static peers
 

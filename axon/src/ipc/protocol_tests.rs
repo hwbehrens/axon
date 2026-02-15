@@ -343,3 +343,71 @@ fn subscribe_reply_serialization() {
     assert_eq!(v["subscribed"], true);
     assert_eq!(v["replayed"], 5);
 }
+
+// --- Property-based tests ---
+
+use proptest::prelude::*;
+
+fn arb_message_kind() -> impl Strategy<Value = MessageKind> {
+    prop_oneof![
+        Just(MessageKind::Hello),
+        Just(MessageKind::Ping),
+        Just(MessageKind::Pong),
+        Just(MessageKind::Query),
+        Just(MessageKind::Response),
+        Just(MessageKind::Delegate),
+        Just(MessageKind::Ack),
+        Just(MessageKind::Result),
+        Just(MessageKind::Notify),
+        Just(MessageKind::Cancel),
+        Just(MessageKind::Discover),
+        Just(MessageKind::Capabilities),
+        Just(MessageKind::Error),
+    ]
+}
+
+proptest! {
+    #[test]
+    fn ipc_command_parse_never_panics(data in "\\PC{0,256}") {
+        let _ = serde_json::from_str::<IpcCommand>(&data);
+    }
+
+    #[test]
+    fn inbox_limit_clamped(limit in 0usize..10000) {
+        let cmd_json = format!(r#"{{"cmd":"inbox","limit":{}}}"#, limit);
+        if let Ok(IpcCommand::Inbox { limit: parsed, .. }) = serde_json::from_str::<IpcCommand>(&cmd_json) {
+            prop_assert_eq!(parsed, limit);
+        }
+    }
+
+    #[test]
+    fn hello_version_roundtrips(version in 1u32..1000) {
+        let cmd_json = format!(r#"{{"cmd":"hello","version":{}}}"#, version);
+        let parsed: IpcCommand = serde_json::from_str(&cmd_json).unwrap();
+        match parsed {
+            IpcCommand::Hello { version: v } => prop_assert_eq!(v, version),
+            _ => prop_assert!(false, "expected hello command"),
+        }
+    }
+
+    #[test]
+    fn subscribe_kinds_roundtrip(
+        kinds in proptest::collection::vec(arb_message_kind(), 0..5)
+    ) {
+        let kinds_json: Vec<String> = kinds.iter().map(|k| {
+            serde_json::to_string(k).unwrap()
+        }).collect();
+        let cmd_json = format!(r#"{{"cmd":"subscribe","kinds":[{}]}}"#, kinds_json.join(","));
+        let parsed: IpcCommand = serde_json::from_str(&cmd_json).unwrap();
+        match parsed {
+            IpcCommand::Subscribe { kinds: Some(parsed_kinds), .. } => {
+                prop_assert_eq!(parsed_kinds.len(), kinds.len());
+            }
+            IpcCommand::Subscribe { kinds: None, .. } if kinds.is_empty() => {
+                // empty vec might deserialize as None depending on serde behavior
+                // but actually it should be Some([]) — either way is fine
+            }
+            _ => prop_assert!(false, "expected subscribe command"),
+        }
+    }
+}

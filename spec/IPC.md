@@ -38,6 +38,8 @@ On connection, the client SHOULD send a `hello` command as its first message:
 
 If a client skips `hello`, the daemon MUST assume v1 semantics and accept all v1 commands without authentication. This ensures backward compatibility.
 
+If a client skips `hello` and sends a v2-only command (`whoami`, `inbox`, `ack`, `subscribe`), the daemon MUST reject it with `hello_required`. These commands are only available after a successful `hello` handshake.
+
 If a client sends `hello` with a `version` higher than the daemon supports, the daemon MUST respond with its own highest supported version. The client SHOULD fall back to the daemon's version.
 
 ---
@@ -242,6 +244,7 @@ All error responses use the format `{"ok": false, "error": "<code>"}`. Additiona
 
 | Code | HTTP-like | Condition |
 |------|-----------|-----------|
+| `hello_required` | 400 | v2 command sent without prior `hello` handshake. |
 | `auth_required` | 401 | Command requires authentication (v2+ connection, token mode). |
 | `auth_failed` | 403 | Invalid token or unauthorized UID. |
 | `invalid_command` | 400 | Malformed JSON, unknown `cmd`, or missing required field. |
@@ -287,6 +290,7 @@ The daemon does NOT multiplex between agents. One daemon = one identity.
 | Client behavior | Daemon response |
 |----------------|-----------------|
 | Skips `hello`, sends v1 commands directly | Accepted. Legacy broadcast. No auth required. |
+| Skips `hello`, sends v2 command | Rejected with `hello_required`. Client must send `hello` first. |
 | Sends `hello` with `version: 2` | Daemon responds with supported version. Auth required (token mode) or implicit (peer credentials). |
 | Sends unknown `cmd` | `{"ok": false, "error": "invalid_command"}` |
 | v2 client connects to v1 daemon | `hello` returns `invalid_command`. Client SHOULD fall back to v1 behavior. |
