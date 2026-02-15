@@ -31,7 +31,7 @@ impl Daemon {
         let peer_table = Arc::new(PeerTable::new());
         peer_table.load_known_peers(&base_dir).await?;
         
-        let transport = Arc::new(Transport::new(&identity, port)?);
+        let transport = Arc::new(Transport::new(&identity, port, peer_table.clone())?);
 
         Ok(Self {
             identity,
@@ -47,12 +47,10 @@ impl Daemon {
 
         let (peer_tx, mut peer_rx) = mpsc::channel(32);
         
-        // Static discovery
         let config = Config::load(&self.base_dir).await?;
         let static_discovery = StaticDiscovery::new(config.peers);
         tokio::spawn(Box::new(static_discovery).run(peer_tx.clone()));
 
-        // mDNS discovery
         let mdns_discovery = MdnsDiscovery::new(
             self.identity.agent_id(),
             self.identity.verifying_key().to_bytes().to_vec(),
@@ -65,7 +63,6 @@ impl Daemon {
         
         let (shutdown_tx, mut shutdown_rx) = mpsc::channel::<()>(1);
         
-        // Handle signals
         #[cfg(unix)]
         {
             let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
@@ -137,7 +134,7 @@ impl Daemon {
                     let connections = self.connections.clone();
                     let peer_table = self.peer_table.clone();
                     tokio::spawn(async move {
-                        if let Ok(conn) = transport.connect(addr).await {
+                        if let Ok(conn) = transport.connect(addr, &agent_id).await {
                             if let Err(e) = handle_connection(conn, identity, connections, peer_table).await {
                                 warn!("Outbound connection error to {}: {}", agent_id, e);
                             }
@@ -192,10 +189,19 @@ async fn handle_ipc_client(
             IpcCommand::Send { to, kind, payload } => {
                 let conns = connections.read().await;
                 if let Some(conn) = conns.get(&to) {
-                    let mut send = conn.open_uni().await?;
+                    let is_bidir = matches!(kind.as_str(), "query" | "delegate" | "discover" | "cancel" | "ping");
                     let envelope = Envelope::new(identity.agent_id(), to, kind, payload);
                     let msg_id = envelope.id.to_string();
-                    send_envelope(&mut send, &envelope).await?;
+                    
+                    if is_bidir {
+                        let (mut send, mut _recv) = conn.open_bi().await?;
+                        send_envelope(&mut send, &envelope).await?;
+                        // TODO: Wait for response if needed by IPC protocol
+                    } else {
+                        let mut send = conn.open_uni().await?;
+                        send_envelope(&mut send, &envelope).await?;
+                    }
+                    
                     IpcResponse {
                         ok: true,
                         msg_id: Some(msg_id),
@@ -258,7 +264,6 @@ async fn handle_connection(
                 let mut recv = result?;
                 let envelope = recv_envelope(&mut recv).await?;
                 info!("Received uni message from {}: {:?}", remote_id, envelope);
-                // TODO: Broadcast to IPC clients
             }
             result = conn.accept_bi() => {
                 let (mut _send, mut recv) = result?;

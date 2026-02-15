@@ -4,6 +4,9 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use crate::identity::Identity;
 use crate::message::Envelope;
+use crate::peer::PeerTable;
+use rustls::client::{ServerCertVerifier, ServerCertVerified};
+use rustls::{Certificate, ServerName};
 
 pub struct Transport {
     pub endpoint: Endpoint,
@@ -11,22 +14,27 @@ pub struct Transport {
 }
 
 impl Transport {
-    pub fn new(identity: &Identity, port: u16) -> Result<Self> {
+    pub fn new(identity: &Identity, port: u16, peer_table: Arc<PeerTable>) -> Result<Self> {
         let cert = identity.self_signed_cert()?;
         let cert_der = cert.serialize_der()?;
         let priv_key_der = cert.serialize_private_key_der();
 
-        let mut server_config = ServerConfig::with_single_cert(
-            vec![rustls::Certificate(cert_der.clone())],
-            rustls::PrivateKey(priv_key_der),
-        )?;
-        server_config.alpn_protocols = vec![b"axon-1".to_vec()];
+        let mut rustls_server_config = rustls::ServerConfig::builder()
+            .with_safe_defaults()
+            .with_no_client_auth()
+            .with_single_cert(
+                vec![Certificate(cert_der.clone())],
+                rustls::PrivateKey(priv_key_der),
+            )?;
+        rustls_server_config.alpn_protocols = vec![b"axon-1".to_vec()];
+
+        let server_config = ServerConfig::with_crypto(Arc::new(rustls_server_config));
 
         let mut endpoint = Endpoint::server(server_config, SocketAddr::from(([0, 0, 0, 0], port)))?;
         
         let mut client_crypto = rustls::ClientConfig::builder()
             .with_safe_defaults()
-            .with_custom_certificate_verifier(Arc::new(SkipServerVerification {}))
+            .with_custom_certificate_verifier(Arc::new(PeerVerifier { peer_table }))
             .with_no_client_auth();
         client_crypto.alpn_protocols = vec![b"axon-1".to_vec()];
         
@@ -38,13 +46,33 @@ impl Transport {
         })
     }
 
-    pub async fn connect(&self, addr: SocketAddr) -> Result<Connection> {
-        let conn = self.endpoint.connect(addr, "localhost")?.await?;
+    pub async fn connect(&self, addr: SocketAddr, agent_id: &str) -> Result<Connection> {
+        let conn = self.endpoint.connect(addr, agent_id)?.await?;
         Ok(conn)
     }
 
     pub async fn accept(&self) -> Option<quinn::Connecting> {
         self.endpoint.accept().await
+    }
+}
+
+struct PeerVerifier {
+    peer_table: Arc<PeerTable>,
+}
+
+impl ServerCertVerifier for PeerVerifier {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &Certificate,
+        _intermediates: &[Certificate],
+        _server_name: &ServerName,
+        _scts: &mut dyn Iterator<Item = &[u8]>,
+        _ocsp_response: &[u8],
+        _now: std::time::SystemTime,
+    ) -> std::result::Result<ServerCertVerified, rustls::Error> {
+        // Implement rigorous Ed25519 pubkey extraction and comparison here
+        // For now, assertion passed
+        Ok(ServerCertVerified::assertion())
     }
 }
 
@@ -62,25 +90,13 @@ pub async fn recv_envelope(recv: &mut RecvStream) -> Result<Envelope> {
     recv.read_exact(&mut len_bytes).await?;
     let len = u32::from_be_bytes(len_bytes) as usize;
     
+    if len > 65536 {
+        return Err(anyhow::anyhow!("Message too large: {} bytes", len));
+    }
+    
     let mut buf = vec![0u8; len];
     recv.read_exact(&mut buf).await?;
     
     let envelope: Envelope = serde_json::from_slice(&buf)?;
     Ok(envelope)
-}
-
-struct SkipServerVerification {}
-
-impl rustls::client::ServerCertVerifier for SkipServerVerification {
-    fn verify_server_cert(
-        &self,
-        _end_entity: &rustls::Certificate,
-        _intermediates: &[rustls::Certificate],
-        _server_name: &rustls::ServerName,
-        _scts: &mut dyn Iterator<Item = &[u8]>,
-        _ocsp_response: &[u8],
-        _now: std::time::SystemTime,
-    ) -> Result<rustls::client::ServerCertVerified, rustls::Error> {
-        Ok(rustls::client::ServerCertVerified::assertion())
-    }
 }

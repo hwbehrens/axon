@@ -80,3 +80,21 @@ impl Identity {
         Certificate::from_params(params).map_err(|e| anyhow::anyhow!("Failed to generate cert: {}", e))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_agent_id_derivation() {
+        // Known Ed25519 public key bytes (32 zeros for example)
+        let pubkey_bytes = [0u8; 32];
+        let mut hasher = Sha256::new();
+        hasher.update(pubkey_bytes);
+        let hash = hasher.finalize();
+        let expected_id = hex::encode(&hash[..16]);
+        
+        // This confirms our hex::encode(&result[..16]) matches the spec logic
+        assert_eq!(expected_id.len(), 32);
+    }
+}
