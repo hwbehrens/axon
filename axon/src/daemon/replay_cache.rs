@@ -75,7 +75,7 @@ impl ReplayCache {
             })
             .collect();
         drop(inner);
-        let data = serde_json::to_vec_pretty(&entries).context("failed to encode replay cache")?;
+        let data = serde_json::to_vec(&entries).context("failed to encode replay cache")?;
         tokio::fs::write(path, data)
             .await
             .with_context(|| format!("failed to write replay cache: {}", path.display()))?;

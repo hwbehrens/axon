@@ -20,7 +20,7 @@ fn envelope_round_trip() {
     let encoded = serde_json::to_string(&envelope).expect("serialize");
     let decoded: Envelope = serde_json::from_str(&encoded).expect("deserialize");
     assert_eq!(decoded.kind, MessageKind::Query);
-    assert_eq!(decoded.payload_value()["question"], json!("hello"));
+    assert_eq!(decoded.payload_value().unwrap()["question"], json!("hello"));
 }
 
 #[test]

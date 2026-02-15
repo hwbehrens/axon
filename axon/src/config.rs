@@ -8,6 +8,8 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::message::AgentId;
+
 #[derive(Debug, Clone)]
 pub struct AxonPaths {
     pub root: PathBuf,
@@ -69,6 +71,10 @@ pub struct Config {
     #[serde(default)]
     pub reconnect_max_backoff_secs: Option<u64>,
     #[serde(default)]
+    pub handshake_timeout_secs: Option<u64>,
+    #[serde(default)]
+    pub inbound_read_timeout_secs: Option<u64>,
+    #[serde(default)]
     pub peers: Vec<StaticPeerConfig>,
 }
 
@@ -107,18 +113,26 @@ impl Config {
     pub fn effective_reconnect_max_backoff(&self) -> Duration {
         Duration::from_secs(self.reconnect_max_backoff_secs.unwrap_or(30))
     }
+
+    pub fn effective_handshake_timeout(&self) -> Duration {
+        Duration::from_secs(self.handshake_timeout_secs.unwrap_or(5))
+    }
+
+    pub fn effective_inbound_read_timeout(&self) -> Duration {
+        Duration::from_secs(self.inbound_read_timeout_secs.unwrap_or(10))
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct StaticPeerConfig {
-    pub agent_id: String,
+    pub agent_id: AgentId,
     pub addr: SocketAddr,
     pub pubkey: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct KnownPeer {
-    pub agent_id: String,
+    pub agent_id: AgentId,
     pub addr: SocketAddr,
     pub pubkey: String,
     pub last_seen_unix_ms: u64,
@@ -144,7 +158,7 @@ pub async fn save_known_peers(path: &Path, peers: &[KnownPeer]) -> Result<()> {
             .with_context(|| format!("failed to create directory: {}", parent.display()))?;
     }
 
-    let data = serde_json::to_vec_pretty(peers).context("failed to encode known peers")?;
+    let data = serde_json::to_vec(peers).context("failed to encode known peers")?;
     tokio::fs::write(path, data)
         .await
         .with_context(|| format!("failed to write known peers: {}", path.display()))?;

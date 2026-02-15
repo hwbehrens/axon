@@ -23,7 +23,7 @@ use crate::config::{AxonPaths, Config, load_known_peers, save_known_peers};
 use crate::discovery::{Discovery, MdnsDiscovery, StaticDiscovery};
 use crate::identity::Identity;
 use crate::ipc::IpcServer;
-use crate::message::MessageKind;
+use crate::message::{AgentId, MessageKind};
 use crate::peer_table::PeerTable;
 use crate::transport::QuicTransport;
 
@@ -55,9 +55,10 @@ pub async fn run_daemon(opts: DaemonOptions) -> Result<()> {
     let port = config.effective_port(opts.port);
 
     let identity = Identity::load_or_generate(&paths)?;
-    let local_agent_id = opts
+    let local_agent_id: AgentId = opts
         .agent_id
-        .unwrap_or_else(|| identity.agent_id().to_string());
+        .map(AgentId::from)
+        .unwrap_or_else(|| AgentId::from(identity.agent_id()));
 
     info!(agent_id = %local_agent_id, port, "starting AXON daemon");
 
@@ -110,11 +111,13 @@ pub async fn run_daemon(opts: DaemonOptions) -> Result<()> {
         config.effective_idle_timeout(),
         replay_check,
         None,
+        config.effective_handshake_timeout(),
+        config.effective_inbound_read_timeout(),
     )
     .await?;
     // Eagerly populate expected_pubkeys from peer table so inbound connections are pinned
     for peer in peer_table.list().await {
-        transport.set_expected_peer(peer.agent_id.clone(), peer.pubkey.clone());
+        transport.set_expected_peer(peer.agent_id.to_string(), peer.pubkey.clone());
     }
 
     // --- IPC ---
@@ -124,11 +127,14 @@ pub async fn run_daemon(opts: DaemonOptions) -> Result<()> {
     let start = Instant::now();
 
     // --- Inbound message forwarder (transport → IPC clients) ---
+    // Replay protection is already performed by the transport layer (connection.rs)
+    // before messages are broadcast to inbound_tx. No second check here — the
+    // transport and forwarder share the same ReplayCache, so a redundant call to
+    // is_replay() would always return true and drop every legitimate message.
     let mut inbound_rx = transport.subscribe_inbound();
     let ipc_for_inbound = ipc.clone();
     let counters_for_inbound = counters.clone();
     let peer_table_for_inbound = peer_table.clone();
-    let replay_cache_for_inbound = replay_cache.clone();
     let cancel_for_inbound = cancel.clone();
     tokio::spawn(async move {
         loop {
@@ -137,18 +143,13 @@ pub async fn run_daemon(opts: DaemonOptions) -> Result<()> {
                 msg = inbound_rx.recv() => {
                     match msg {
                         Ok(envelope) => {
-                            if replay_cache_for_inbound.is_replay(envelope.id, Instant::now()).await {
-                                warn!(msg_id = %envelope.id, "dropping replayed inbound envelope");
-                                continue;
-                            }
                             counters_for_inbound.received.fetch_add(1, Ordering::Relaxed);
                             if envelope.kind == MessageKind::Hello {
                                 peer_table_for_inbound
                                     .set_connected(&envelope.from, None)
                                     .await;
                             }
-                            let owned = Arc::try_unwrap(envelope).unwrap_or_else(|arc| (*arc).clone());
-                            if let Err(err) = ipc_for_inbound.broadcast_inbound(owned).await {
+                            if let Err(err) = ipc_for_inbound.broadcast_inbound(&envelope).await {
                                 warn!(error = %err, "failed broadcasting inbound to IPC clients");
                             }
                         }
@@ -190,7 +191,7 @@ pub async fn run_daemon(opts: DaemonOptions) -> Result<()> {
     }
 
     // --- Reconnection tracking ---
-    let mut reconnect_map = HashMap::<String, ReconnectState>::new();
+    let mut reconnect_map = HashMap::<AgentId, ReconnectState>::new();
     for peer in peer_table.list().await {
         if *local_agent_id < *peer.agent_id {
             reconnect_map.insert(peer.agent_id, ReconnectState::immediate(Instant::now()));
@@ -260,6 +261,7 @@ pub async fn run_daemon(opts: DaemonOptions) -> Result<()> {
                     &local_agent_id,
                     &mut reconnect_map,
                     config.effective_reconnect_max_backoff(),
+                    &cancel,
                 ).await;
             }
             _ = save_interval.tick() => {

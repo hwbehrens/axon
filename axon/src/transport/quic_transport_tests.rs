@@ -41,7 +41,7 @@ async fn two_peers_hello_exchange() {
         .expect("bind a");
 
     let peer_b = PeerRecord {
-        agent_id: id_b.agent_id().to_string(),
+        agent_id: id_b.agent_id().into(),
         addr: addr_b,
         pubkey: id_b.public_key_base64().to_string(),
         source: crate::peer_table::PeerSource::Static,
@@ -97,7 +97,7 @@ async fn send_notify_unidirectional() {
     );
 
     let peer_b = PeerRecord {
-        agent_id: id_b.agent_id().to_string(),
+        agent_id: id_b.agent_id().into(),
         addr: addr_b,
         pubkey: id_b.public_key_base64().to_string(),
         source: crate::peer_table::PeerSource::Static,
@@ -162,7 +162,7 @@ async fn send_ping_bidirectional() {
     );
 
     let peer_b = PeerRecord {
-        agent_id: id_b.agent_id().to_string(),
+        agent_id: id_b.agent_id().into(),
         addr: addr_b,
         pubkey: id_b.public_key_base64().to_string(),
         source: crate::peer_table::PeerSource::Static,

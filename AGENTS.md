@@ -19,7 +19,8 @@ spec/                      Protocol specifications (authoritative)
   MESSAGE_TYPES.md         Message kinds + payload schemas + stream mapping
   WIRE_FORMAT.md           Normative interoperable wire format
 
-evaluations/               Agent evaluation rubrics/results (not part of the implementation)
+RUBRIC.md                  Contribution scoring rubric (100-point checklist across 8 categories)
+evaluations/               Agent evaluation results (not part of the implementation)
 
 axon/                      Rust implementation (Cargo crate)
   Cargo.toml               Dependencies and package metadata (Rust 2024 edition)
@@ -71,6 +72,8 @@ Use this to navigate quickly; for the full "change → file(s)" table, see `CONT
 
 These are load-bearing. Do not change behavior without updating spec + tests. Full list: `CONTRIBUTING.md`.
 
+- **Configuration reference**: when adding or changing a configurable setting (in `Config` / `config.toml`) or an internal constant (timeout, limit, interval, etc.), update the Configuration Reference tables in `README.md`.
+
 - **Hello must be first**: no application messages until QUIC connection completes the `hello` handshake.
 - **Agent ID = SHA-256(pubkey)**: peer identity must match TLS certificate/public key; reject mismatches.
 - **Peer pinning**: unknown peers must not be accepted at TLS/transport; expected peers must be set before connect.
@@ -117,7 +120,7 @@ Detailed requirements and recipes live in `CONTRIBUTING.md`. Key conventions:
 - **Property-based tests** use `proptest`. Commit `proptest-regressions/` when generated.
 - **Fuzz targets** live in `axon/fuzz/fuzz_targets/`. Add one for any new deserialization entrypoint.
 - **Mutation testing** via `cargo-mutants` validates test suite quality.
-- **File size limit**: all source files must stay under 500 lines. Split into submodules when approaching.
+- **File size limit**: all Rust source files (`.rs`) must stay under 500 lines. Split into submodules when approaching.
 
 ## Specs to Read First
 

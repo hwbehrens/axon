@@ -39,6 +39,14 @@ fn reject_oversized_message() {
 }
 
 #[test]
+fn decode_rejects_oversized_input() {
+    let data = vec![b'{'; MAX_MESSAGE_SIZE as usize + 1];
+    let result = decode(&data);
+    assert!(result.is_err());
+    assert!(result.unwrap_err().to_string().contains("exceeds maximum"));
+}
+
+#[test]
 fn now_millis_is_plausible() {
     let ms = now_millis();
     assert!(ms > 1_577_836_800_000);

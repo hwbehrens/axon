@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -34,6 +34,18 @@ impl IpcServer {
         max_clients: usize,
     ) -> Result<(Self, mpsc::Receiver<CommandEvent>)> {
         if socket_path.exists() {
+            let meta = fs::symlink_metadata(&socket_path).with_context(|| {
+                format!(
+                    "failed to read metadata for socket path: {}",
+                    socket_path.display()
+                )
+            })?;
+            if !meta.file_type().is_socket() {
+                anyhow::bail!(
+                    "refusing to remove non-socket file at socket path: {}",
+                    socket_path.display()
+                );
+            }
             fs::remove_file(&socket_path).with_context(|| {
                 format!(
                     "failed to remove stale unix socket: {}",
@@ -82,10 +94,10 @@ impl IpcServer {
         Ok(())
     }
 
-    pub async fn broadcast_inbound(&self, envelope: Envelope) -> Result<()> {
+    pub async fn broadcast_inbound(&self, envelope: &Envelope) -> Result<()> {
         let msg = DaemonReply::Inbound {
             inbound: true,
-            envelope,
+            envelope: envelope.clone(),
         };
         let line: Arc<str> =
             Arc::from(serde_json::to_string(&msg).context("failed to serialize inbound message")?);

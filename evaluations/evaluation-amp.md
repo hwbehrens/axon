@@ -1,267 +1,237 @@
-# AXON Evaluation — `agent/amp` Branch
+# AXON Implementation Evaluation (agent/amp) — Rubric Scoring
 
-_Oracle assessment — Feb 14, 2026 (from-first-principles evaluation against spec and rubric)_
-
-## Test Results
-
-| Suite | Count | Status |
-|---|---:|---|
-| Unit tests | 136 | ✅ All pass |
-| Integration tests | 22 | ✅ All pass |
-| Spec compliance tests | 46 | ✅ All pass |
-| E2E tests | 3 | ✅ All pass |
-| Compilation | — | ✅ Clean, no warnings |
-
-**Total: 207 tests passing, 0 ignored.**
+This document evaluates the AXON implementation against [`RUBRIC.md`](../RUBRIC.md) (mature codebase rubric). Scores start at category max and deduct for concrete issues/risks observed, with code references.
 
 ---
 
-## Summary Scores
+## 1) Security & Hardening — **15 / 18** (−3)
 
-| Category | Weight | Score |
-|---|---|---:|
-| 1. Spec Compliance | ×2 | **18/20** |
-| 2. Correctness | ×1 | **9/10** |
-| 3. Code Quality | ×1 | **8/10** |
-| 4. Test Coverage | ×1 | **9/10** |
-| 5. Security | ×1 | **9/10** |
-| 6. Concurrency & Async | ×1 | **8/10** |
-| 7. Error Handling | ×1 | **8/10** |
-| 8. Completeness | ×1 | **8/10** |
-| 9. Production Readiness | ×1 | **8/10** |
-| **Total** | | **85/100** |
+AXON's core security posture is strong: mutual TLS with peer pinning, identity binding, hello gating, replay protection, and multiple DoS controls are implemented in a way that is consistent and auditable.
 
----
+### What's working well (max-point items satisfied)
 
-## 1. Spec Compliance (18/20)
+- **mTLS peer pinning + identity binding**
+  - Outbound verification pins the server cert's Ed25519 pubkey to the expected peer table and *also* binds SNI → derived agent id:
+    - `tls.rs:89-139` (`PeerCertVerifier::verify_server_cert`) derives agent id from cert pubkey (`tls.rs:108-118`) and compares to SNI-derived `expected_agent_id` (`tls.rs:99-107`), then checks expected pubkey record (`tls.rs:120-136`).
+  - Inbound verification rejects unknown clients unless in expected table:
+    - `tls.rs:142-178` (`PeerClientCertVerifier::verify_client_cert`) derives agent id from cert pubkey (`tls.rs:153-158`) and checks `expected_pubkeys` (`tls.rs:160-175`).
+  - Transport uses the peer's `agent_id` as the QUIC SNI:
+    - `quic_transport.rs:154-161` (`endpoint.connect(peer.addr, &peer.agent_id)`).
 
-### Strengths
+- **Handshake and authorization gates**
+  - "Hello must be first" is enforced for both uni and bidi:
+    - Uni: dropped pre-hello (`connection.rs:79-86`).
+    - Bidi: pre-hello non-hello gets `error(not_authorized)` (`connection.rs:164-182`).
 
-- **Agent ID format matches spec (`ed25519.` + 32 hex chars)**
-  - Derivation is `SHA-256(pubkey)`, first 16 bytes, hex-encoded, prefixed with `ed25519.`: `identity.rs:137-141`.
-  - TLS derives the same way: `tls.rs:208-212`.
-  - Envelope validation enforces `ed25519.` prefix + 32 hex chars: `envelope.rs:101-106`.
+- **Replay protection is bounded and applied on inbound paths**
+  - Uni replay drop (`connection.rs:88-93`).
+  - Bidi replay drop for fire-and-forget (`connection.rs:204-210`) and request kinds (`connection.rs:232-237`).
+  - Replay cache is TTL + max entries (`replay_cache.rs:11-15`, `replay_cache.rs:85-119`), with explicit eviction (`replay_cache.rs:106-117`).
 
-- **Wire format is FIN-delimited JSON (no length prefix, one message per QUIC stream)**
-  - Unidirectional send writes raw JSON bytes and finishes the stream: `framing.rs:8-26` (`write_all` at `framing.rs:60-63`, `finish` at `framing.rs:22-25`).
-  - Request/response uses a bidirectional stream, finishes send side, reads to FIN: `framing.rs:29-53` (`finish` at `framing.rs:43-46`, `read_to_end` at `framing.rs:68-72`).
-  - `wire.rs` encodes/decodes via `serde_json` without length prefix: `wire.rs:9-23`.
+- **Resource/DoS controls**
+  - Max message size enforced at framing send and read limits:
+    - `framing.rs:13-15`, `framing.rs:34-36`, `framing.rs:67-72` (read bounded by `MAX_MESSAGE_SIZE_USIZE`).
+  - Connection caps:
+    - Inbound accept loop uses a semaphore + hard reject on limit (`quic_transport.rs:279-288`).
+  - IPC controls:
+    - Bounded per-client queue (`server.rs:16-18`, `server.rs:148-150`), max clients (`server.rs:136-145`), and line-length limit (`server.rs:190-202`).
 
-- **All 13 message kinds present with typed payload structs**
-  - `MessageKind` enum covers all required/optional kinds plus `#[serde(other)] Unknown` for forward compatibility: `kind.rs:5-23`.
-  - Typed payload structs for all 13 kinds with correct serde derives: `payloads.rs:63-176`.
+- **Secrets / permissions**
+  - Private key file permission is explicitly `0600` (`identity.rs:50-56`) and config root dir `0700` (`config.rs:41-54`); socket `0600` (`server.rs:52-61`).
 
-- **Stream mapping and protocol-violation handling match spec §10**
-  - Unknown kind on unidirectional: silently dropped (`connection.rs:78-80`).
-  - Unknown kind on bidirectional: returns `error(unknown_kind)` (`connection.rs:170-185`).
-  - Request kind on unidirectional: dropped (`connection.rs:80-81`).
-  - Fire-and-forget on bidirectional: forwarded, send side closed without responding (`connection.rs:186-188`).
-  - Pre-hello unidirectional: dropped (`connection.rs:76-78`).
-  - Pre-hello bidirectional: `error(not_authorized)` without closing connection (`connection.rs:154-169`).
-  - Version mismatch: returns `error(incompatible_version)` (`handshake.rs:14-29`), then connection is closed via `break` in `connection.rs:151-152`.
-  - Agent ID mismatch on unidirectional: checked (`connection.rs:76`).
-  - Duplicate message ID (replay): bounded UUID cache with 300s TTL and 100K cap (`daemon/replay_cache.rs:84-118`, `daemon/mod.rs:129-132`).
-  - Oversized messages: enforced at read via `read_to_end(MAX_MESSAGE_SIZE_USIZE)` (`framing.rs:68-72`) and at write (`framing.rs:56-58`).
-  - Malformed JSON: dropped on both uni and bidi (`connection.rs:88-90`, `connection.rs:109-112`).
+### Deductions (issues/risks)
 
-- **Connection lifecycle matches spec**
-  - Lower agent_id initiates: `daemon/command_handler.rs:86-106`, `daemon/reconnect.rs:47-51`.
-  - Keepalive 15s / idle timeout 60s: `transport/mod.rs:11-14`, applied in `tls.rs:46-51`.
-  - Handshake deadline 5s for unauthenticated connections: `connection.rs:13`, `connection.rs:57-69`.
-  - Reconnect with exponential backoff capped at 30s: `daemon/reconnect.rs:15-28`.
-  - QUIC stream caps: 8 bidi, 16 uni: `tls.rs:47-48`.
-  - Read timeout 10s on inbound streams: `connection.rs:14`, used at `connection.rs:73-98` and `connection.rs:106-122`.
+1) **Hello envelope is not run through general `Envelope::validate()` before being accepted/broadcast** (−1)
+   - In `connection.rs`, when a bidi `Hello` arrives, identity is checked (`connection.rs:134-147`) and on success the connection is authenticated and the hello request is broadcast (`connection.rs:154-161`) **without** `request.validate()` being called for the hello itself.
+   - `validate_hello_identity()` only checks `hello.from` matches derived agent id and an *optional* expected key consistency check (`handshake.rs:118-140`), but does not validate:
+     - `hello.to` format / correctness,
+     - `hello.ts != 0`,
+     - general envelope invariants in `Envelope::validate()` (`envelope.rs:170-180`).
+   - Practical impact: a peer can send a structurally "authenticated" hello with malformed `to` or `ts=0` that will enter the inbound broadcast stream and IPC.
 
-- **Discovery trait with correct implementations**
-  - `Discovery` trait + `StaticDiscovery` + `MdnsDiscovery`: `discovery.rs:27-63`, `discovery.rs:68-161`.
-  - Service type `_axon._udp.local` matches spec §2: `discovery.rs:13`.
-  - Discovered peer cap (1024): `peer_table.rs:83`.
-  - Stale peer removal clears expected pubkeys: `daemon/mod.rs:233-239`.
+2) **IPC socket cleanup removes any pre-existing filesystem entry at `socket_path` without validating it is a socket** (−1)
+   - `IpcServer::bind()` unconditionally `remove_file()` if `socket_path.exists()` (`server.rs:36-43`).
+   - In a correctly permissioned `~/.axon` root (`config.rs:47-52`) this is likely safe in practice; however if `axon_root` were placed in a less trusted directory (or permissions drift), this becomes a footgun (e.g., symlink/hardlink attacks) because it will delete whatever file is there.
 
-- **IPC matches spec (Unix socket, line-delimited JSON, bounded queues)**
-  - Stale socket cleanup on startup: `server.rs:36-43`.
-  - Socket permissions 0600: `server.rs:52-61`.
-  - Per-client bounded outbound queue (1024): `server.rs:16-18`, `server.rs:148-150`.
-  - Max IPC line length (256KB): `server.rs:17-18`, `server.rs:189-202`.
-  - Commands: `send`, `peers`, `status`: `protocol.rs:11-24`.
-  - Max connection semaphore: `quic_transport.rs:239-248`.
-
-- **CLI commands match spec and beyond**
-  - All spec-required: `daemon`, `send`, `delegate`, `notify`, `peers`, `status`, `identity`: `main.rs:24-65`.
-  - Additional: `ping`, `discover`, `cancel`, `examples`: `main.rs:45-65`.
-
-- **Daemon lifecycle implements startup sequence, runtime routing, and graceful shutdown per spec §8**
-  - Startup: `daemon/mod.rs:47-113`.
-  - Runtime event loop: `daemon/mod.rs:204-259`.
-  - Shutdown: close connections, save state, remove socket: `daemon/mod.rs:261-280`.
-
-- **Config file support for static peers and port**: `config.rs:56-98`.
-- **Max message size 64KB**: `wire.rs:7`.
-
-### Deductions (-2)
-
-- **Bidirectional fire-and-forget messages forwarded without envelope validation** (-1)
-  - `connection.rs:186-188` forwards `request` and finishes without calling `request.validate()`.
-  - Contrast: unidirectional path validates (`connection.rs:82-84`); bidirectional request-response path validates (`connection.rs:189-192`).
-
-- **Transport timing knobs (keepalive, idle timeout) are constants, not configurable** (-1)
-  - `KEEPALIVE_INTERVAL` / `IDLE_TIMEOUT` are compile-time constants: `transport/mod.rs:11-14`, used in `tls.rs:46-51`.
-  - No configuration surface in `config.rs:56-91`. Spec says these are RECOMMENDED values and implementations SHOULD make them configurable.
+3) **`Envelope::payload_value()` silently converts JSON parse errors into `Value::Null`** (−1)
+   - `envelope.rs:124-127` uses `unwrap_or(Value::Null)`.
+   - While convenient, this is a hardening concern because it can mask malformed payloads and lead to "default behavior" paths instead of explicit rejection/logging at the decision point (especially for request handling / auto-response decisions that inspect payload fields).
 
 ---
 
-## 2. Correctness (9/10)
+## 2) Test Quality & Coverage — **16 / 18** (−2)
 
-### Strengths
+The project has unusually comprehensive testing for a network daemon: unit tests, integration tests, spec compliance, adversarial tests, property-based testing, fuzz targets, and benches.
 
-- All 207 tests pass with clean build, zero warnings.
-- Correct QUIC stream usage: request path opens bidi, sends, finishes, reads with timeout (`framing.rs:38-53`); unidirectional path opens uni, writes, finishes (`framing.rs:17-26`).
-- Hello authentication correctly ties `hello.from` to certificate pubkey: `handshake.rs:100-106`.
-- Connection loop has clear shutdown paths: cancellation exits (`connection.rs:60-64`), handshake deadline closes (`connection.rs:65-69`), connection tracking cleanup removes from map (`connection.rs:207-209`).
-- Daemon startup/shutdown path is structured and consistent (`daemon/mod.rs:47-113`, `daemon/mod.rs:261-280`).
-- Integration tests exercise full daemon lifecycle including reconnect (`tests/daemon_lifecycle.rs:105-246`).
+### What's working well
 
-### Deductions (-1)
+- **Spec compliance suite is explicit and broad**
+  - `tests/spec_compliance.rs` asserts envelope schema shape, payload round-trips, unknown kind handling, and violation behaviors (e.g., `spec_compliance.rs:94-110`, `spec_compliance.rs:390-404`, `spec_compliance.rs:467-478`).
+- **Adversarial tests cover concurrency, malformed inputs, corruption resilience**
+  - IPC flood (`tests/adversarial.rs:37-120`), peer table contention (`tests/adversarial.rs:126-196`), malformed IPC handling, persistence corruption tests, and wire decode edge cases.
+- **Integration tests cover cross-module flows**
+  - QUIC transport handshake/query flows and hello-first invariant (`tests/integration.rs:321-363`), uni fire-and-forget delivery (`tests/integration.rs:404-456`).
+- **Fuzz targets are first-class in the build tooling**
+  - Makefile runs 6 fuzz targets (`Makefile:37-46`).
 
-- Validation gap on bidi fire-and-forget: invalid envelopes can reach IPC subscribers (`connection.rs:186-188`).
+### Deductions
 
----
+1) **Long-running daemon lifecycle tests are `#[ignore]` and therefore not exercised by default CI (`make verify` / `cargo test`)** (−1)
+   - `tests/daemon_lifecycle.rs:7-8` indicates lifecycle e2e tests are ignored.
+   - This is reasonable for local workflows, but per rubric it reduces regression detection for the most operationally critical behaviors (shutdown, reconnection, initiator rule).
 
-## 3. Code Quality (8/10)
-
-### Strengths
-
-- Clear module boundaries matching spec architecture (identity/message/config/discovery/transport/ipc/daemon).
-- Forward-compatible envelope payload handling: `payload` stored as `Box<RawValue>` to avoid unnecessary parse/serialize and preserve unknown fields (`envelope.rs:21-25`).
-- Consistent `anyhow::Context` usage for error chains throughout.
-- Thoughtful handling of rustls verifier needing sync locks with inline comments explaining why (`transport/tls.rs:120-125`).
-- Replay cache is well-implemented: bounded + TTL + ordered eviction (`daemon/replay_cache.rs:84-118`).
-- Idiomatic `tokio::select!` loops with cancellation tokens (`connection.rs:59-204`, `daemon/mod.rs:205-259`).
-
-### Deductions (-2)
-
-- Some "stringly-typed" payload construction despite having typed payload structs — error/hello responses built via `json!()` rather than using `ErrorPayload`/`HelloPayload` structs: `handshake.rs:15-28`, `connection.rs:127-136`, `connection.rs:155-164`, `connection.rs:171-180` (-1).
-- `AgentId` is a type alias (`String`) rather than a newtype, missing compile-time distinction: `envelope.rs:12` (-1).
+2) **Some tests rely on real time sleeps rather than deterministic signaling** (−1)
+   - Example patterns: `tokio::time::sleep(...)` used for readiness/ordering in the daemon lifecycle tests (`daemon_lifecycle.rs:82-83`, `daemon_lifecycle.rs:196-198`, etc.) and in some adversarial/integration flows (e.g., client count stabilization).
+   - This is not necessarily flaky today, but it's a common source of eventual CI flakes under load.
 
 ---
 
-## 4. Test Coverage (9/10)
+## 3) Performance & Efficiency — **12 / 14** (−2)
 
-### Strengths
+Core hot paths are reasonably efficient (bounded reads, RawValue payload preservation, avoided double parses where possible), and concurrency is bounded. No major performance footguns are apparent.
 
-- 207 tests across 4 suites: unit (136), integration (22), spec compliance (46), and E2E (3).
-- Full daemon lifecycle + reconnect tests (`tests/daemon_lifecycle.rs:105-246`).
-- Broad integration coverage across subsystems (`tests/integration.rs`).
-- Serde round-trips, wire format, typed payloads, and spec-example deserialization covered (`tests/spec_compliance.rs`).
-- Spec compliance tests verify agent ID format with `ed25519.` prefix and 40-char length (`tests/spec_compliance.rs:671-681`).
-- Property-based tests via proptest in 7 modules; 6 fuzz targets (per AGENTS.md).
-- IPC tests cover multi-client broadcast, disconnect isolation, invalid commands, oversized lines (`tests/integration.rs:548-787`).
+### What's working well
 
-### Deductions (-1)
+- **No repeated JSON parsing on the wire payload by default**
+  - Envelope stores payload as `RawValue` (`envelope.rs:101-102`) and round-trips preserve raw JSON (`spec_compliance.rs` round-trip assertions).
+- **Async correctness in most operational paths**
+  - Persistence writes use `tokio::fs` (`config.rs:138-151`, `replay_cache.rs:79-82`), reducing reactor blocking for periodic saves.
+- **Bounded concurrency/backpressure**
+  - Inbound connections are bounded via semaphore (`quic_transport.rs:279-312`).
+  - IPC output queues are bounded and drop-on-overflow using `try_send` (`server.rs:76-83`, `server.rs:85-96`).
 
-- Limited explicit tests for all 8 protocol violation types from updated spec §10 — most violations are covered by transport-level behavior but not exercised by dedicated tests.
+### Deductions
 
----
+1) **Pretty-printed JSON for persistence adds unnecessary CPU/IO overhead** (−1)
+   - `serde_json::to_vec_pretty` is used for replay cache saves (`replay_cache.rs:78-82`) and known peer saves (`config.rs:147-151`).
+   - These aren't the hottest paths, but they *are periodic* (daemon saves known peers every 60s: `mod.rs:200-268`) and can become noticeable on slower storage / high peer counts.
 
-## 5. Security (9/10)
-
-### Strengths
-
-- Filesystem permissions: private key chmod 600 (`identity.rs:50-56`), root dir chmod 700 (`config.rs:40-52`), socket chmod 600 (`ipc/server.rs:54-61`).
-- mTLS pinning: reject unknown peers unless discovery/config has pubkey (`transport/tls.rs:120-136`, `transport/tls.rs:170-175`).
-- Early data (0-RTT) disabled at both client and server (`transport/tls.rs:40-41`, `transport/tls.rs:64-65`).
-- Replay cache bounded + TTL (`daemon/replay_cache.rs`).
-- IPC bounded per-client outbound queue with drop on full (`ipc/server.rs:16-18`, `ipc/server.rs:79-82`).
-- Connection-level DoS mitigation via max connection semaphore (`quic_transport.rs:239-248`) that tracks ALL inbound connections (including unauthenticated ones), combined with 5s handshake deadline.
-- Stale peer removal also removes trust (expected_pubkeys): `daemon/mod.rs:237`.
-
-### Deductions (-1)
-
-- Blocking filesystem IO occurs inside async functions (minor availability risk under load): replay cache `save()` uses `std::fs::write` (`replay_cache.rs:79-81`), known peers persistence uses `std::fs::write` (`config.rs:127-130`) called from async daemon loop (`daemon/mod.rs:227-229`, `daemon/mod.rs:254-256`).
+2) **Potential avoidable cloning in inbound forwarding** (−1)
+   - In daemon inbound forwarder, an `Arc<Envelope>` is converted into an owned `Envelope` via `Arc::try_unwrap(...).unwrap_or_else(|arc| (*arc).clone())` (`mod.rs:149-150`).
+   - This is acceptable, but under high fanout it can lead to extra envelope clones; it's a small efficiency hit in a path that may run frequently.
 
 ---
 
-## 6. Concurrency & Async Design (8/10)
+## 4) Maintainability & Code Quality — **12 / 14** (−2)
 
-### Strengths
+The codebase is cleanly modular, consistent, and mostly uses typed structures rather than "stringly typed" JSON. Error handling is generally contextual and readable.
 
-- `CancellationToken` used end-to-end for structured shutdown (`daemon/mod.rs:74-76`, `transport/quic_transport.rs:30-31`).
-- Max connection semaphore for inbound connections with permit dropped after connection loop exits (`quic_transport.rs:239-268`).
-- Per-peer connect mutex prevents concurrent dial storms (`quic_transport.rs:101-115`).
-- Read timeouts on streams (`transport/connection.rs:14`).
-- IPC bounded per-client queue with drop-on-full semantics (`ipc/server.rs:16-18`).
-- Replay cache uses `tokio::sync::Mutex` (`daemon/replay_cache.rs`).
+### What's working well
 
-### Deductions (-2)
+- **Clear module boundaries and consistent patterns**
+  - Transport separation: TLS verifier (`tls.rs`), connection loop (`connection.rs`), framing (`framing.rs`), handshake helpers (`handshake.rs`), transport orchestration (`quic_transport.rs`).
+- **Typed payload structs and message kinds**
+  - `payloads.rs` provides structured payloads for hello/ping/query/etc. and typed enums (`payloads.rs:64-177`).
+  - `MessageKind` includes a forward-compat `Unknown` variant via `#[serde(other)]` (`kind.rs:21-23`).
+- **Invariant checks are centralized**
+  - Envelope invariants (`envelope.rs:170-189`).
+  - Connection hello gating and stream-type rules in one place (`connection.rs`).
 
-- Blocking file IO inside async context: `replay_cache.rs:79-81`, `config.rs:127-130`, used in async daemon loop at `daemon/mod.rs:254-256` (-1).
-- Mixed `std::sync` locks and async code increases risk of accidental blocking — `expected_pubkeys` uses `StdRwLock` (`quic_transport.rs:26-28`), accessed in async setters (`quic_transport.rs:77-87`). Justified by rustls sync callbacks (`tls.rs:120-124`, `tls.rs:159-163`) but easy to misuse (-1).
+### Deductions
 
----
+1) **Agent identity types are not used consistently across boundaries** (−1)
+   - `Envelope` uses `AgentId` newtype (`envelope.rs:12-23`), but much of transport and peer table uses raw `String` (`quic_transport.rs:34-46`, `peer_table.rs:31-39`).
+   - This weakens type-driven correctness for "load-bearing invariants" like agent id format and comparison rules.
 
-## 7. Error Handling (8/10)
-
-### Strengths
-
-- Instructive IPC send errors with remediation hints (`daemon/command_handler.rs:46-52`).
-- Malformed messages dropped without crashing (`connection.rs:88-90`, `connection.rs:109-112`).
-- Good contextual errors for config/IO (`config.rs:69-77`, `ipc/server.rs:36-43`).
-- TLS rejection errors are instructive: suggest adding peer to config.toml or ensuring mDNS discovery (`tls.rs:131-136`, `tls.rs:170-175`).
-- Hello version mismatch explains local vs peer supported versions (`quic_transport.rs:184-192`).
-- Hello rejection error includes actionable guidance (`quic_transport.rs:194-206`).
-- Clock validation at startup with instructive error (`daemon/mod.rs:65-72`).
-
-### Deductions (-2)
-
-- Some protocol violations are logged as warnings rather than truly "silently" dropped — operationally useful but may be noisy under adversarial conditions: `connection.rs:78-80`, `connection.rs:80-81` (-1).
-- Bidi invalid request is silently dropped without any response (`connection.rs:189-191`), which is spec-correct but can make debugging harder since the peer sees only a timeout (-1).
+2) **`payload_value()` error swallowing reduces auditability** (−1)
+   - As noted in Security: `envelope.rs:124-127` turning malformed payload JSON into `Null` can obscure root cause and produce surprising behavior in higher-level logic that inspects payload fields (e.g., `handshake.rs:143-150` checks `protocol_versions` array).
 
 ---
 
-## 8. Completeness (8/10)
+## 5) Operational Maturity — **8 / 10** (−2)
 
-### Strengths
+AXON behaves like a real daemon: structured shutdown, periodic persistence, reconnection with backoff, and basic counters/status via IPC.
 
-- All major subsystems present and wired: daemon orchestration, QUIC transport with mTLS, discovery (mDNS + static), peer table (caps + stale cleanup), IPC server + protocol, replay cache with persistence, CLI commands, reconnect with backoff.
-- Beyond-spec additions: replay cache persistence across restarts, `axon examples` command, configurable resource limits (`max_ipc_clients`, `max_connections`), clock validation, `axon cancel`/`axon ping`/`axon discover` CLI commands.
-- E2E tests verify full daemon lifecycle including reconnection after peer restart.
+### What's working well
 
-### Deductions (-2)
+- **Structured lifecycle and graceful shutdown**
+  - Cancellation-driven main loop and background tasks (`mod.rs:214-270`).
+  - Shutdown drains briefly, closes transport, persists state, cleans up socket (`mod.rs:272-292`).
+- **Configurability of key knobs**
+  - Connection limits, IPC client limits, keepalive/idle timeout, reconnect max backoff are configurable (`config.rs:57-110`) and applied (`mod.rs:104-114`, `mod.rs:256-262`).
+- **Reconnect behavior with backoff**
+  - Exponential backoff with cap (`reconnect.rs:23-28`, `reconnect.rs:89-100`) and initiator rule enforcement (`mod.rs:194-197`, `command_handler.rs:86-107`).
 
-- Replay protection is enforced at daemon layer only (`daemon/mod.rs:129-132`), not at transport layer — `connection.rs` forwards envelopes to subscribers before any replay check (`connection.rs:85-86`, `connection.rs:187-188`, `connection.rs:192`). If `QuicTransport` is used as a library without the daemon, replay protection is absent (-1).
-- `auto_response()` provides canned responses for all bidi request kinds (`handshake.rs:11-93`), meaning the transport layer responds to queries/delegates instead of routing to IPC clients for real application-level responses. This limits the system to a message router with stub responses rather than full application integration (-1).
+### Deductions
 
----
+1) **Some warning-level logs could be spammy under adversarial conditions and lack peer identifiers** (−1)
+   - Example: repeated `warn!("uni stream read timed out")` (`connection.rs:104-106`) and `warn!("bidi stream read timed out")` (`connection.rs:127-129`) without tagging peer/agent id.
+   - This can become a log-volume DoS vector and reduces operational debugging value.
 
-## 9. Production Readiness (8/10)
-
-### Strengths
-
-- Logging via `tracing` + `EnvFilter` (`main.rs:350-353`).
-- Config file support with defaults (`config.rs:56-91`).
-- Known peers persistence on events + periodic (`daemon/mod.rs:227-229`, `daemon/mod.rs:254-256`).
-- Graceful shutdown: close connections, save state, remove socket (`daemon/mod.rs:261-280`).
-- Reconnect with exponential backoff capped at 30s (`daemon/reconnect.rs:15-28`).
-- SIGTERM/SIGINT both handled for systemd/launchd compatibility (`main.rs:80-89`).
-- Replay cache persisted across restarts (`daemon/replay_cache.rs:36-59`, `daemon/mod.rs:275-277`).
-
-### Deductions (-2)
-
-- Some transport constants (keepalive, idle timeout, reconnect backoff parameters) not configurable via config.toml — reduces operational flexibility (-1).
-- Blocking persistence in runtime loop: `std::fs::write` in async context for known peers and replay cache saves (-1).
+2) **Some important timeouts are hard-coded rather than configurable** (−1)
+   - `HANDSHAKE_TIMEOUT` (5s) and `INBOUND_READ_TIMEOUT` (10s) are constants (`connection.rs:12-13`).
+   - This is not inherently wrong, but in production environments these often need tuning (slow systems, high latency links, mobile networks, etc.).
 
 ---
 
-## Highest-Leverage Improvements
+## 6) Adversarial Robustness — **10 / 10** (−0)
 
-1. **Validate envelopes for bidirectional fire-and-forget messages before forwarding.** (~S effort)
-   - Add `request.validate()` gating to the `!expects_response()` branch in `connection.rs:186-188` to match uni/bidi validation behavior.
+The implementation demonstrates strong robustness practices:
 
-2. **Make transport timing knobs configurable (keepalive interval, idle timeout, reconnect backoff).** (~M effort)
-   - Extend `Config` (`config.rs:56-66`) to include optional fields; thread them into `tls.rs:46-51` and `reconnect.rs:15-28`.
+- Dedicated adversarial suite (`tests/adversarial.rs`) covering concurrent IPC flood, malformed input, contention, disconnects, and file corruption resilience.
+- Wire-level resilience assertions (decode errors, wrong schema types).
+- Fuzz targets for core parsing surfaces are integrated into the Makefile (`Makefile:37-46`), and replay cache is bounded and TTL-scavenged (`replay_cache.rs:85-119`).
+- Protocol violation handling is explicit: uni drops and bidi returns typed errors (`connection.rs:79-253`).
 
-3. **Move runtime persistence off the async reactor.** (~M effort)
-   - Replace `std::fs::write` in async contexts with `tokio::fs::write` or `tokio::task::spawn_blocking`: `daemon/mod.rs:254-256`, `replay_cache.rs:79-81`, `config.rs:127-130`.
+No concrete robustness regressions were identified from the provided code.
 
-4. **Use typed payload structs instead of `json!()` for protocol responses.** (~S effort)
-   - Replace `json!()` calls in `handshake.rs` and `connection.rs` with `ErrorPayload`, `HelloPayload`, etc. for compile-time correctness.
+---
+
+## 7) Contribution Hygiene — **9 / 10** (−1)
+
+Project hygiene is strong and matches expectations for a mature Rust repository.
+
+### What's working well
+
+- **One-command local verification**
+  - `make verify` runs fmt + clippy(warnings as errors) + full tests (`Makefile:79-81`).
+- **Fuzz/coverage/mutation tooling present**
+  - Fuzz targets runnable via Makefile (`Makefile:37-52`).
+  - Coverage (`Makefile:54-64`).
+  - Mutation testing via `cargo mutants` (`Makefile:65-72`).
+
+### Deduction
+
+1) **End-to-end daemon lifecycle coverage is not part of the default verify path** (−1)
+   - `make verify` does not run `test-e2e` (`Makefile:79-81` vs `Makefile:15-17`), and the e2e tests are `#[ignore]` (`daemon_lifecycle.rs:7-8`).
+   - This is an explicit trade-off; still, it weakens the "PR contains the whole change, CI-driven" posture for daemon lifecycle regressions.
+
+---
+
+## 8) Interop & Spec Drift Control — **4 / 6** (−2)
+
+There is substantial investment in spec compliance testing, unknown-field tolerance, and wire invariants, but there are a couple of drift risks worth flagging.
+
+### What's working well
+
+- **Forward compatibility**
+  - Unknown envelope fields ignored (`tests/spec_compliance.rs:94-110`), and `MessageKind::Unknown` supports future kinds (`kind.rs:21-23`, `spec_compliance.rs:390-404`).
+- **Wire invariants tested**
+  - Max size rejection via encode test (`spec_compliance.rs:467-478`).
+  - Stream-type rules are encoded in transport (`connection.rs:81-85`, `connection.rs:182-200`) and classification tests exist (`spec_compliance.rs:406-444`).
+
+### Deductions
+
+1) **Spec compliance tests use agent_id strings without the `ed25519.` prefix in some helpers** (−1)
+   - `tests/spec_compliance.rs:13-19` returns `"a1b2..."` / `"f6e5..."` without prefix, while the actual daemon/identity derives IDs in `"ed25519.<32hex>"` form (`tls.rs:208-212`, `identity.rs:137-141`) and `Envelope::validate()` enforces this format (`envelope.rs:174-188`).
+   - This mismatch increases the risk of spec drift: tests may pass while not accurately representing real-world IDs and validation behavior.
+
+2) **`wire::decode()` does not enforce the 64KiB max size invariant by itself** (−1)
+   - `wire.rs:20-23` decodes any slice; size checks only exist in `encode()` (`wire.rs:9-17`) and framing read limits (`framing.rs:67-72`).
+   - This is likely fine given how the code uses it today, but it's an interop/spec-control risk because `decode()` is a public entrypoint and may be used elsewhere without a size guard.
+
+---
+
+## Summary Table
+
+| Category | Max | agent/codex | agent/amp | agent/claude | agent/gemini |
+|---|---:|---:|---:|---:|---:|
+| 1. Security & Hardening | 18 |  | **15** |  |  |
+| 2. Test Quality & Coverage | 18 |  | **16** |  |  |
+| 3. Performance & Efficiency | 14 |  | **12** |  |  |
+| 4. Maintainability & Code Quality | 14 |  | **12** |  |  |
+| 5. Operational Maturity | 10 |  | **8** |  |  |
+| 6. Adversarial Robustness | 10 |  | **10** |  |  |
+| 7. Contribution Hygiene | 10 |  | **9** |  |  |
+| 8. Interop & Spec Drift Control | 6 |  | **4** |  |  |
+| **Total** | **100** |  | **86 / 100** |  |  |

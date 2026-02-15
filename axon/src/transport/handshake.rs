@@ -24,7 +24,10 @@ pub fn auto_response(request: &Envelope, local_agent_id: &str) -> Envelope {
                         message: format!(
                             "no mutually supported protocol version. This agent supports: [1]. \
                              Received: {:?}",
-                            request.payload_value().get("protocol_versions")
+                            request
+                                .payload_value()
+                                .unwrap_or_default()
+                                .get("protocol_versions")
                         ),
                         retryable: false,
                     })
@@ -141,7 +144,7 @@ pub(crate) fn validate_hello_identity(
 }
 
 pub(crate) fn hello_request_supports_protocol_v1(hello: &Envelope) -> bool {
-    let payload = hello.payload_value();
+    let payload = hello.payload_value().unwrap_or_default();
     payload
         .get("protocol_versions")
         .and_then(|v| v.as_array())

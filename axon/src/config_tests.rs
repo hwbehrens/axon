@@ -42,6 +42,8 @@ fn cli_override_takes_precedence() {
         keepalive_secs: None,
         idle_timeout_secs: None,
         reconnect_max_backoff_secs: None,
+        handshake_timeout_secs: None,
+        inbound_read_timeout_secs: None,
         peers: Vec::new(),
     };
     assert_eq!(cfg.effective_port(Some(9999)), 9999);
@@ -61,7 +63,7 @@ async fn known_peers_roundtrip() {
     let dir = tempdir().expect("temp dir");
     let path = dir.path().join("known.json");
     let peers = vec![KnownPeer {
-        agent_id: "ed25519.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+        agent_id: "ed25519.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
         addr: "127.0.0.1:7100".parse().expect("addr"),
         pubkey: "Zm9v".to_string(),
         last_seen_unix_ms: 123,
@@ -165,6 +167,8 @@ proptest! {
             keepalive_secs: None,
             idle_timeout_secs: None,
             reconnect_max_backoff_secs: None,
+            handshake_timeout_secs: None,
+            inbound_read_timeout_secs: None,
             peers: Vec::new(),
         };
         prop_assert_eq!(cfg.effective_port(Some(cli_port)), cli_port);
@@ -179,6 +183,8 @@ proptest! {
             keepalive_secs: None,
             idle_timeout_secs: None,
             reconnect_max_backoff_secs: None,
+            handshake_timeout_secs: None,
+            inbound_read_timeout_secs: None,
             peers: Vec::new(),
         };
         let expected = config_port.unwrap_or(7100);
@@ -195,7 +201,7 @@ async fn save_known_peers_creates_parent_dir() {
     let dir = tempdir().expect("temp dir");
     let path = dir.path().join("nested").join("subdir").join("known.json");
     let peers = vec![KnownPeer {
-        agent_id: "ed25519.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+        agent_id: "ed25519.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
         addr: "127.0.0.1:7100".parse().expect("addr"),
         pubkey: "Zm9v".to_string(),
         last_seen_unix_ms: 456,

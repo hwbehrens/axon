@@ -3,6 +3,9 @@ use std::time::{Duration, Instant};
 
 use tracing::warn;
 
+use tokio_util::sync::CancellationToken;
+
+use crate::message::AgentId;
 use crate::peer_table::{ConnectionStatus, PeerTable};
 use crate::transport::QuicTransport;
 
@@ -31,9 +34,10 @@ impl ReconnectState {
 pub(crate) async fn attempt_reconnects(
     peer_table: &PeerTable,
     transport: &QuicTransport,
-    local_agent_id: &str,
-    reconnect_state: &mut HashMap<String, ReconnectState>,
+    local_agent_id: &AgentId,
+    reconnect_state: &mut HashMap<AgentId, ReconnectState>,
     max_backoff: Duration,
+    cancel: &CancellationToken,
 ) {
     let now = Instant::now();
 
@@ -45,14 +49,14 @@ pub(crate) async fn attempt_reconnects(
             status = ConnectionStatus::Disconnected;
         }
 
-        if local_agent_id < peer.agent_id.as_str() && status != ConnectionStatus::Connected {
+        if local_agent_id < &peer.agent_id && status != ConnectionStatus::Connected {
             reconnect_state
                 .entry(peer.agent_id)
                 .or_insert_with(|| ReconnectState::immediate(now));
         }
     }
 
-    let attempt_ids: Vec<String> = reconnect_state
+    let attempt_ids: Vec<AgentId> = reconnect_state
         .iter()
         .filter_map(|(id, state)| {
             if state.next_attempt_at <= now {
@@ -64,6 +68,10 @@ pub(crate) async fn attempt_reconnects(
         .collect();
 
     for agent_id in attempt_ids {
+        if cancel.is_cancelled() {
+            break;
+        }
+
         let Some(peer) = peer_table.get(&agent_id).await else {
             reconnect_state.remove(&agent_id);
             continue;
@@ -80,7 +88,14 @@ pub(crate) async fn attempt_reconnects(
         peer_table
             .set_status(&agent_id, ConnectionStatus::Connecting)
             .await;
-        match transport.ensure_connection(&peer).await {
+        let connect_result = tokio::select! {
+            _ = cancel.cancelled() => {
+                peer_table.set_disconnected(&agent_id).await;
+                break;
+            }
+            result = transport.ensure_connection(&peer) => result,
+        };
+        match connect_result {
             Ok(conn) => {
                 let rtt = conn.rtt().as_secs_f64() * 1000.0;
                 peer_table.set_connected(&agent_id, Some(rtt)).await;

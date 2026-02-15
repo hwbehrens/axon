@@ -18,6 +18,12 @@ pub fn encode(envelope: &Envelope) -> Result<Vec<u8>> {
 }
 
 pub fn decode(data: &[u8]) -> Result<Envelope> {
+    if data.len() > MAX_MESSAGE_SIZE as usize {
+        bail!(
+            "message size {} exceeds maximum {MAX_MESSAGE_SIZE}",
+            data.len()
+        );
+    }
     let envelope: Envelope = serde_json::from_slice(data)?;
     Ok(envelope)
 }

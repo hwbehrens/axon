@@ -41,7 +41,7 @@ async fn broadcasts_inbound_to_multiple_clients() {
         json!({"topic":"meta.status", "data":{}}),
     );
     server
-        .broadcast_inbound(envelope)
+        .broadcast_inbound(&envelope)
         .await
         .expect("broadcast inbound");
 
@@ -154,7 +154,10 @@ async fn client_disconnect_does_not_affect_others() {
         MessageKind::Ping,
         json!({}),
     );
-    server.broadcast_inbound(envelope).await.expect("broadcast");
+    server
+        .broadcast_inbound(&envelope)
+        .await
+        .expect("broadcast");
 
     let mut line = String::new();
     let mut reader = BufReader::new(&mut client_b);

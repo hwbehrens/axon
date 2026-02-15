@@ -9,9 +9,6 @@ use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
-const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
-const INBOUND_READ_TIMEOUT: Duration = Duration::from_secs(10);
-
 use crate::message::{Envelope, ErrorCode, ErrorPayload, MessageKind};
 
 use super::framing::{read_framed, write_framed};
@@ -48,6 +45,8 @@ pub(crate) async fn run_connection(
     cancel: CancellationToken,
     replay_check: Option<ReplayCheckFn>,
     response_handler: Option<ResponseHandlerFn>,
+    handshake_timeout: Duration,
+    inbound_read_timeout: Duration,
 ) {
     let peer_cert_pubkey_b64 = match extract_peer_pubkey_base64_from_connection(&connection) {
         Ok(pubkey) => pubkey,
@@ -57,7 +56,7 @@ pub(crate) async fn run_connection(
         }
     };
 
-    let handshake_deadline = tokio::time::Instant::now() + HANDSHAKE_TIMEOUT;
+    let handshake_deadline = tokio::time::Instant::now() + handshake_timeout;
 
     loop {
         tokio::select! {
@@ -66,14 +65,14 @@ pub(crate) async fn run_connection(
                 break;
             }
             _ = tokio::time::sleep_until(handshake_deadline), if authenticated_peer_id.is_none() => {
-                warn!("closing connection: hello handshake not completed within {:?}", HANDSHAKE_TIMEOUT);
+                warn!("closing connection: hello handshake not completed within {:?}", handshake_timeout);
                 connection.close(0u32.into(), b"handshake timeout");
                 break;
             }
             uni = connection.accept_uni() => {
                 match uni {
                     Ok(mut recv) => {
-                        match timeout(INBOUND_READ_TIMEOUT, read_framed(&mut recv)).await {
+                        match timeout(inbound_read_timeout, read_framed(&mut recv)).await {
                             Ok(Ok(bytes)) => match serde_json::from_slice::<Envelope>(&bytes) {
                                 Ok(envelope) => {
                                     if authenticated_peer_id.as_deref() != Some(envelope.from.as_str()) {
@@ -99,10 +98,10 @@ pub(crate) async fn run_connection(
                                 }
                             },
                             Ok(Err(err)) => {
-                                warn!(error = %err, "failed reading uni stream");
+                                warn!(error = %err, peer = ?authenticated_peer_id, "failed reading uni stream");
                             }
                             Err(_) => {
-                                warn!("uni stream read timed out");
+                                warn!(peer = ?authenticated_peer_id, "uni stream read timed out");
                             }
                         }
                     }
@@ -112,7 +111,7 @@ pub(crate) async fn run_connection(
             bi = connection.accept_bi() => {
                 match bi {
                     Ok((mut send, mut recv)) => {
-                        let request = match timeout(INBOUND_READ_TIMEOUT, read_framed(&mut recv)).await {
+                        let request = match timeout(inbound_read_timeout, read_framed(&mut recv)).await {
                             Ok(Ok(bytes)) => match serde_json::from_slice::<Envelope>(&bytes) {
                                 Ok(r) => r,
                                 Err(err) => {
@@ -121,18 +120,34 @@ pub(crate) async fn run_connection(
                                 }
                             },
                             Ok(Err(err)) => {
-                                warn!(error = %err, "failed reading bidi stream");
+                                warn!(error = %err, peer = ?authenticated_peer_id, "failed reading bidi stream");
                                 continue;
                             }
                             Err(_) => {
-                                warn!("bidi stream read timed out");
+                                warn!(peer = ?authenticated_peer_id, "bidi stream read timed out");
                                 continue;
                             }
                         };
 
                         if request.kind == MessageKind::Hello {
                             let hello_resp = match validate_hello_identity(&request, &peer_cert_pubkey_b64, &expected_pubkeys) {
-                                Ok(()) => auto_response(&request, &local_agent_id),
+                                Ok(()) => {
+                                    if let Err(err) = request.validate() {
+                                        Envelope::response_to(
+                                            &request,
+                                            local_agent_id.clone(),
+                                            MessageKind::Error,
+                                            serde_json::to_value(ErrorPayload {
+                                                code: ErrorCode::InvalidEnvelope,
+                                                message: format!("hello envelope validation failed: {err}"),
+                                                retryable: false,
+                                            })
+                                            .unwrap(),
+                                        )
+                                    } else {
+                                        auto_response(&request, &local_agent_id)
+                                    }
+                                }
                                 Err(err) => Envelope::response_to(
                                     &request,
                                     local_agent_id.clone(),

@@ -6,7 +6,7 @@ use tracing::warn;
 
 use super::replay_cache::ReplayCache;
 use crate::ipc::{CommandEvent, DaemonReply, IpcCommand, IpcServer, PeerSummary};
-use crate::message::Envelope;
+use crate::message::{AgentId, Envelope};
 use crate::peer_table::{ConnectionStatus, PeerSource, PeerTable};
 use crate::transport::QuicTransport;
 
@@ -20,7 +20,7 @@ pub(crate) struct DaemonContext<'a> {
     pub(crate) ipc: &'a IpcServer,
     pub(crate) peer_table: &'a PeerTable,
     pub(crate) transport: &'a QuicTransport,
-    pub(crate) local_agent_id: &'a str,
+    pub(crate) local_agent_id: &'a AgentId,
     pub(crate) counters: &'a Counters,
     pub(crate) replay_cache: &'a ReplayCache,
     pub(crate) start: Instant,
@@ -85,7 +85,7 @@ pub(crate) async fn handle_command(cmd: CommandEvent, ctx: &DaemonContext<'_>) -
 
             // Initiator rule: lower agent_id initiates. If we are higher,
             // wait briefly for the peer to connect, then error if still absent.
-            if **local_agent_id > *to && !transport.has_connection(&to).await {
+            if local_agent_id.as_str() > to.as_str() && !transport.has_connection(&to).await {
                 // Wait briefly for the remote peer to initiate
                 tokio::time::sleep(Duration::from_secs(2)).await;
                 if !transport.has_connection(&to).await {
@@ -105,7 +105,7 @@ pub(crate) async fn handle_command(cmd: CommandEvent, ctx: &DaemonContext<'_>) -
                 }
             }
 
-            let mut envelope = Envelope::new(local_agent_id.to_string(), to.clone(), kind, payload);
+            let mut envelope = Envelope::new((*local_agent_id).clone(), to.clone(), kind, payload);
             envelope.ref_id = ref_id;
 
             if let Err(err) = envelope.validate() {
@@ -139,7 +139,7 @@ pub(crate) async fn handle_command(cmd: CommandEvent, ctx: &DaemonContext<'_>) -
                             warn!(msg_id = %response_envelope.id, "dropping replayed response");
                         } else {
                             counters.received.fetch_add(1, Ordering::Relaxed);
-                            ipc.broadcast_inbound(response_envelope).await?;
+                            ipc.broadcast_inbound(&response_envelope).await?;
                         }
                     }
                 }
@@ -162,7 +162,7 @@ pub(crate) async fn handle_command(cmd: CommandEvent, ctx: &DaemonContext<'_>) -
                 .await
                 .into_iter()
                 .map(|p| PeerSummary {
-                    id: p.agent_id,
+                    id: p.agent_id.to_string(),
                     addr: p.addr.to_string(),
                     status: status_str(&p.status).to_string(),
                     rtt_ms: p.rtt_ms,

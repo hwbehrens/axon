@@ -53,6 +53,12 @@ impl std::ops::Deref for AgentId {
     }
 }
 
+impl std::borrow::Borrow<str> for AgentId {
+    fn borrow(&self) -> &str {
+        &self.0
+    }
+}
+
 impl PartialEq<str> for AgentId {
     fn eq(&self, other: &str) -> bool {
         self.0 == other
@@ -122,8 +128,8 @@ impl Envelope {
     }
 
     /// Parse the payload into a serde_json::Value (for inspection).
-    pub fn payload_value(&self) -> Value {
-        serde_json::from_str(self.payload.get()).unwrap_or(Value::Null)
+    pub fn payload_value(&self) -> Result<Value> {
+        Ok(serde_json::from_str(self.payload.get())?)
     }
 
     /// Parse the payload into a typed struct.

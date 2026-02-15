@@ -1,0 +1,27 @@
+name: pr-score
+
+on:
+  pull_request:
+    branches: [main]
+
+jobs:
+  check-score:
+    name: Self-assessment score
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check for self-assessment score
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          if echo "$PR_BODY" | grep -qP '\*\*Score:\s*\d+\s*/\s*100\*\*'; then
+            score=$(echo "$PR_BODY" | grep -oP '\*\*Score:\s*\K\d+')
+            echo "✅ Self-assessment score: $score/100"
+            if [ "$score" -lt 70 ]; then
+              echo "⚠️  Score below 70 — please review RUBRIC.md and address gaps before requesting review."
+              exit 1
+            fi
+          else
+            echo "❌ No self-assessment score found in PR body."
+            echo "Please add a score line: **Score: NN/100** (see RUBRIC.md)"
+            exit 1
+          fi

@@ -9,18 +9,19 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
 use crate::config::StaticPeerConfig;
+use crate::message::AgentId;
 
 pub const SERVICE_TYPE: &str = "_axon._udp.local.";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PeerEvent {
     Discovered {
-        agent_id: String,
+        agent_id: AgentId,
         addr: SocketAddr,
         pubkey: String,
     },
     Lost {
-        agent_id: String,
+        agent_id: AgentId,
     },
 }
 
@@ -66,13 +67,13 @@ impl Discovery for StaticDiscovery {
 // ---------------------------------------------------------------------------
 
 pub struct MdnsDiscovery {
-    local_agent_id: String,
+    local_agent_id: AgentId,
     local_pubkey: String,
     port: u16,
 }
 
 impl MdnsDiscovery {
-    pub fn new(local_agent_id: String, local_pubkey: String, port: u16) -> Self {
+    pub fn new(local_agent_id: AgentId, local_pubkey: String, port: u16) -> Self {
         Self {
             local_agent_id,
             local_pubkey,
@@ -111,7 +112,7 @@ impl Discovery for MdnsDiscovery {
             .browse(SERVICE_TYPE)
             .context("failed to start mDNS browse")?;
 
-        let mut fullname_to_agent_id = HashMap::<String, String>::new();
+        let mut fullname_to_agent_id = HashMap::<String, AgentId>::new();
 
         loop {
             tokio::select! {
@@ -163,7 +164,7 @@ impl Discovery for MdnsDiscovery {
 fn parse_resolved_service(
     local_agent_id: &str,
     info: &ServiceInfo,
-) -> Result<Option<(PeerEvent, String, String)>> {
+) -> Result<Option<(PeerEvent, String, AgentId)>> {
     let Some(agent_id) = info.get_property_val_str("agent_id") else {
         return Ok(None);
     };
@@ -180,17 +181,14 @@ fn parse_resolved_service(
     };
 
     let addr = SocketAddr::new(ip, info.get_port());
+    let agent_id = AgentId::from(agent_id);
     let event = PeerEvent::Discovered {
-        agent_id: agent_id.to_string(),
+        agent_id: agent_id.clone(),
         addr,
         pubkey: pubkey.to_string(),
     };
 
-    Ok(Some((
-        event,
-        info.get_fullname().to_string(),
-        agent_id.to_string(),
-    )))
+    Ok(Some((event, info.get_fullname().to_string(), agent_id)))
 }
 
 fn preferred_ip(info: &ServiceInfo) -> Option<IpAddr> {
@@ -221,12 +219,12 @@ mod tests {
     async fn static_discovery_emits_all_peers() {
         let peers = vec![
             StaticPeerConfig {
-                agent_id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+                agent_id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
                 addr: "127.0.0.1:7100".parse().expect("addr"),
                 pubkey: "Zm9v".to_string(),
             },
             StaticPeerConfig {
-                agent_id: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string(),
+                agent_id: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
                 addr: "127.0.0.1:7101".parse().expect("addr"),
                 pubkey: "YmFy".to_string(),
             },
@@ -260,7 +258,7 @@ mod tests {
     #[tokio::test]
     async fn static_discovery_stays_alive() {
         let peers = vec![StaticPeerConfig {
-            agent_id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+            agent_id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
             addr: "127.0.0.1:7100".parse().expect("addr"),
             pubkey: "Zm9v".to_string(),
         }];
@@ -372,19 +370,19 @@ mod tests {
     #[test]
     fn peer_event_equality() {
         let a = PeerEvent::Discovered {
-            agent_id: "abc".to_string(),
+            agent_id: "abc".into(),
             addr: "10.0.0.1:7100".parse().unwrap(),
             pubkey: "key".to_string(),
         };
         let b = PeerEvent::Discovered {
-            agent_id: "abc".to_string(),
+            agent_id: "abc".into(),
             addr: "10.0.0.1:7100".parse().unwrap(),
             pubkey: "key".to_string(),
         };
         assert_eq!(a, b);
 
         let c = PeerEvent::Lost {
-            agent_id: "abc".to_string(),
+            agent_id: "abc".into(),
         };
         assert_ne!(a, c);
     }

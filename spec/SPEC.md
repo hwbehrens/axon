@@ -4,7 +4,7 @@ _Feb 14, 2026. Reference implementation in `axon/`._
 
 ## Overview
 
-AXON is a lightweight background daemon that enables secure, fast, point-to-point messaging between AI agents on a local network. Each agent's machine runs one daemon.
+AXON is a lightweight background daemon that enables secure, fast, point-to-point messaging between agents on a local network. Each agent's machine runs one daemon.
 
 ```
 OpenClaw ←→ [Unix Socket] ←→ AXON Daemon ←→ [QUIC/UDP] ←→ AXON Daemon ←→ [Unix Socket] ←→ OpenClaw

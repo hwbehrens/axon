@@ -114,6 +114,54 @@ axon discover <agent_id>
 axon examples    # prints a full annotated hello → discover → query → delegate flow
 ```
 
+## Configuration Reference
+
+All settings are optional. AXON uses sensible defaults; you only need `config.toml` to configure static peers or override defaults.
+
+### `config.toml`
+
+Located at `~/.axon/config.toml` (or `<axon_root>/config.toml`).
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `port` | `u16` | `7100` | QUIC listen port. CLI `--port` overrides this. |
+| `max_ipc_clients` | `usize` | `64` | Maximum simultaneous IPC client connections. |
+| `max_connections` | `usize` | `128` | Maximum simultaneous QUIC peer connections. |
+| `keepalive_secs` | `u64` | `15` | QUIC keepalive interval in seconds. |
+| `idle_timeout_secs` | `u64` | `60` | QUIC idle timeout in seconds. Connections with no traffic for this duration are closed. |
+| `reconnect_max_backoff_secs` | `u64` | `30` | Maximum backoff between reconnection attempts to unreachable peers. Backoff starts at 1s and doubles. |
+| `handshake_timeout_secs` | `u64` | `5` | Maximum time to wait for a hello handshake on a new inbound connection before closing it. |
+| `inbound_read_timeout_secs` | `u64` | `10` | Maximum time to wait for data on an inbound QUIC stream before timing out. |
+
+#### Static peers
+
+```toml
+[[peers]]
+agent_id = "ed25519.<hex>"
+addr = "10.0.0.5:7100"
+pubkey = "<base64-encoded-ed25519-public-key>"
+```
+
+### Internal constants
+
+These are compile-time constants and cannot be changed via configuration.
+
+| Constant | Value | Location | Description |
+|----------|-------|----------|-------------|
+| `PROTOCOL_VERSION` | `1` | `message/envelope.rs` | Wire protocol version included in every envelope. |
+| `MAX_MESSAGE_SIZE` | `65536` (64 KB) | `message/wire.rs` | Maximum encoded envelope size. Messages exceeding this are rejected. |
+| `REQUEST_TIMEOUT` | `30s` | `transport/mod.rs` | Timeout for bidirectional request/response exchanges (query, delegate, etc.). |
+| `STALE_TIMEOUT` | `60s` | `peer_table.rs` | Discovered (non-static, non-cached) peers with no activity for this duration are removed. |
+| `MAX_CLIENT_QUEUE` | `1024` | `ipc/server.rs` | Per-IPC-client outbound message queue depth. Messages are dropped if a client falls behind. |
+| `MAX_IPC_LINE_LENGTH` | `256 KB` | `ipc/server.rs` | Maximum length of a single IPC command line. |
+| Replay cache TTL | `300s` (5 min) | `daemon/mod.rs` | Duration for which message UUIDs are remembered to detect replays. |
+| Replay cache max entries | `100,000` | `daemon/mod.rs` | Maximum replay cache size. Oldest entries are evicted when exceeded. |
+| Save interval | `60s` | `daemon/mod.rs` | How often the daemon persists `known_peers.json` to disk. |
+| Stale cleanup interval | `5s` | `daemon/mod.rs` | How often the daemon checks for and removes stale discovered peers. |
+| Reconnect interval | `1s` | `daemon/mod.rs` | How often the daemon checks for peers needing reconnection. |
+| Initial reconnect backoff | `1s` | `daemon/reconnect.rs` | First reconnect attempt delay after a connection failure. Doubles up to `reconnect_max_backoff_secs`. |
+| Initiator-rule wait | `2s` | `daemon/command_handler.rs` | When the higher-ID daemon sends a message, it waits this long for the lower-ID peer to initiate a connection. |
+
 ## Documentation
 
 | Document | Description |
@@ -122,4 +170,5 @@ axon examples    # prints a full annotated hello → discover → query → dele
 | [`spec/MESSAGE_TYPES.md`](./spec/MESSAGE_TYPES.md) | All message kinds, payload schemas, stream mapping |
 | [`spec/WIRE_FORMAT.md`](./spec/WIRE_FORMAT.md) | Normative wire format for interoperable implementations |
 | [`CONTRIBUTING.md`](./CONTRIBUTING.md) | Development guide, module map, testing requirements |
-| [`evaluations/`](./evaluations/) | Agent evaluation rubrics and results (not part of the implementation) |
+| [`RUBRIC.md`](./RUBRIC.md) | Contribution scoring rubric (100 points across 8 categories) |
+| [`evaluations/`](./evaluations/) | Agent evaluation results (not part of the implementation) |

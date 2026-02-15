@@ -11,7 +11,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 use crate::identity::Identity;
-use crate::message::{Envelope, HelloPayload, MessageKind, hello_features};
+use crate::message::{AgentId, Envelope, HelloPayload, MessageKind, hello_features};
 use crate::peer_table::PeerRecord;
 
 use super::connection::run_connection;
@@ -31,7 +31,7 @@ pub type ResponseHandlerFn = Arc<
 #[derive(Clone)]
 pub struct QuicTransport {
     endpoint: quinn::Endpoint,
-    local_agent_id: String,
+    local_agent_id: AgentId,
     max_connections: usize,
     connections: Arc<RwLock<HashMap<String, quinn::Connection>>>,
     /// Per-peer lock to prevent concurrent connection attempts to the same peer.
@@ -49,6 +49,8 @@ pub struct QuicTransport {
     cancel: CancellationToken,
     replay_check: Option<ReplayCheckFn>,
     response_handler: Option<ResponseHandlerFn>,
+    handshake_timeout: Duration,
+    inbound_read_timeout: Duration,
 }
 
 impl QuicTransport {
@@ -66,6 +68,8 @@ impl QuicTransport {
             Duration::from_secs(60),
             None,
             None,
+            Duration::from_secs(5),
+            Duration::from_secs(10),
         )
         .await
     }
@@ -80,6 +84,8 @@ impl QuicTransport {
         idle_timeout: Duration,
         replay_check: Option<ReplayCheckFn>,
         response_handler: Option<ResponseHandlerFn>,
+        handshake_timeout: Duration,
+        inbound_read_timeout: Duration,
     ) -> Result<Self> {
         let cert = identity.make_quic_certificate()?;
         let expected_pubkeys = Arc::new(StdRwLock::new(HashMap::new()));
@@ -93,7 +99,7 @@ impl QuicTransport {
 
         let transport = Self {
             endpoint,
-            local_agent_id: identity.agent_id().to_string(),
+            local_agent_id: AgentId::from(identity.agent_id()),
             max_connections,
             connections: Arc::new(RwLock::new(HashMap::new())),
             connecting_locks: Arc::new(RwLock::new(HashMap::new())),
@@ -103,6 +109,8 @@ impl QuicTransport {
             cancel,
             replay_check,
             response_handler,
+            handshake_timeout,
+            inbound_read_timeout,
         };
         transport.spawn_accept_loop();
         Ok(transport)
@@ -129,10 +137,16 @@ impl QuicTransport {
     }
 
     pub async fn ensure_connection(&self, peer: &PeerRecord) -> Result<quinn::Connection> {
-        self.set_expected_peer(peer.agent_id.clone(), peer.pubkey.clone());
+        self.set_expected_peer(peer.agent_id.to_string(), peer.pubkey.clone());
 
         // Fast path: already connected.
-        if let Some(existing) = self.connections.read().await.get(&peer.agent_id).cloned() {
+        if let Some(existing) = self
+            .connections
+            .read()
+            .await
+            .get(peer.agent_id.as_str())
+            .cloned()
+        {
             return Ok(existing);
         }
 
@@ -140,14 +154,20 @@ impl QuicTransport {
         let peer_lock = {
             let mut locks = self.connecting_locks.write().await;
             locks
-                .entry(peer.agent_id.clone())
+                .entry(peer.agent_id.to_string())
                 .or_insert_with(|| Arc::new(Mutex::new(())))
                 .clone()
         };
         let _guard = peer_lock.lock().await;
 
         // Re-check after acquiring the lock — another task may have connected.
-        if let Some(existing) = self.connections.read().await.get(&peer.agent_id).cloned() {
+        if let Some(existing) = self
+            .connections
+            .read()
+            .await
+            .get(peer.agent_id.as_str())
+            .cloned()
+        {
             return Ok(existing);
         }
 
@@ -156,16 +176,17 @@ impl QuicTransport {
             .connect(peer.addr, &peer.agent_id)
             .with_context(|| format!("failed to begin QUIC connect to {}", peer.addr))?;
 
-        let connection = connecting
+        let connection = tokio::time::timeout(self.handshake_timeout, connecting)
             .await
+            .map_err(|_| anyhow!("QUIC connect to {} timed out", peer.addr))?
             .with_context(|| format!("QUIC handshake failed with {}", peer.addr))?;
 
         self.perform_hello(&connection, &peer.agent_id).await?;
-        self.spawn_connection_loop(connection.clone(), Some(peer.agent_id.clone()));
+        self.spawn_connection_loop(connection.clone(), Some(peer.agent_id.to_string()));
         self.connections
             .write()
             .await
-            .insert(peer.agent_id.clone(), connection.clone());
+            .insert(peer.agent_id.to_string(), connection.clone());
 
         Ok(connection)
     }
@@ -208,7 +229,7 @@ impl QuicTransport {
 
         let hello = Envelope::new(
             self.local_agent_id.clone(),
-            remote_agent_id.to_string(),
+            remote_agent_id,
             MessageKind::Hello,
             serde_json::to_value(hello_payload).context("failed to encode hello payload")?,
         );
@@ -216,7 +237,7 @@ impl QuicTransport {
         let response = send_request(connection, hello).await?;
         match response.kind {
             MessageKind::Hello => {
-                let payload = response.payload_value();
+                let payload = response.payload_value().unwrap_or_default();
                 let selected = payload.get("selected_version").and_then(|v| v.as_u64());
                 if selected != Some(1) {
                     return Err(anyhow!(
@@ -229,7 +250,7 @@ impl QuicTransport {
                 }
             }
             MessageKind::Error => {
-                let payload = response.payload_value();
+                let payload = response.payload_value().unwrap_or_default();
                 let code = payload
                     .get("code")
                     .and_then(|v| v.as_str())
@@ -264,6 +285,8 @@ impl QuicTransport {
         let inbound_semaphore = self.inbound_semaphore.clone();
         let replay_check = self.replay_check.clone();
         let response_handler = self.response_handler.clone();
+        let handshake_timeout = self.handshake_timeout;
+        let inbound_read_timeout = self.inbound_read_timeout;
 
         tokio::spawn(async move {
             loop {
@@ -298,7 +321,7 @@ impl QuicTransport {
                                 tokio::spawn(async move {
                                     run_connection(
                                         connection,
-                                        local_id,
+                                        local_id.to_string(),
                                         None,
                                         inbound_tx,
                                         connections,
@@ -306,6 +329,8 @@ impl QuicTransport {
                                         cancel,
                                         replay_check,
                                         response_handler,
+                                        handshake_timeout,
+                                        inbound_read_timeout,
                                     )
                                     .await;
                                     drop(permit);
@@ -331,11 +356,13 @@ impl QuicTransport {
         let cancel = self.cancel.clone();
         let replay_check = self.replay_check.clone();
         let response_handler = self.response_handler.clone();
+        let handshake_timeout = self.handshake_timeout;
+        let inbound_read_timeout = self.inbound_read_timeout;
 
         tokio::spawn(async move {
             run_connection(
                 connection,
-                local_id,
+                local_id.to_string(),
                 initial_authenticated_peer_id,
                 inbound_tx,
                 connections,
@@ -343,6 +370,8 @@ impl QuicTransport {
                 cancel,
                 replay_check,
                 response_handler,
+                handshake_timeout,
+                inbound_read_timeout,
             )
             .await;
         });

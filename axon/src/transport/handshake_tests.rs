@@ -4,6 +4,7 @@ use serde_json::json;
 fn hello_selected_version_is_supported(hello_response: &Envelope) -> bool {
     hello_response
         .payload_value()
+        .unwrap_or_default()
         .get("selected_version")
         .and_then(|v| v.as_u64())
         == Some(1)
@@ -28,8 +29,8 @@ fn auto_response_hello_success() {
     let resp = auto_response(&req, &agent_b());
     assert_eq!(resp.kind, MessageKind::Hello);
     assert_eq!(resp.ref_id, Some(req.id));
-    assert_eq!(resp.payload_value()["selected_version"], 1);
-    assert!(resp.payload_value().get("pubkey").is_none());
+    assert_eq!(resp.payload_value().unwrap()["selected_version"], 1);
+    assert!(resp.payload_value().unwrap().get("pubkey").is_none());
 }
 
 #[test]
@@ -43,7 +44,10 @@ fn auto_response_hello_incompatible_version() {
     let resp = auto_response(&req, &agent_b());
     assert_eq!(resp.kind, MessageKind::Error);
     assert_eq!(
-        resp.payload_value().get("code").and_then(|v| v.as_str()),
+        resp.payload_value()
+            .unwrap()
+            .get("code")
+            .and_then(|v| v.as_str()),
         Some("incompatible_version")
     );
 }
@@ -105,7 +109,10 @@ fn auto_response_unknown_kind() {
     let resp = auto_response(&req, &agent_b());
     assert_eq!(resp.kind, MessageKind::Error);
     assert_eq!(
-        resp.payload_value().get("code").and_then(|v| v.as_str()),
+        resp.payload_value()
+            .unwrap()
+            .get("code")
+            .and_then(|v| v.as_str()),
         Some("unknown_kind")
     );
 }

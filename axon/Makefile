@@ -13,7 +13,7 @@ test-integration:
 
 # End-to-end daemon lifecycle tests (~10s)
 test-e2e:
-	cargo test --test daemon_lifecycle
+	cargo test --test daemon_lifecycle --test daemon_e2e
 
 # All tests (unit + integration + e2e)
 test-all:

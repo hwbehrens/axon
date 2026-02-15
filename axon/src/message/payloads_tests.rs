@@ -37,7 +37,7 @@ fn ping_pong_payload_serde() {
         status: PeerStatus::Idle,
         uptime_secs: 3600,
         active_tasks: 2,
-        agent_name: Some("Bot".to_string()),
+        agent_name: Some("Agent".to_string()),
     };
     let v = serde_json::to_value(&pong).unwrap();
     let back: PongPayload = serde_json::from_value(v).unwrap();
