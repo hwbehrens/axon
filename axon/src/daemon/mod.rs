@@ -130,19 +130,25 @@ pub async fn run_daemon(opts: DaemonOptions) -> Result<()> {
         let token = hex::encode(token_bytes);
 
         // Write to file with mode 0600
-        std::fs::write(&paths.ipc_token, &token).context("failed to write IPC token file")?;
-        std::fs::set_permissions(&paths.ipc_token, std::fs::Permissions::from_mode(0o600))
+        tokio::fs::write(&paths.ipc_token, &token)
+            .await
+            .context("failed to write IPC token file")?;
+        tokio::fs::set_permissions(&paths.ipc_token, std::fs::Permissions::from_mode(0o600))
+            .await
             .context("failed to set IPC token permissions")?;
 
         info!(path = %paths.ipc_token.display(), "generated new IPC token");
         Some(token)
     } else {
         // Load existing token
-        match std::fs::read_to_string(&paths.ipc_token) {
+        match tokio::fs::read_to_string(&paths.ipc_token).await {
             Ok(token) => Some(token.trim().to_string()),
             Err(e) => {
-                warn!(error = %e, "failed to read IPC token, auth will be disabled");
-                None
+                anyhow::bail!(
+                    "failed to read IPC token at {}: {e}. \
+                     Remove the file to regenerate, or fix permissions.",
+                    paths.ipc_token.display()
+                );
             }
         }
     };

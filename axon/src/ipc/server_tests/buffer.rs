@@ -27,6 +27,20 @@ async fn inbox_and_ack_round_trip() {
     let (read_half, mut write_half) = client.into_split();
     let mut reader = BufReader::new(read_half);
 
+    // v2 commands require hello
+    write_half
+        .write_all(b"{\"cmd\":\"hello\",\"version\":2}\n")
+        .await
+        .expect("write hello");
+    let cmd = cmd_rx.recv().await.expect("recv hello");
+    let reply = server.handle_command(cmd).await.expect("handle hello");
+    server
+        .send_reply(1, &reply)
+        .await
+        .expect("send hello reply");
+    let mut line = String::new();
+    reader.read_line(&mut line).await.expect("read hello reply");
+
     // Fetch inbox
     write_half
         .write_all(b"{\"cmd\":\"inbox\",\"limit\":10}\n")
@@ -37,7 +51,7 @@ async fn inbox_and_ack_round_trip() {
     let reply = server.handle_command(cmd).await.expect("handle");
     server.send_reply(1, &reply).await.expect("send reply");
 
-    let mut line = String::new();
+    line.clear();
     reader.read_line(&mut line).await.expect("read");
 
     let v: serde_json::Value = serde_json::from_str(line.trim()).unwrap();

@@ -94,22 +94,67 @@ fn bench_envelope_clone_vs_arc(c: &mut Criterion) {
 }
 
 fn bench_ipc_command_parse(c: &mut Criterion) {
+    use axon::ipc::IpcCommand;
     let mut group = c.benchmark_group("ipc_command_parse");
 
-    let send_cmd =
-        r#"{"cmd":"send","to":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","kind":"ping","payload":{}}"#;
+    let send_cmd = r#"{"cmd":"send","to":"ed25519.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","kind":"ping","payload":{}}"#;
     group.bench_function("send", |b| {
-        b.iter(|| serde_json::from_str::<serde_json::Value>(black_box(send_cmd)).unwrap())
+        b.iter(|| serde_json::from_str::<IpcCommand>(black_box(send_cmd)).unwrap())
     });
 
     let peers_cmd = r#"{"cmd":"peers"}"#;
     group.bench_function("peers", |b| {
-        b.iter(|| serde_json::from_str::<serde_json::Value>(black_box(peers_cmd)).unwrap())
+        b.iter(|| serde_json::from_str::<IpcCommand>(black_box(peers_cmd)).unwrap())
     });
 
-    let status_cmd = r#"{"cmd":"status"}"#;
-    group.bench_function("status", |b| {
-        b.iter(|| serde_json::from_str::<serde_json::Value>(black_box(status_cmd)).unwrap())
+    let hello_cmd = r#"{"cmd":"hello","version":2}"#;
+    group.bench_function("hello", |b| {
+        b.iter(|| serde_json::from_str::<IpcCommand>(black_box(hello_cmd)).unwrap())
+    });
+
+    let inbox_cmd = r#"{"cmd":"inbox","limit":50,"kinds":["query","notify"]}"#;
+    group.bench_function("inbox", |b| {
+        b.iter(|| serde_json::from_str::<IpcCommand>(black_box(inbox_cmd)).unwrap())
+    });
+
+    let subscribe_cmd = r#"{"cmd":"subscribe","kinds":["query","delegate","notify"]}"#;
+    group.bench_function("subscribe", |b| {
+        b.iter(|| serde_json::from_str::<IpcCommand>(black_box(subscribe_cmd)).unwrap())
+    });
+
+    group.finish();
+}
+
+fn bench_daemon_reply_serialize(c: &mut Criterion) {
+    let mut group = c.benchmark_group("daemon_reply_serialize");
+
+    let reply_inbox = json!({
+        "ok": true,
+        "messages": [
+            {
+                "envelope": {
+                    "v": 1, "id": "550e8400-e29b-41d4-a716-446655440000",
+                    "from": "ed25519.aaaa", "to": "ed25519.bbbb",
+                    "ts": 1700000000000u64, "kind": "notify",
+                    "payload": {"topic": "test"}
+                },
+                "buffered_at": "2026-02-15T08:00:00.000Z"
+            }
+        ],
+        "has_more": false
+    });
+    group.bench_function("inbox_reply", |b| {
+        b.iter(|| serde_json::to_string(black_box(&reply_inbox)).unwrap())
+    });
+
+    let reply_hello = json!({
+        "ok": true,
+        "version": 2,
+        "agent_id": "ed25519.a1b2c3d4e5f6a7b8",
+        "features": ["auth", "buffer", "subscribe"]
+    });
+    group.bench_function("hello_reply", |b| {
+        b.iter(|| serde_json::to_string(black_box(&reply_hello)).unwrap())
     });
 
     group.finish();
@@ -121,5 +166,6 @@ criterion_group!(
     bench_ipc_serialize_then_clone,
     bench_envelope_clone_vs_arc,
     bench_ipc_command_parse,
+    bench_daemon_reply_serialize,
 );
 criterion_main!(benches);

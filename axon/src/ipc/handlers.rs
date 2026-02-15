@@ -97,6 +97,21 @@ impl IpcHandlers {
         let mut states = self.client_states.lock().await;
         let state = states.entry(client_id).or_insert_with(ClientState::default);
 
+        // v2-only commands require hello handshake first
+        let is_v2_command = matches!(
+            command,
+            IpcCommand::Whoami
+                | IpcCommand::Inbox { .. }
+                | IpcCommand::Ack { .. }
+                | IpcCommand::Subscribe { .. }
+        );
+        if is_v2_command && state.version.is_none() {
+            return Ok(DaemonReply::Error {
+                ok: false,
+                error: "hello_required".to_string(),
+            });
+        }
+
         // Check if this is a v2 client (has done hello)
         let is_v2_client = state.version.is_some();
 
@@ -215,12 +230,15 @@ impl IpcHandlers {
                 })
             }
         } else {
-            // No token configured, accept
-            state.authenticated = true;
-            info!(client_id, method = "token", "IPC client authenticated");
-            Ok(DaemonReply::Auth {
-                ok: true,
-                auth: "accepted".to_string(),
+            // No token configured — reject token auth.
+            // Peer-credential auth is the only path when no token is available.
+            warn!(
+                client_id,
+                "IPC auth rejected: no token configured on server"
+            );
+            Ok(DaemonReply::Error {
+                ok: false,
+                error: "auth_failed".to_string(),
             })
         }
     }

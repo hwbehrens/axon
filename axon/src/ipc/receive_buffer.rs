@@ -64,10 +64,12 @@ impl ReceiveBuffer {
                         break;
                     }
                 }
-            } else {
-                // Otherwise treat as ISO timestamp
+            } else if let Ok(since_millis) = parse_iso8601_millis(since_val) {
+                // Parse as ISO timestamp and compare milliseconds
                 for (i, msg) in self.messages.iter().enumerate() {
-                    if msg.buffered_at.as_str() > since_val {
+                    if let Ok(msg_millis) = parse_iso8601_millis(&msg.buffered_at)
+                        && msg_millis > since_millis
+                    {
                         skip_count = i;
                         break;
                     }
@@ -107,17 +109,18 @@ impl ReceiveBuffer {
     }
 
     fn evict_expired(&mut self) {
-        let now = SystemTime::now()
+        let now_millis = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
-            .as_secs();
+            .as_millis() as i64;
+        let ttl_millis = (self.ttl_secs as i64) * 1000;
 
         let initial_len = self.messages.len();
         self.messages.retain(|msg| {
             // Parse the ISO timestamp and check TTL
-            if let Ok(buffered_time) = parse_iso8601(&msg.buffered_at) {
-                let age = now.saturating_sub(buffered_time);
-                age < self.ttl_secs
+            if let Ok(buffered_millis) = parse_iso8601_millis(&msg.buffered_at) {
+                let age = now_millis.saturating_sub(buffered_millis);
+                age < ttl_millis
             } else {
                 true // Keep if we can't parse timestamp
             }
@@ -141,9 +144,13 @@ fn now_iso8601() -> String {
     dt.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string()
 }
 
-fn parse_iso8601(s: &str) -> Result<u64> {
+fn parse_iso8601_millis(s: &str) -> Result<i64> {
     use chrono::DateTime;
     let dt =
         DateTime::parse_from_rfc3339(s).with_context(|| format!("invalid ISO timestamp: {}", s))?;
-    Ok(dt.timestamp() as u64)
+    Ok(dt.timestamp_millis())
 }
+
+#[cfg(test)]
+#[path = "receive_buffer_tests.rs"]
+mod tests;
