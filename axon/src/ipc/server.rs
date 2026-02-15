@@ -18,14 +18,6 @@ const MAX_IPC_LINE_LENGTH: usize = 256 * 1024; // 256 KB
 
 // ---------------------------------------------------------------------------
 // IPC server
-//
-// TODO(security): IPC authentication. Currently, any process running as the
-// socket owner can connect and send commands as the daemon's identity. This is
-// acceptable for single-agent-per-host deployments (Unix socket permissions
-// restrict access to the owning user), but multi-agent-per-host scenarios
-// (e.g. two agents on the same machine) would benefit from per-client identity
-// verification — e.g. a shared secret in the connect handshake, or SO_PEERCRED
-// to bind IPC clients to specific agent identities.
 // ---------------------------------------------------------------------------
 
 #[derive(Clone)]

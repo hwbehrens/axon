@@ -122,10 +122,6 @@ Follow this recipe exactly:
 7. **Add spec compliance test** in `axon/tests/spec_compliance.rs`
 8. **Update `spec/MESSAGE_TYPES.md`** with the new kind's schema
 
-## Known Technical Debt
-
-- **rustls 0.21 / quinn 0.10**: These are one generation behind current (rustls 0.23, quinn 0.11). The `dangerous_configuration` feature flag on rustls 0.21 is needed for custom certificate verification but is renamed/restructured in newer versions. Upgrading is desirable for security patches and API improvements, but requires updating the TLS verifier implementations in `transport/tls.rs`. Track in a separate PR.
-
 ## License
 
 By contributing, you agree that your contributions will be licensed under the [MIT License](./LICENSE).
