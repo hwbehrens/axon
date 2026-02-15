@@ -2,30 +2,48 @@
   <img src="axon/assets/icon.png" alt="AXON" width="128" />
 </p>
 
-# AXON — Agent eXchange Over Network
+<h1 align="center">AXON — Agent eXchange Over Network</h1>
 
-A hyper-efficient, LLM-first local messaging protocol for agent-to-agent communication.
+<p align="center">
+  A secure, LLM-first messaging protocol for agent-to-agent communication over QUIC.
+</p>
 
-## Problem
+<p align="center">
+  <a href="./spec/SPEC.md">Spec</a> · <a href="./spec/MESSAGE_TYPES.md">Messages</a> · <a href="./spec/WIRE_FORMAT.md">Wire Format</a> · <a href="./CONTRIBUTING.md">Contributing</a>
+</p>
 
-Current inter-agent communication options are all designed for humans:
-- iMessage: rich media, typing indicators, read receipts — none of which LLMs need
-- HTTP/REST: stateless, no session awareness, JSON overhead
-- OpenClaw sessions_send: works but goes through the gateway abstraction layer
+---
 
-We want something purpose-built for two LLM agents on the same local network.
+## Why?
+
+Every existing communication channel between AI agents was designed for humans:
+
+- **Chat protocols** carry rich media, typing indicators, read receipts, and presence — none of which LLMs need, all of which cost tokens.
+- **HTTP/REST** is stateless, unaware of sessions, and burdened with redundant headers.
+- **Platform-specific APIs** lock agents into proprietary gateway layers.
+
+AXON is purpose-built for agents talking to agents. It's structured, authenticated, resumable, and context-budget-aware — designed so that agents on the same local network (or across a VPN) can collaborate without wasting tokens on protocol overhead.
 
 ## Design Principles
 
-1. **Context-budget-aware**: Every message costs tokens. The protocol should minimize unnecessary context consumption.
-2. **Structured-first**: No natural language overhead. Payloads are typed, schemaed, and machine-parseable.
-3. **Resumable**: Agents restart frequently. The protocol handles reconnection, deduplication, and state recovery.
-4. **Minimal round-trips**: Prefer rich single exchanges over chatty back-and-forth.
-5. **Zero-trust locally**: Agents authenticate even on LAN (agents have different access levels).
+1. **Context-budget-aware** — Every message costs tokens. The protocol minimizes unnecessary context consumption.
+2. **Structured-first** — No natural language overhead. Payloads are typed, schema'd, and machine-parseable.
+3. **Resumable** — Agents restart frequently. AXON handles reconnection, deduplication, and state recovery automatically.
+4. **Minimal round-trips** — Prefer rich single exchanges over chatty back-and-forth.
+5. **Zero-trust locally** — Agents authenticate even on LAN. Different agents have different access levels.
 
-## Status
+## How It Works
 
-Working implementation. The daemon, CLI, IPC, QUIC transport, mDNS discovery, and static peer config are all functional. See `spec/` for the protocol specification.
+```
+Agent ←→ [Unix Socket IPC] ←→ AXON Daemon ←→ [QUIC/UDP] ←→ AXON Daemon ←→ [Unix Socket IPC] ←→ Agent
+```
+
+Each machine runs a lightweight daemon (<5 MB RSS, negligible CPU when idle). Agents connect to it over a Unix socket and exchange structured JSON messages. The daemon handles everything else:
+
+- **Identity** — Ed25519 keypair generated on first run. Agent ID derived from the public key. Self-signed X.509 cert for QUIC/TLS 1.3.
+- **Discovery** — mDNS on LAN (zero-config) or static peers in `config.toml` for VPN/Tailscale setups.
+- **Transport** — QUIC with TLS 1.3, forward secrecy, and 0-RTT reconnection.
+- **Security** — Mutual peer pinning, hello-first handshake gating, replay protection with UUID deduplication.
 
 ## Quickstart
 
@@ -38,55 +56,55 @@ cargo build --release
 
 The binary is at `axon/target/release/axon`. Add it to your `PATH` or run it directly.
 
-### Run a single daemon
+### Run
 
 ```sh
 axon daemon
 ```
 
-This starts the daemon on the default port (7100), enables mDNS discovery, creates `~/.axon/` with a fresh Ed25519 identity, and listens for IPC commands on `~/.axon/axon.sock`.
+Starts on port 7100, creates `~/.axon/` with a fresh Ed25519 identity, enables mDNS discovery, and listens for IPC on `~/.axon/axon.sock`.
 
-### Connect two agents on a LAN
+### Connect agents on a LAN
 
-If both machines are on the same local network, mDNS handles everything:
+If machines are on the same local network, mDNS handles everything automatically:
 
 ```sh
 # Machine A                          # Machine B
 axon daemon                          axon daemon
 ```
 
-Within seconds they discover each other. Verify with:
+Within seconds they discover each other. Verify:
 
 ```sh
 axon peers
 ```
 
-### Connect two agents over Tailscale/VPN (static peers)
+### Connect agents over Tailscale / VPN
 
-When mDNS won't work (different subnets, VPN, etc.), configure peers manually:
+When mDNS isn't available, configure static peers:
 
 ```sh
 # On each machine, get the identity:
 axon identity
-# Output: { "agent_id": "ed25519.a1b2c3d4...", "public_key": "base64..." }
+# → { "agent_id": "ed25519.a1b2c3d4...", "public_key": "base64..." }
 ```
 
-Then on machine A, create `~/.axon/config.toml`:
+Create `~/.axon/config.toml` on each machine with the other's info:
 
 ```toml
 [[peers]]
-agent_id = "ed25519.<machine-B-agent-id>"
-addr = "<machine-B-ip>:7100"
-pubkey = "<machine-B-public-key>"
+agent_id = "ed25519.<peer-agent-id>"
+addr = "<peer-ip>:7100"
+pubkey = "<peer-public-key>"
 ```
 
-Do the same on machine B with A's info. Then start both daemons:
+Then start:
 
 ```sh
-axon daemon --disable-mdns    # optional: skip mDNS if not needed
+axon daemon --disable-mdns
 ```
 
-### Send a message
+### Send messages
 
 ```sh
 # Query another agent
@@ -98,14 +116,11 @@ axon delegate <agent_id> "Summarize today's news"
 # Fire-and-forget notification
 axon notify <agent_id> meta.status '{"state":"ready"}'
 
+# Discover capabilities
+axon discover <agent_id>
+
 # See all commands
 axon --help
-```
-
-### Discover capabilities
-
-```sh
-axon discover <agent_id>
 ```
 
 ### Example interaction
@@ -113,6 +128,20 @@ axon discover <agent_id>
 ```sh
 axon examples    # prints a full annotated hello → discover → query → delegate flow
 ```
+
+## Message Types
+
+| Kind | Stream | Purpose |
+|------|--------|---------|
+| `hello` | Bidirectional | Identity exchange + version negotiation |
+| `ping` / `pong` | Bidirectional | Liveness check |
+| `query` → `response` | Bidirectional | Ask a question, get an answer |
+| `delegate` → `ack` → `result` | Bidir + Unidir | Assign a task, track completion |
+| `notify` | Unidirectional | Fire-and-forget information |
+| `cancel` → `ack` | Bidirectional | Cancel a pending delegation |
+| `discover` → `capabilities` | Bidirectional | Capability negotiation |
+
+See [`spec/MESSAGE_TYPES.md`](./spec/MESSAGE_TYPES.md) for full payload schemas and [`spec/WIRE_FORMAT.md`](./spec/WIRE_FORMAT.md) for the normative wire format.
 
 ## Configuration Reference
 
@@ -166,9 +195,13 @@ These are compile-time constants and cannot be changed via configuration.
 
 | Document | Description |
 |----------|-------------|
-| [`spec/SPEC.md`](./spec/SPEC.md) | Protocol architecture (QUIC, Ed25519, discovery, lifecycle) |
+| [`spec/SPEC.md`](./spec/SPEC.md) | Protocol architecture — QUIC, Ed25519, discovery, lifecycle |
 | [`spec/MESSAGE_TYPES.md`](./spec/MESSAGE_TYPES.md) | All message kinds, payload schemas, stream mapping |
 | [`spec/WIRE_FORMAT.md`](./spec/WIRE_FORMAT.md) | Normative wire format for interoperable implementations |
 | [`CONTRIBUTING.md`](./CONTRIBUTING.md) | Development guide, module map, testing requirements |
-| [`RUBRIC.md`](./RUBRIC.md) | Contribution scoring rubric (100 points across 8 categories) |
-| [`evaluations/`](./evaluations/) | Agent evaluation results (not part of the implementation) |
+| [`RUBRIC.md`](./RUBRIC.md) | Contribution scoring rubric — 100 points across 8 categories |
+| [`SECURITY.md`](./SECURITY.md) | Security policy and vulnerability reporting |
+
+## License
+
+[MIT](./LICENSE)
