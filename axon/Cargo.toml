@@ -31,6 +31,10 @@ thiserror = "2"
 async-trait = "0.1"
 x509-parser = "0.16"
 getrandom = "0.2"
+chrono = "0.4"
+libc = "0.2"
+subtle = "2.6.1"
+hex = "0.4.3"
 clap_complete = { version = "4", optional = true }
 clap_mangen = { version = "0.2", optional = true }
 
@@ -40,6 +44,7 @@ generate-docs = ["dep:clap_complete", "dep:clap_mangen"]
 [dev-dependencies]
 tempfile = "3"
 proptest = "1"
+tokio = { version = "1", features = ["test-util"] }
 criterion = { version = "0.5", features = ["html_reports"] }
 
 [[bench]]

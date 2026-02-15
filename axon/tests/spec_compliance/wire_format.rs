@@ -150,6 +150,232 @@ fn ipc_inbound_shape() {
 }
 
 // =========================================================================
+// IPC v2 — Protocol Versioning and Auth (spec/IPC.md)
+// =========================================================================
+
+/// IPC.md §1.2: hello command includes version number.
+#[test]
+fn ipc_v2_hello_command_shape() {
+    let cmd: axon::ipc::IpcCommand = serde_json::from_value(json!({
+        "cmd": "hello",
+        "version": 2
+    }))
+    .unwrap();
+    match cmd {
+        axon::ipc::IpcCommand::Hello { version } => {
+            assert_eq!(version, 2);
+        }
+        _ => panic!("expected Hello"),
+    }
+}
+
+/// IPC.md §1.2: hello response includes version, agent_id, and features.
+#[test]
+fn ipc_v2_hello_response_shape() {
+    let reply = axon::ipc::DaemonReply::Hello {
+        ok: true,
+        version: 2,
+        agent_id: "ed25519.test1234567890abcdef1234567890".to_string(),
+        features: vec!["auth".to_string(), "buffer".to_string()],
+    };
+    let j: Value = serde_json::to_value(&reply).unwrap();
+    assert_eq!(j["ok"], true);
+    assert_eq!(j["version"], 2);
+    assert!(j["agent_id"].as_str().unwrap().starts_with("ed25519."));
+    assert!(j["features"].as_array().unwrap().contains(&json!("auth")));
+}
+
+/// IPC.md §2.3: auth command includes token.
+#[test]
+fn ipc_v2_auth_command_shape() {
+    let cmd: axon::ipc::IpcCommand = serde_json::from_value(json!({
+        "cmd": "auth",
+        "token": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+    }))
+    .unwrap();
+    match cmd {
+        axon::ipc::IpcCommand::Auth { token } => {
+            assert_eq!(token.len(), 64);
+        }
+        _ => panic!("expected Auth"),
+    }
+}
+
+/// IPC.md §2.3: auth success response.
+#[test]
+fn ipc_v2_auth_success_response_shape() {
+    let reply = axon::ipc::DaemonReply::Auth {
+        ok: true,
+        auth: "accepted".to_string(),
+    };
+    let j: Value = serde_json::to_value(&reply).unwrap();
+    assert_eq!(j["ok"], true);
+    assert_eq!(j["auth"], "accepted");
+}
+
+/// IPC.md §2.3: auth failure returns error with auth_failed.
+#[test]
+fn ipc_v2_auth_failure_response_shape() {
+    let reply = axon::ipc::DaemonReply::Error {
+        ok: false,
+        error: "auth_failed".to_string(),
+    };
+    let j: Value = serde_json::to_value(&reply).unwrap();
+    assert_eq!(j["ok"], false);
+    assert_eq!(j["error"], "auth_failed");
+}
+
+/// IPC.md §3.2: whoami response includes identity fields.
+#[test]
+fn ipc_v2_whoami_command_and_response_shape() {
+    let cmd: axon::ipc::IpcCommand = serde_json::from_value(json!({
+        "cmd": "whoami"
+    }))
+    .unwrap();
+    assert!(matches!(cmd, axon::ipc::IpcCommand::Whoami));
+
+    let reply = axon::ipc::DaemonReply::Whoami {
+        ok: true,
+        info: axon::ipc::WhoamiInfo {
+            agent_id: "ed25519.test".to_string(),
+            public_key: "pubkey_base64".to_string(),
+            name: Some("test-agent".to_string()),
+            version: "0.1.0".to_string(),
+            ipc_version: 2,
+            uptime_secs: 123,
+        },
+    };
+    let j: Value = serde_json::to_value(&reply).unwrap();
+    assert_eq!(j["ok"], true);
+    assert_eq!(j["agent_id"], "ed25519.test");
+    assert_eq!(j["ipc_version"], 2);
+    assert_eq!(j["uptime_secs"], 123);
+}
+
+/// IPC.md §3.3: inbox command with limit parameter.
+#[test]
+fn ipc_v2_inbox_command_shape() {
+    let cmd: axon::ipc::IpcCommand = serde_json::from_value(json!({
+        "cmd": "inbox",
+        "limit": 10
+    }))
+    .unwrap();
+    match cmd {
+        axon::ipc::IpcCommand::Inbox {
+            limit,
+            since,
+            kinds,
+        } => {
+            assert_eq!(limit, 10);
+            assert!(since.is_none());
+            assert!(kinds.is_none());
+        }
+        _ => panic!("expected Inbox"),
+    }
+}
+
+/// IPC.md §3.3: inbox command with since and kinds parameters.
+#[test]
+fn ipc_v2_inbox_command_with_filters() {
+    let cmd: axon::ipc::IpcCommand = serde_json::from_value(json!({
+        "cmd": "inbox",
+        "limit": 5,
+        "since": "550e8400-e29b-41d4-a716-446655440000",
+        "kinds": ["notify", "query"]
+    }))
+    .unwrap();
+    match cmd {
+        axon::ipc::IpcCommand::Inbox {
+            limit,
+            since,
+            kinds,
+        } => {
+            assert_eq!(limit, 5);
+            assert_eq!(since.unwrap(), "550e8400-e29b-41d4-a716-446655440000");
+            let k = kinds.unwrap();
+            assert_eq!(k.len(), 2);
+            assert!(k.contains(&MessageKind::Notify));
+            assert!(k.contains(&MessageKind::Query));
+        }
+        _ => panic!("expected Inbox"),
+    }
+}
+
+/// IPC.md §3.3: inbox response includes messages array and has_more.
+#[test]
+fn ipc_v2_inbox_response_shape() {
+    let reply = axon::ipc::DaemonReply::Inbox {
+        ok: true,
+        messages: vec![],
+        has_more: false,
+    };
+    let j: Value = serde_json::to_value(&reply).unwrap();
+    assert_eq!(j["ok"], true);
+    assert!(j["messages"].is_array());
+    assert_eq!(j["has_more"], false);
+}
+
+/// IPC.md §3.4: ack command includes array of UUIDs.
+#[test]
+fn ipc_v2_ack_command_shape() {
+    let cmd: axon::ipc::IpcCommand = serde_json::from_value(json!({
+        "cmd": "ack",
+        "ids": [
+            "550e8400-e29b-41d4-a716-446655440000",
+            "6ba7b810-9dad-11d1-80b4-00c04fd430c8"
+        ]
+    }))
+    .unwrap();
+    match cmd {
+        axon::ipc::IpcCommand::Ack { ids } => {
+            assert_eq!(ids.len(), 2);
+        }
+        _ => panic!("expected Ack"),
+    }
+}
+
+/// IPC.md §3.4: ack response includes count of acknowledged messages.
+#[test]
+fn ipc_v2_ack_response_shape() {
+    let reply = axon::ipc::DaemonReply::Ack { ok: true, acked: 2 };
+    let j: Value = serde_json::to_value(&reply).unwrap();
+    assert_eq!(j["ok"], true);
+    assert_eq!(j["acked"], 2);
+}
+
+/// IPC.md §3.5: subscribe command with optional since and kinds.
+#[test]
+fn ipc_v2_subscribe_command_shape() {
+    let cmd: axon::ipc::IpcCommand = serde_json::from_value(json!({
+        "cmd": "subscribe",
+        "since": "550e8400-e29b-41d4-a716-446655440000",
+        "kinds": ["notify"]
+    }))
+    .unwrap();
+    match cmd {
+        axon::ipc::IpcCommand::Subscribe { since, kinds } => {
+            assert_eq!(since.unwrap(), "550e8400-e29b-41d4-a716-446655440000");
+            assert_eq!(kinds.unwrap().len(), 1);
+        }
+        _ => panic!("expected Subscribe"),
+    }
+}
+
+/// IPC.md §3.5: subscribe response includes subscribed flag and replayed count.
+#[test]
+fn ipc_v2_subscribe_response_shape() {
+    let reply = axon::ipc::DaemonReply::Subscribe {
+        ok: true,
+        subscribed: true,
+        replayed: 3,
+    };
+    let j: Value = serde_json::to_value(&reply).unwrap();
+    assert_eq!(j["ok"], true);
+    assert_eq!(j["subscribed"], true);
+    assert_eq!(j["replayed"], 3);
+}
+
+// =========================================================================
 // Config — static peers per spec §2
 // =========================================================================
 

@@ -11,7 +11,10 @@ async fn concurrent_ipc_flood() {
     let result = tokio::time::timeout(Duration::from_secs(30), async {
         let dir = tempdir().unwrap();
         let socket_path = dir.path().join("axon.sock");
-        let (server, mut cmd_rx) = IpcServer::bind(socket_path.clone(), 128).await.unwrap();
+        let (server, mut cmd_rx) =
+            IpcServer::bind(socket_path.clone(), 128, IpcServerConfig::default())
+                .await
+                .unwrap();
 
         let num_clients = 50;
         let cmds_per_client = 10;
@@ -101,7 +104,10 @@ async fn ipc_malformed_input_resilience() {
     let result = tokio::time::timeout(Duration::from_secs(10), async {
         let dir = tempdir().unwrap();
         let socket_path = dir.path().join("axon.sock");
-        let (server, mut cmd_rx) = IpcServer::bind(socket_path.clone(), 64).await.unwrap();
+        let (server, mut cmd_rx) =
+            IpcServer::bind(socket_path.clone(), 64, IpcServerConfig::default())
+                .await
+                .unwrap();
 
         // Spawn handler for valid commands.
         let server_clone = server.clone();
@@ -229,7 +235,10 @@ async fn ipc_client_disconnect_under_load() {
     let result = tokio::time::timeout(Duration::from_secs(15), async {
         let dir = tempdir().unwrap();
         let socket_path = dir.path().join("axon.sock");
-        let (server, mut cmd_rx) = IpcServer::bind(socket_path.clone(), 64).await.unwrap();
+        let (server, mut cmd_rx) =
+            IpcServer::bind(socket_path.clone(), 64, IpcServerConfig::default())
+                .await
+                .unwrap();
 
         // Spawn command handler.
         let server_for_handler = server.clone();

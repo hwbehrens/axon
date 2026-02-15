@@ -36,6 +36,7 @@ fn config_parses_static_peers() {
 #[test]
 fn cli_override_takes_precedence() {
     let cfg = Config {
+        name: None,
         port: Some(8000),
         max_ipc_clients: None,
         max_connections: None,
@@ -44,6 +45,7 @@ fn cli_override_takes_precedence() {
         reconnect_max_backoff_secs: None,
         handshake_timeout_secs: None,
         inbound_read_timeout_secs: None,
+        ipc: None,
         peers: Vec::new(),
     };
     assert_eq!(cfg.effective_port(Some(9999)), 9999);
@@ -161,6 +163,7 @@ proptest! {
     fn effective_port_cli_always_wins(config_port in proptest::option::of(1u16..),
                                       cli_port in 1u16..) {
         let cfg = Config {
+            name: None,
             port: config_port,
             max_ipc_clients: None,
             max_connections: None,
@@ -169,6 +172,7 @@ proptest! {
             reconnect_max_backoff_secs: None,
             handshake_timeout_secs: None,
             inbound_read_timeout_secs: None,
+            ipc: None,
             peers: Vec::new(),
         };
         prop_assert_eq!(cfg.effective_port(Some(cli_port)), cli_port);
@@ -177,6 +181,7 @@ proptest! {
     #[test]
     fn effective_port_without_cli_uses_config_or_default(config_port in proptest::option::of(1u16..)) {
         let cfg = Config {
+            name: None,
             port: config_port,
             max_ipc_clients: None,
             max_connections: None,
@@ -185,6 +190,7 @@ proptest! {
             reconnect_max_backoff_secs: None,
             handshake_timeout_secs: None,
             inbound_read_timeout_secs: None,
+            ipc: None,
             peers: Vec::new(),
         };
         let expected = config_port.unwrap_or(7100);
