@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use crate::*;
 
 // =========================================================================
@@ -336,7 +338,8 @@ async fn connection_uni_notify_delivered() {
 }
 
 /// Invariant: unknown message kind on bidi stream returns error(unknown_kind).
-/// Exercises: handle_authenticated_bidi (unknown kind branch).
+/// Exercises: handle_authenticated_bidi (unknown kind branch) over the wire.
+/// Sends raw bytes with a fabricated kind through a real QUIC bidi stream.
 #[tokio::test]
 async fn connection_bidi_unknown_kind_returns_error() {
     let (id_a, _dir_a) = make_identity();
@@ -362,22 +365,31 @@ async fn connection_bidi_unknown_kind_returns_error() {
 
     let peer_b = make_peer_record(&id_b, addr_b);
 
-    // Construct an envelope with a kind that deserializes as Unknown
-    let mut env = Envelope::new(
+    // Establish connection (hello completes automatically)
+    let conn = transport_a.ensure_connection(&peer_b).await.unwrap();
+
+    // Craft an envelope with a kind the receiver won't recognize
+    let env = Envelope::new(
         id_a.agent_id().to_string(),
         id_b.agent_id().to_string(),
-        MessageKind::Query, // placeholder, we'll override in JSON
+        MessageKind::Query, // placeholder
         json!({"question": "test"}),
     );
-
-    // Manually create a JSON envelope with an unknown kind
     let mut json_val = serde_json::to_value(&env).unwrap();
     json_val["kind"] = json!("totally_made_up_kind");
     let raw_bytes = serde_json::to_vec(&json_val).unwrap();
 
-    // Deserialize to verify it parses as Unknown
-    let parsed: Envelope = serde_json::from_slice(&raw_bytes).unwrap();
-    assert_eq!(parsed.kind, MessageKind::Unknown);
+    // Send raw bytes over a bidi stream (bypassing typed send API)
+    let (mut send, mut recv) = conn.open_bi().await.unwrap();
+    send.write_all(&raw_bytes).await.unwrap();
+    send.finish().await.unwrap();
+
+    // Read the response — should be error(unknown_kind)
+    let response_bytes = recv.read_to_end(65536).await.unwrap();
+    let response: Envelope = serde_json::from_slice(&response_bytes).unwrap();
+    assert_eq!(response.kind, MessageKind::Error);
+    let payload = response.payload_value().unwrap();
+    assert_eq!(payload["code"], "unknown_kind");
 }
 
 /// Invariant: after hello completes, all bidi request types get their
@@ -447,12 +459,28 @@ async fn connection_all_bidi_kinds_get_correct_response() {
     }
 }
 
-/// Invariant: replay protection drops duplicate message IDs.
-/// Exercises: replay_check in handle_uni_stream / handle_bidi_stream.
+/// Invariant: replay protection drops duplicate message IDs on uni streams.
+/// Sends the same notify envelope twice via raw QUIC uni streams; the receiver
+/// should forward only the first to inbound subscribers.
+/// Exercises: replay_check in handle_uni_stream.
 #[tokio::test]
-async fn connection_replay_protection_drops_duplicates() {
+async fn connection_replay_protection_drops_duplicate_uni() {
+    use std::collections::HashSet;
+    use std::sync::Mutex;
+
     let (id_a, _dir_a) = make_identity();
     let (id_b, _dir_b) = make_identity();
+
+    // Simple replay checker: returns true (is replay) if we've seen this ID before
+    let seen = Arc::new(Mutex::new(HashSet::<uuid::Uuid>::new()));
+    let seen_for_check = seen.clone();
+    let replay_check: axon::transport::ReplayCheckFn = Arc::new(move |id: uuid::Uuid| {
+        let seen = seen_for_check.clone();
+        Box::pin(async move {
+            let mut set = seen.lock().unwrap();
+            !set.insert(id) // returns true if already present (= replay)
+        })
+    });
 
     let transport_b = QuicTransport::bind_cancellable(
         "127.0.0.1:0".parse().unwrap(),
@@ -461,7 +489,7 @@ async fn connection_replay_protection_drops_duplicates() {
         128,
         Duration::from_secs(15),
         Duration::from_secs(60),
-        None, // no replay check on transport_b — we test via transport_a's send
+        Some(replay_check),
         None,
         Duration::from_secs(5),
         Duration::from_secs(10),
@@ -469,6 +497,7 @@ async fn connection_replay_protection_drops_duplicates() {
     .await
     .unwrap();
     let addr_b = transport_b.local_addr().unwrap();
+    let mut rx_b = transport_b.subscribe_inbound();
 
     let transport_a = QuicTransport::bind("127.0.0.1:0".parse().unwrap(), &id_a, 128)
         .await
@@ -485,13 +514,43 @@ async fn connection_replay_protection_drops_duplicates() {
 
     let peer_b = make_peer_record(&id_b, addr_b);
 
-    // First send should succeed
-    let query = Envelope::new(
+    // Establish connection (hello completes automatically)
+    let conn = transport_a.ensure_connection(&peer_b).await.unwrap();
+
+    // Create a notify envelope
+    let notify = Envelope::new(
         id_a.agent_id().to_string(),
         id_b.agent_id().to_string(),
-        MessageKind::Query,
-        json!({"question": "first?", "domain": "test"}),
+        MessageKind::Notify,
+        json!({"topic": "replay.test", "data": {"attempt": 1}, "importance": "low"}),
     );
-    let result = transport_a.send(&peer_b, query).await.unwrap();
-    assert!(result.is_some(), "first query should get a response");
+    let notify_id = notify.id;
+    let raw_bytes = serde_json::to_vec(&notify).unwrap();
+
+    // Send the SAME envelope bytes twice over separate uni streams
+    for _ in 0..2 {
+        let mut stream = conn.open_uni().await.unwrap();
+        stream.write_all(&raw_bytes).await.unwrap();
+        stream.finish().await.unwrap();
+    }
+
+    // Give the receiver time to process both
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // Drain inbound: should see the notify exactly ONCE (plus hello)
+    let mut notify_count = 0;
+    loop {
+        match tokio::time::timeout(Duration::from_millis(200), rx_b.recv()).await {
+            Ok(Ok(msg)) => {
+                if msg.kind == MessageKind::Notify && msg.id == notify_id {
+                    notify_count += 1;
+                }
+            }
+            _ => break,
+        }
+    }
+    assert_eq!(
+        notify_count, 1,
+        "replay protection should drop the duplicate; got {notify_count} copies"
+    );
 }
