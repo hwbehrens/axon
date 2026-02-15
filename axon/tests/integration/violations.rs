@@ -382,7 +382,7 @@ async fn connection_bidi_unknown_kind_returns_error() {
     // Send raw bytes over a bidi stream (bypassing typed send API)
     let (mut send, mut recv) = conn.open_bi().await.unwrap();
     send.write_all(&raw_bytes).await.unwrap();
-    send.finish().await.unwrap();
+    send.finish().unwrap();
 
     // Read the response — should be error(unknown_kind)
     let response_bytes = recv.read_to_end(65536).await.unwrap();
@@ -535,7 +535,7 @@ async fn connection_replay_protection_drops_duplicate_uni() {
     for _ in 0..2 {
         let mut stream = conn.open_uni().await.unwrap();
         stream.write_all(&raw_bytes).await.unwrap();
-        stream.finish().await.unwrap();
+        stream.finish().unwrap();
     }
 
     // Give the receiver time to process both

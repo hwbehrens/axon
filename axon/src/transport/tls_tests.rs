@@ -1,6 +1,9 @@
 use super::*;
 use crate::config::AxonPaths;
 use crate::identity::Identity;
+use rustls::SignatureScheme;
+use rustls::client::danger::ServerCertVerifier;
+use rustls::server::danger::ClientCertVerifier;
 use std::path::PathBuf;
 use tempfile::tempdir;
 
@@ -19,6 +22,170 @@ fn cert_pubkey_extraction_matches_identity() {
         derive_agent_id_from_pubkey_bytes(&extracted),
         identity.agent_id()
     );
+}
+
+fn make_test_verifier() -> PeerCertVerifier {
+    PeerCertVerifier {
+        expected_pubkeys: Arc::new(StdRwLock::new(HashMap::new())),
+    }
+}
+
+fn make_test_client_verifier() -> PeerClientCertVerifier {
+    PeerClientCertVerifier {
+        expected_pubkeys: Arc::new(StdRwLock::new(HashMap::new())),
+        roots: vec![],
+    }
+}
+
+#[test]
+fn verifier_supported_schemes_include_ed25519() {
+    ensure_crypto_provider();
+    let server_verifier = make_test_verifier();
+    let client_verifier = make_test_client_verifier();
+
+    let server_schemes = server_verifier.supported_verify_schemes();
+    let client_schemes = client_verifier.supported_verify_schemes();
+
+    assert!(
+        server_schemes.contains(&SignatureScheme::ED25519),
+        "server verifier must support Ed25519"
+    );
+    assert!(
+        client_schemes.contains(&SignatureScheme::ED25519),
+        "client verifier must support Ed25519"
+    );
+    // Both should return the same schemes (delegating to the same provider)
+    assert_eq!(server_schemes, client_schemes);
+}
+
+#[test]
+fn verifier_supported_schemes_match_ring_provider() {
+    ensure_crypto_provider();
+    let ring_schemes = rustls::crypto::ring::default_provider()
+        .signature_verification_algorithms
+        .supported_schemes();
+
+    let server_verifier = make_test_verifier();
+    let client_verifier = make_test_client_verifier();
+
+    assert_eq!(
+        server_verifier.supported_verify_schemes(),
+        ring_schemes,
+        "server verifier schemes must match ring provider exactly"
+    );
+    assert_eq!(
+        client_verifier.supported_verify_schemes(),
+        ring_schemes,
+        "client verifier schemes must match ring provider exactly"
+    );
+}
+
+#[test]
+fn server_verifier_rejects_unknown_peer() {
+    ensure_crypto_provider();
+    let verifier = make_test_verifier();
+    // empty expected_pubkeys → any peer should be rejected
+    let dir = tempdir().expect("tempdir");
+    let paths = AxonPaths::from_root(PathBuf::from(dir.path()));
+    let identity = Identity::load_or_generate(&paths).expect("identity");
+    let cert = identity.make_quic_certificate().expect("cert");
+    let cert_der = CertificateDer::from(cert.cert_der);
+    let agent_id_string = identity.agent_id().to_string();
+    let server_name = ServerName::try_from(agent_id_string.as_str()).unwrap();
+
+    let result = verifier.verify_server_cert(
+        &cert_der,
+        &[],
+        &server_name,
+        &[],
+        rustls::pki_types::UnixTime::now(),
+    );
+    assert!(result.is_err(), "unknown peer must be rejected");
+    assert!(
+        format!("{}", result.unwrap_err()).contains("no public key on record"),
+        "error should mention missing discovery data"
+    );
+}
+
+#[test]
+fn server_verifier_accepts_known_peer() {
+    ensure_crypto_provider();
+    let dir = tempdir().expect("tempdir");
+    let paths = AxonPaths::from_root(PathBuf::from(dir.path()));
+    let identity = Identity::load_or_generate(&paths).expect("identity");
+    let cert = identity.make_quic_certificate().expect("cert");
+
+    let mut expected = HashMap::new();
+    expected.insert(
+        identity.agent_id().to_string(),
+        identity.public_key_base64().to_string(),
+    );
+
+    let verifier = PeerCertVerifier {
+        expected_pubkeys: Arc::new(StdRwLock::new(expected)),
+    };
+    let cert_der = CertificateDer::from(cert.cert_der);
+    let agent_id_string = identity.agent_id().to_string();
+    let server_name = ServerName::try_from(agent_id_string.as_str()).unwrap();
+
+    let result = verifier.verify_server_cert(
+        &cert_der,
+        &[],
+        &server_name,
+        &[],
+        rustls::pki_types::UnixTime::now(),
+    );
+    assert!(
+        result.is_ok(),
+        "known peer with matching key must be accepted"
+    );
+}
+
+#[test]
+fn server_verifier_rejects_pubkey_mismatch() {
+    ensure_crypto_provider();
+    let dir = tempdir().expect("tempdir");
+    let paths = AxonPaths::from_root(PathBuf::from(dir.path()));
+    let identity = Identity::load_or_generate(&paths).expect("identity");
+    let cert = identity.make_quic_certificate().expect("cert");
+
+    let mut expected = HashMap::new();
+    // Register the agent_id but with a wrong pubkey
+    expected.insert(identity.agent_id().to_string(), STANDARD.encode([99u8; 32]));
+
+    let verifier = PeerCertVerifier {
+        expected_pubkeys: Arc::new(StdRwLock::new(expected)),
+    };
+    let cert_der = CertificateDer::from(cert.cert_der);
+    let agent_id_string = identity.agent_id().to_string();
+    let server_name = ServerName::try_from(agent_id_string.as_str()).unwrap();
+
+    let result = verifier.verify_server_cert(
+        &cert_der,
+        &[],
+        &server_name,
+        &[],
+        rustls::pki_types::UnixTime::now(),
+    );
+    assert!(result.is_err(), "mismatched pubkey must be rejected");
+    assert!(
+        format!("{}", result.unwrap_err()).contains("mismatch"),
+        "error should mention key mismatch"
+    );
+}
+
+#[test]
+fn client_verifier_rejects_unknown_peer() {
+    ensure_crypto_provider();
+    let verifier = make_test_client_verifier();
+    let dir = tempdir().expect("tempdir");
+    let paths = AxonPaths::from_root(PathBuf::from(dir.path()));
+    let identity = Identity::load_or_generate(&paths).expect("identity");
+    let cert = identity.make_quic_certificate().expect("cert");
+    let cert_der = CertificateDer::from(cert.cert_der);
+
+    let result = verifier.verify_client_cert(&cert_der, &[], rustls::pki_types::UnixTime::now());
+    assert!(result.is_err(), "unknown client must be rejected");
 }
 
 #[test]

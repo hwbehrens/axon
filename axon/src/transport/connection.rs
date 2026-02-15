@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use anyhow::{Result, anyhow};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
+use rustls::pki_types::CertificateDer;
 use tokio::sync::{RwLock, broadcast};
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
@@ -23,14 +24,14 @@ pub(crate) fn extract_peer_pubkey_base64_from_connection(
         .peer_identity()
         .ok_or_else(|| anyhow!("peer did not provide an identity"))?;
     let certs = identity
-        .downcast::<Vec<rustls::Certificate>>()
+        .downcast::<Vec<CertificateDer>>()
         .map_err(|_| anyhow!("peer identity was not a rustls certificate chain"))?;
 
     let cert = certs
         .first()
         .ok_or_else(|| anyhow!("peer certificate chain is empty"))?;
 
-    let key = extract_ed25519_pubkey_from_cert_der(&cert.0)?;
+    let key = extract_ed25519_pubkey_from_cert_der(cert.as_ref())?;
     Ok(STANDARD.encode(key))
 }
 
@@ -125,12 +126,12 @@ async fn handle_authenticated_bidi(
                 && check(request.id).await
             {
                 debug!(msg_id = %request.id, "dropping replayed bidi fire-and-forget envelope");
-                let _ = send.finish().await;
+                let _ = send.finish();
                 return;
             }
             let _ = ctx.inbound_tx.send(Arc::new(request));
         }
-        let _ = send.finish().await;
+        let _ = send.finish();
     } else if let Err(err) = request.validate() {
         let response = Envelope::response_to(
             &request,
@@ -282,7 +283,7 @@ async fn send_response(send: &mut quinn::SendStream, response: &Envelope) {
     if let Ok(response_bytes) = serde_json::to_vec(response)
         && write_framed(send, &response_bytes).await.is_ok()
     {
-        let _ = send.finish().await;
+        let _ = send.finish();
     }
 }
 
