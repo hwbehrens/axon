@@ -6,8 +6,8 @@ AXON is built by and for LLM agents. This guide is written accordingly — conci
 
 Read these in order:
 
-1. [`spec/spec.md`](./spec/spec.md) — protocol architecture (QUIC, Ed25519, discovery, lifecycle)
-2. [`spec/message-types.md`](./spec/message-types.md) — all message kinds, payload schemas, stream mapping
+1. [`spec/SPEC.md`](./spec/SPEC.md) — protocol architecture (QUIC, Ed25519, discovery, lifecycle)
+2. [`spec/MESSAGE_TYPES.md`](./spec/MESSAGE_TYPES.md) — all message kinds, payload schemas, stream mapping
 3. [`AGENTS.md`](./AGENTS.md) — module map, key invariants, recipes, testing requirements
 
 The spec is authoritative. If the implementation disagrees with the spec, the spec wins.
@@ -26,7 +26,7 @@ Know where to make changes before you start editing:
 | IPC command/reply schema | `axon/src/ipc/protocol.rs` |
 | IPC server behavior | `axon/src/ipc/server.rs` |
 | Peer table operations | `axon/src/peer_table.rs` |
-| mDNS / static discovery | `axon/src/discovery/discovery.rs` |
+| mDNS / static discovery | `axon/src/discovery.rs` |
 | Daemon orchestration | `axon/src/daemon/mod.rs` |
 | Reconnection logic | `axon/src/daemon/reconnect.rs` |
 | CLI commands | `axon/src/main.rs` |
@@ -120,7 +120,7 @@ Follow this recipe exactly:
 5. **Add CLI command** in `axon/src/main.rs` if exposed to users
 6. **Add serde round-trip test** in `axon/src/message/payloads.rs`
 7. **Add spec compliance test** in `axon/tests/spec_compliance.rs`
-8. **Update `spec/message-types.md`** with the new kind's schema
+8. **Update `spec/MESSAGE_TYPES.md`** with the new kind's schema
 
 ## License
 

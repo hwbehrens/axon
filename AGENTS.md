@@ -1,24 +1,44 @@
 # AXON — Agent eXchange Over Network
 
-A lightweight daemon for secure, encrypted, point-to-point messaging between LLM agents on a local network. Agents discover each other via mDNS and communicate over QUIC with TLS 1.3. No human-oriented overhead — every design decision optimizes for token efficiency and machine-parseability.
+LLM-first local messaging protocol + Rust daemon/CLI for secure agent-to-agent communication over QUIC.
 
 ## Status
 
-The spec (`spec/spec.md`) defines the target architecture. The code in `axon/` has not yet been implemented — `Cargo.toml` has the dependency list ready but there is no source code yet.
+Working implementation. The Rust crate in `axon/` includes the daemon, CLI, IPC, QUIC transport, mDNS discovery, static peer config, and a full test/fuzz/bench harness. Specs in `spec/` are authoritative; if implementation disagrees, the spec wins.
 
 ## Repository Layout
 
 ```
-README.md                  Project overview and design principles
-AGENTS.md                  This file
+README.md                  Project overview, quickstart, docs index
+AGENTS.md                  This file (LLM agent onboarding/orientation)
+CONTRIBUTING.md            Contribution workflow, full module map, invariants, detailed testing requirements
+LICENSE
 
-spec/                      Protocol specifications
-  spec.md                  Protocol spec (QUIC + Ed25519 + TLS 1.3)
-  message-types.md         Detailed message kind definitions, payload schemas, and stream mapping
+spec/                      Protocol specifications (authoritative)
+  SPEC.md                  Architecture + lifecycle (QUIC, identity, discovery, handshake)
+  MESSAGE_TYPES.md         Message kinds + payload schemas + stream mapping
+  WIRE_FORMAT.md           Normative interoperable wire format
 
-axon/                      Rust implementation (cargo crate)
-  Cargo.toml               Dependencies and package metadata
-  src/                     (not yet implemented)
+evaluations/               Agent evaluation rubrics/results (not part of the implementation)
+
+axon/                      Rust implementation (Cargo crate)
+  Cargo.toml               Dependencies and package metadata (Rust 2024 edition)
+  Makefile                 Canonical build/test/verify entrypoints (preferred over raw cargo commands)
+  src/                     Implementation
+    main.rs                CLI entrypoint (also hosts subcommands)
+    lib.rs                 Crate root
+    daemon/                Daemon orchestration, lifecycle, reconnect, replay cache
+    discovery.rs           mDNS + static peer discovery
+    identity.rs            Ed25519 identity + agent_id derivation
+    config.rs              TOML config parsing + precedence rules
+    ipc/                   Unix socket IPC protocol + server
+    message/               Message kinds, envelopes, payloads, wire encoding
+    transport/             QUIC/TLS, handshake, framing, connections
+    peer_table.rs          Peer storage, pinning, cleanup
+  tests/                   Integration, spec compliance, adversarial, e2e tests
+  benches/                 Criterion benchmarks
+  fuzz/                    cargo-fuzz harness + fuzz_targets/
+  proptest-regressions/    Persisted proptest failures (commit these)
 ```
 
 ## Key Architecture
@@ -33,54 +53,75 @@ Client (OpenClaw/CLI) ←→ [Unix Socket IPC] ←→ AXON Daemon ←→ [QUIC/U
 - **IPC**: Unix domain socket at `~/.axon/axon.sock`. Line-delimited JSON commands (`send`, `peers`, `status`). Inbound messages forwarded to all connected IPC clients.
 - **Messages**: JSON envelopes with version, UUID, sender/receiver, timestamp, kind, and payload. Kinds: `hello`, `ping/pong`, `query/response`, `delegate/ack/result`, `notify`, `cancel`, `discover/capabilities`, `error`.
 
-## Building
+## Module Map (summary)
+
+Use this to navigate quickly; for the full "change → file(s)" table, see `CONTRIBUTING.md`.
+
+- **Daemon lifecycle / reconnection**: `axon/src/daemon/`
+- **Discovery (mDNS + static peers)**: `axon/src/discovery.rs`
+- **Transport (QUIC/TLS/handshake/framing)**: `axon/src/transport/`
+- **Message model + wire encoding**: `axon/src/message/`
+- **IPC protocol + server**: `axon/src/ipc/`
+- **Identity + agent_id derivation**: `axon/src/identity.rs`
+- **Config parsing**: `axon/src/config.rs`
+- **Peer table + pinning + replay/dedupe**: `axon/src/peer_table.rs`
+- **CLI**: `axon/src/main.rs`
+
+## Key Invariants (summary)
+
+These are load-bearing. Do not change behavior without updating spec + tests. Full list: `CONTRIBUTING.md`.
+
+- **Hello must be first**: no application messages until QUIC connection completes the `hello` handshake.
+- **Agent ID = SHA-256(pubkey)**: peer identity must match TLS certificate/public key; reject mismatches.
+- **Peer pinning**: unknown peers must not be accepted at TLS/transport; expected peers must be set before connect.
+- **Single-connection rule**: deterministic initiator selection (lower `agent_id` initiates) prevents duplicate links.
+- **Replay protection**: inbound message UUIDs are tracked; duplicates are dropped within TTL.
+
+## Building & Verification
+
+The `Makefile` in `axon/` is canonical. Run commands from `axon/`.
 
 ```sh
 cd axon
-cargo build
+make check        # fast typecheck
+make fmt          # rustfmt
+make lint         # clippy -D warnings
+make test-unit    # quick unit tests
+make test-all     # full test suite
+make verify       # fmt + lint + test-all (pre-commit default)
 ```
 
-## Testing
+Optional (requires additional tooling):
 
 ```sh
-cd axon
-cargo test              # unit + integration tests
-cargo test -- --ignored # long-running / e2e tests (marked #[ignore])
+make coverage         # cargo llvm-cov (summary)
+make coverage-html    # HTML report
+make fuzz             # cargo-fuzz (nightly)
+make mutants-fast     # cargo-mutants focused subset
+make mutants          # broader mutation testing (slower)
 ```
 
-## Development Philosophy
+## Testing Conventions
 
-AXON is a small, simple protocol. The implementation must be **rock solid**. Every module must be thoroughly tested before moving on. Do not trade correctness for speed of development.
+Detailed requirements and recipes live in `CONTRIBUTING.md`. Key conventions:
 
-### Testing Requirements
-
-**Unit tests** — every module must have inline `#[cfg(test)]` unit tests covering:
-- All public functions, including edge cases and error paths.
-- Serialization/deserialization round-trips for all message types.
-- Crypto operations (key generation, signing, certificate creation).
-- Peer table operations (insert, remove, stale cleanup, static vs discovered).
-
-**Integration tests** — `axon/tests/` directory, testing interactions between modules:
-- IPC command handling: send a JSON command over a Unix socket, verify the daemon's response.
-- Discovery → transport flow: peer discovered via mDNS triggers QUIC connection and `hello` exchange.
-- Message routing end-to-end within a single process: IPC in → envelope creation → QUIC send → QUIC receive → IPC out.
-
-**End-to-end tests** — marked `#[ignore]`, spin up two real daemon processes on localhost:
-- Two daemons discover each other and complete `hello`.
-- `axon send` CLI delivers a message from daemon A to daemon B.
-- Graceful shutdown: daemon exits cleanly, peer detects disconnection.
-- Reconnection: daemon B restarts, daemon A reconnects.
-
-**Future: fuzz and mutation testing** — once the core is stable:
-- Fuzz all deserialization entry points (envelope parsing, IPC command parsing, config file parsing) using `cargo-fuzz`.
-- Mutation testing via `cargo-mutants` to verify test suite quality — tests should catch mutations in core logic.
-
-### What to Test vs. What Not To
-
-- **Do test**: your own logic, protocol invariants, error handling, state transitions, concurrency (e.g., multiple IPC clients, peer table under contention).
-- **Don't test**: third-party crate internals (quinn, ed25519-dalek, mdns-sd). Trust their guarantees. Test your integration with them, not their correctness.
+- **Unit tests live in sibling `*_tests.rs` files**, wired from the module via:
+  ```rust
+  #[cfg(test)]
+  #[path = "foo_tests.rs"]
+  mod tests;
+  ```
+- **Integration/spec/adversarial/e2e tests** are in `axon/tests/`:
+  - `make test-integration` — integration + spec compliance + adversarial
+  - `make test-e2e` — daemon lifecycle
+- **Property-based tests** use `proptest`. Commit `proptest-regressions/` when generated.
+- **Fuzz targets** live in `axon/fuzz/fuzz_targets/`. Add one for any new deserialization entrypoint.
+- **Mutation testing** via `cargo-mutants` validates test suite quality.
+- **File size limit**: all source files must stay under 500 lines. Split into submodules when approaching.
 
 ## Specs to Read First
 
-1. `spec/spec.md` — full architecture (QUIC, Ed25519, discovery trait, static peers, lifecycle)
-2. `spec/message-types.md` — all message kinds, payload schemas, stream mapping, and domain conventions
+1. `spec/SPEC.md` — architecture + lifecycle (identity, discovery, transport, handshake)
+2. `spec/MESSAGE_TYPES.md` — message kinds, payload schemas, stream mapping
+3. `spec/WIRE_FORMAT.md` — normative interoperable wire format
+4. `CONTRIBUTING.md` — contribution workflow, full module map, invariants, testing requirements

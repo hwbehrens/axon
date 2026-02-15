@@ -1,7 +1,7 @@
 //! Wire protocol compliance tests.
 //!
-//! Each test verifies a specific requirement from `spec/spec.md` or
-//! `spec/message-types.md` (v2). Tests are grouped by spec section.
+//! Each test verifies a specific requirement from `spec/SPEC.md` or
+//! `spec/MESSAGE_TYPES.md` (v2). Tests are grouped by spec section.
 
 use axon::message::*;
 use serde_json::{Value, json};
@@ -446,7 +446,7 @@ fn hello_features_advertises_all_optional() {
 // Deserialization from spec example JSON
 // =========================================================================
 
-/// Verify that the exact JSON shapes from spec/message-types.md can be
+/// Verify that the exact JSON shapes from spec/MESSAGE_TYPES.md can be
 /// deserialized.
 #[test]
 fn deserialize_spec_query_example() {

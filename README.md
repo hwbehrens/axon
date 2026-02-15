@@ -118,7 +118,8 @@ axon examples    # prints a full annotated hello → discover → query → dele
 
 | Document | Description |
 |----------|-------------|
-| [`spec/spec.md`](./spec/spec.md) | Protocol architecture (QUIC, Ed25519, discovery, lifecycle) |
-| [`spec/message-types.md`](./spec/message-types.md) | All message kinds, payload schemas, stream mapping |
-| [`spec/wire-format.md`](./spec/wire-format.md) | Normative wire format for interoperable implementations |
+| [`spec/SPEC.md`](./spec/SPEC.md) | Protocol architecture (QUIC, Ed25519, discovery, lifecycle) |
+| [`spec/MESSAGE_TYPES.md`](./spec/MESSAGE_TYPES.md) | All message kinds, payload schemas, stream mapping |
+| [`spec/WIRE_FORMAT.md`](./spec/WIRE_FORMAT.md) | Normative wire format for interoperable implementations |
 | [`CONTRIBUTING.md`](./CONTRIBUTING.md) | Development guide, module map, testing requirements |
+| [`evaluations/`](./evaluations/) | Agent evaluation rubrics and results (not part of the implementation) |
