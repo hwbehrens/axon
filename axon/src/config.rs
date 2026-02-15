@@ -19,6 +19,7 @@ pub struct AxonPaths {
     pub known_peers: PathBuf,
     pub replay_cache: PathBuf,
     pub socket: PathBuf,
+    pub ipc_token: PathBuf,
 }
 
 impl AxonPaths {
@@ -36,6 +37,7 @@ impl AxonPaths {
             known_peers: root.join("known_peers.json"),
             replay_cache: root.join("replay_cache.json"),
             socket: root.join("axon.sock"),
+            ipc_token: root.join("ipc-token"),
             root,
         }
     }
@@ -57,7 +59,17 @@ impl AxonPaths {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct IpcConfig {
+    #[serde(default)]
+    pub buffer_size: Option<usize>,
+    #[serde(default)]
+    pub buffer_ttl_secs: Option<u64>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct Config {
+    #[serde(default)]
+    pub name: Option<String>,
     #[serde(default)]
     pub port: Option<u16>,
     #[serde(default)]
@@ -74,6 +86,8 @@ pub struct Config {
     pub handshake_timeout_secs: Option<u64>,
     #[serde(default)]
     pub inbound_read_timeout_secs: Option<u64>,
+    #[serde(default)]
+    pub ipc: Option<IpcConfig>,
     #[serde(default)]
     pub peers: Vec<StaticPeerConfig>,
 }

@@ -9,6 +9,7 @@ use reconnect::{ReconnectState, attempt_reconnects};
 use replay_cache::ReplayCache;
 
 use std::collections::HashMap;
+use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -121,10 +122,57 @@ pub async fn run_daemon(opts: DaemonOptions) -> Result<()> {
     }
 
     // --- IPC ---
-    let (ipc, mut cmd_rx) =
-        IpcServer::bind(paths.socket.clone(), config.effective_max_ipc_clients()).await?;
+    // Generate IPC token if it doesn't exist, then load it
+    let ipc_token = if !paths.ipc_token.exists() {
+        // Generate a random 256-bit token (64 hex chars)
+        let mut token_bytes = [0u8; 32];
+        getrandom::getrandom(&mut token_bytes).context("failed to generate random token")?;
+        let token = hex::encode(token_bytes);
+
+        // Write to file with mode 0600
+        std::fs::write(&paths.ipc_token, &token).context("failed to write IPC token file")?;
+        std::fs::set_permissions(&paths.ipc_token, std::fs::Permissions::from_mode(0o600))
+            .context("failed to set IPC token permissions")?;
+
+        info!(path = %paths.ipc_token.display(), "generated new IPC token");
+        Some(token)
+    } else {
+        // Load existing token
+        match std::fs::read_to_string(&paths.ipc_token) {
+            Ok(token) => Some(token.trim().to_string()),
+            Err(e) => {
+                warn!(error = %e, "failed to read IPC token, auth will be disabled");
+                None
+            }
+        }
+    };
 
     let start = Instant::now();
+    let ipc_config = crate::ipc::IpcServerConfig {
+        agent_id: local_agent_id.to_string(),
+        public_key: identity.public_key_base64().to_string(),
+        name: config.name.clone(),
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        token: ipc_token,
+        buffer_size: config
+            .ipc
+            .as_ref()
+            .and_then(|c| c.buffer_size)
+            .unwrap_or(1000),
+        buffer_ttl_secs: config
+            .ipc
+            .as_ref()
+            .and_then(|c| c.buffer_ttl_secs)
+            .unwrap_or(86400),
+        uptime_secs: Arc::new(move || start.elapsed().as_secs()),
+    };
+
+    let (ipc, mut cmd_rx) = IpcServer::bind(
+        paths.socket.clone(),
+        config.effective_max_ipc_clients(),
+        ipc_config,
+    )
+    .await?;
 
     // --- Inbound message forwarder (transport → IPC clients) ---
     // Replay protection is already performed by the transport layer (connection.rs)

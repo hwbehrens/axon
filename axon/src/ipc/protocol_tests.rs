@@ -145,3 +145,201 @@ fn inbound_reply_serialization() {
     assert_eq!(v["inbound"], true);
     assert_eq!(v["envelope"]["kind"], "notify");
 }
+
+// --- v2 command parsing ---
+
+#[test]
+fn parse_hello_command() {
+    let cmd: IpcCommand = serde_json::from_str(r#"{"cmd":"hello","version":2}"#).unwrap();
+    match cmd {
+        IpcCommand::Hello { version } => {
+            assert_eq!(version, 2);
+        }
+        _ => panic!("expected hello command"),
+    }
+}
+
+#[test]
+fn parse_auth_command() {
+    let cmd: IpcCommand = serde_json::from_str(
+        r#"{"cmd":"auth","token":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}"#,
+    )
+    .unwrap();
+    match cmd {
+        IpcCommand::Auth { token } => {
+            assert_eq!(token.len(), 64);
+        }
+        _ => panic!("expected auth command"),
+    }
+}
+
+#[test]
+fn parse_whoami_command() {
+    let cmd: IpcCommand = serde_json::from_str(r#"{"cmd":"whoami"}"#).unwrap();
+    assert!(matches!(cmd, IpcCommand::Whoami));
+}
+
+#[test]
+fn parse_inbox_command() {
+    let cmd: IpcCommand = serde_json::from_str(
+        r#"{"cmd":"inbox","limit":100,"since":"2026-02-15T08:00:00Z","kinds":["query","notify"]}"#,
+    )
+    .unwrap();
+    match cmd {
+        IpcCommand::Inbox {
+            limit,
+            since,
+            kinds,
+        } => {
+            assert_eq!(limit, 100);
+            assert_eq!(since.unwrap(), "2026-02-15T08:00:00Z");
+            assert_eq!(kinds.unwrap().len(), 2);
+        }
+        _ => panic!("expected inbox command"),
+    }
+}
+
+#[test]
+fn parse_inbox_defaults() {
+    let cmd: IpcCommand = serde_json::from_str(r#"{"cmd":"inbox"}"#).unwrap();
+    match cmd {
+        IpcCommand::Inbox {
+            limit,
+            since,
+            kinds,
+        } => {
+            assert_eq!(limit, 50);
+            assert!(since.is_none());
+            assert!(kinds.is_none());
+        }
+        _ => panic!("expected inbox command"),
+    }
+}
+
+#[test]
+fn parse_ack_command() {
+    let id1 = Uuid::new_v4();
+    let id2 = Uuid::new_v4();
+    let cmd: IpcCommand = serde_json::from_value(json!({
+        "cmd": "ack",
+        "ids": [id1.to_string(), id2.to_string()]
+    }))
+    .unwrap();
+    match cmd {
+        IpcCommand::Ack { ids } => {
+            assert_eq!(ids.len(), 2);
+        }
+        _ => panic!("expected ack command"),
+    }
+}
+
+#[test]
+fn parse_subscribe_command() {
+    let cmd: IpcCommand = serde_json::from_str(
+        r#"{"cmd":"subscribe","since":"2026-02-15T08:00:00Z","kinds":["query"]}"#,
+    )
+    .unwrap();
+    match cmd {
+        IpcCommand::Subscribe { since, kinds } => {
+            assert!(since.is_some());
+            assert_eq!(kinds.unwrap().len(), 1);
+        }
+        _ => panic!("expected subscribe command"),
+    }
+}
+
+// --- v2 reply serialization ---
+
+#[test]
+fn hello_reply_serialization() {
+    let reply = DaemonReply::Hello {
+        ok: true,
+        version: 2,
+        agent_id: "ed25519.a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6".to_string(),
+        features: vec!["auth".to_string(), "buffer".to_string()],
+    };
+    let json = serde_json::to_string(&reply).unwrap();
+    let v: Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(v["ok"], true);
+    assert_eq!(v["version"], 2);
+    assert_eq!(v["features"].as_array().unwrap().len(), 2);
+}
+
+#[test]
+fn auth_reply_serialization() {
+    let reply = DaemonReply::Auth {
+        ok: true,
+        auth: "accepted".to_string(),
+    };
+    let json = serde_json::to_string(&reply).unwrap();
+    let v: Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(v["ok"], true);
+    assert_eq!(v["auth"], "accepted");
+}
+
+#[test]
+fn whoami_reply_serialization() {
+    let reply = DaemonReply::Whoami {
+        ok: true,
+        info: crate::ipc::WhoamiInfo {
+            agent_id: "ed25519.a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6".to_string(),
+            public_key: "base64key".to_string(),
+            name: Some("test-agent".to_string()),
+            version: "0.1.0".to_string(),
+            ipc_version: 2,
+            uptime_secs: 3600,
+        },
+    };
+    let json = serde_json::to_string(&reply).unwrap();
+    let v: Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(v["ok"], true);
+    assert_eq!(v["ipc_version"], 2);
+    assert_eq!(v["uptime_secs"], 3600);
+}
+
+#[test]
+fn inbox_reply_serialization() {
+    let envelope = Envelope::new(
+        "ed25519.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+        "ed25519.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string(),
+        MessageKind::Query,
+        json!({"question":"test"}),
+    );
+    let buffered = crate::ipc::BufferedMessage {
+        envelope,
+        buffered_at: "2026-02-15T08:00:00.000Z".to_string(),
+    };
+    let reply = DaemonReply::Inbox {
+        ok: true,
+        messages: vec![buffered],
+        has_more: false,
+    };
+    let json = serde_json::to_string(&reply).unwrap();
+    let v: Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(v["ok"], true);
+    assert_eq!(v["messages"].as_array().unwrap().len(), 1);
+    assert_eq!(v["has_more"], false);
+}
+
+#[test]
+fn ack_reply_serialization() {
+    let reply = DaemonReply::Ack { ok: true, acked: 3 };
+    let json = serde_json::to_string(&reply).unwrap();
+    let v: Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(v["ok"], true);
+    assert_eq!(v["acked"], 3);
+}
+
+#[test]
+fn subscribe_reply_serialization() {
+    let reply = DaemonReply::Subscribe {
+        ok: true,
+        subscribed: true,
+        replayed: 5,
+    };
+    let json = serde_json::to_string(&reply).unwrap();
+    let v: Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(v["ok"], true);
+    assert_eq!(v["subscribed"], true);
+    assert_eq!(v["replayed"], 5);
+}

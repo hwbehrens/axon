@@ -188,37 +188,40 @@ Two implementations for v0.2: `MdnsDiscovery` and `StaticDiscovery`. Both feed t
 
 ## 5. Local IPC: Unix Domain Socket
 
+The full IPC specification is in [`spec/IPC.md`](./IPC.md). This section provides a summary.
+
 ### Socket Path
 - `~/.axon/axon.sock`
-- Removed on startup (clean stale sockets). Created fresh.
+- Removed on startup (clean stale sockets). Created fresh. Permissions: mode `0600`.
 
 ### Protocol
-Line-delimited JSON over Unix socket. Each line is one complete JSON object.
+Line-delimited JSON over Unix socket. Each line is one complete JSON object. Protocol versioning via optional `hello` handshake (see `IPC.md` §1.2).
 
-### Client → Daemon (commands)
+### Core Commands (v1)
 ```json
 {"cmd": "send", "to": "<agent_id>", "kind": "query", "payload": { ... }}
-{"cmd": "send", "to": "<agent_id>", "kind": "delegate", "payload": { ... }}
-{"cmd": "send", "to": "<agent_id>", "kind": "notify", "payload": { ... }}
 {"cmd": "peers"}
 {"cmd": "status"}
 ```
 
-### Daemon → Client (responses + inbound)
-```json
-{"ok": true, "msg_id": "uuid"}
-{"ok": true, "peers": [{"id": "a1b2...", "addr": "192.168.1.50:7100", "status": "connected", "rtt_ms": 0.4}]}
-{"ok": true, "uptime_secs": 3600, "peers_connected": 1, "messages_sent": 42, "messages_received": 38}
-{"ok": false, "error": "peer not found: ed25519.e5f6a7b8"}
-```
+### v2 Commands
+- **`hello`** — Protocol version negotiation and feature discovery.
+- **`auth`** — Token-based authentication (fallback when peer credentials unavailable).
+- **`whoami`** — Daemon identity (agent_id, public key, version).
+- **`inbox`** — Fetch buffered inbound messages (poll pattern).
+- **`ack`** — Acknowledge processed messages, removing them from the buffer.
+- **`subscribe`** — Stream inbound messages with optional replay and kind filtering.
 
-```json
-{"inbound": true, "envelope": { ... full envelope ... }}
-```
+### Receive Buffer
+The IPC layer maintains a bounded in-memory receive buffer (default: 1000 messages, 24h TTL) so that messages arriving between client connections are not lost. This is an IPC-layer concern — QUIC peer-to-peer delivery semantics are unchanged. Optional disk persistence available. See `IPC.md` §4.
+
+### Authentication
+Peer credential verification (`SO_PEERCRED`/`getpeereid`) as primary mechanism; token file as fallback. v1 clients (no `hello`) are exempt. See `IPC.md` §2.
 
 ### Multiple IPC Clients
 - Multiple clients can connect to the socket simultaneously.
-- All connected clients receive inbound messages (broadcast to all IPC clients).
+- v1 clients receive inbound messages via broadcast (legacy behavior).
+- v2 clients receive inbound messages only via `subscribe` or `inbox`.
 - Commands are handled by whichever client sends them.
 
 ## 6. CLI
@@ -288,7 +291,7 @@ All CLI commands (except `daemon`) connect to the Unix socket, send a command, p
 
 ## 9. Error Handling
 
-- **Peer unreachable:** Fail immediately, return error to IPC client. The calling agent can retry if it wants. AXON is a transport, not a queue.
+- **Peer unreachable:** Fail immediately, return error to IPC client. The calling agent can retry if it wants. AXON is a transport — peer-to-peer delivery has no store-and-forward semantics. (The IPC layer maintains a local receive buffer for inbound messages; see `IPC.md` §4.)
 - **Invalid peer cert:** Reject connection, log warning.
 - **Malformed message:** Drop, log warning. Don't crash.
 - **IPC client disconnects:** Clean up, no effect on other clients or QUIC connections.

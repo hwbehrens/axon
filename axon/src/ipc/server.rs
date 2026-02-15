@@ -10,11 +10,17 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{Mutex, mpsc};
 
+use super::auth;
+use super::handlers::{ClientState, IpcHandlers};
 use super::protocol::{CommandEvent, DaemonReply, IpcCommand};
+use super::receive_buffer::ReceiveBuffer;
 use crate::message::Envelope;
 
 const MAX_CLIENT_QUEUE: usize = 1024;
 const MAX_IPC_LINE_LENGTH: usize = 256 * 1024; // 256 KB
+
+// Re-export config and types for public API
+pub use super::handlers::IpcServerConfig;
 
 // ---------------------------------------------------------------------------
 // IPC server
@@ -25,13 +31,17 @@ pub struct IpcServer {
     socket_path: PathBuf,
     max_clients: usize,
     clients: Arc<Mutex<HashMap<u64, mpsc::Sender<Arc<str>>>>>,
+    client_states: Arc<Mutex<HashMap<u64, ClientState>>>,
     next_client_id: Arc<AtomicU64>,
+    handlers: Arc<IpcHandlers>,
+    owner_uid: u32,
 }
 
 impl IpcServer {
     pub async fn bind(
         socket_path: PathBuf,
         max_clients: usize,
+        config: IpcServerConfig,
     ) -> Result<(Self, mpsc::Receiver<CommandEvent>)> {
         if socket_path.exists() {
             let meta = fs::symlink_metadata(&socket_path).with_context(|| {
@@ -72,11 +82,30 @@ impl IpcServer {
             },
         )?;
 
+        let owner_uid = unsafe { libc::getuid() };
+
+        let clients = Arc::new(Mutex::new(HashMap::new()));
+        let client_states = Arc::new(Mutex::new(HashMap::new()));
+        let receive_buffer = Arc::new(Mutex::new(ReceiveBuffer::new(
+            config.buffer_size,
+            config.buffer_ttl_secs,
+        )));
+
+        let handlers = Arc::new(IpcHandlers::new(
+            Arc::new(config),
+            client_states.clone(),
+            receive_buffer,
+            clients.clone(),
+        ));
+
         let server = Self {
             socket_path,
             max_clients,
-            clients: Arc::new(Mutex::new(HashMap::new())),
+            clients,
+            client_states,
             next_client_id: Arc::new(AtomicU64::new(1)),
+            handlers,
+            owner_uid,
         };
 
         let (cmd_tx, cmd_rx) = mpsc::channel(256);
@@ -95,16 +124,13 @@ impl IpcServer {
     }
 
     pub async fn broadcast_inbound(&self, envelope: &Envelope) -> Result<()> {
-        let msg = DaemonReply::Inbound {
-            inbound: true,
-            envelope: envelope.clone(),
-        };
-        let line: Arc<str> =
-            Arc::from(serde_json::to_string(&msg).context("failed to serialize inbound message")?);
-        for tx in self.clients.lock().await.values() {
-            let _ = tx.try_send(line.clone());
-        }
-        Ok(())
+        self.handlers.broadcast_inbound(envelope).await
+    }
+
+    pub async fn handle_command(&self, event: CommandEvent) -> Result<DaemonReply> {
+        self.handlers
+            .handle_command(event.client_id, event.command)
+            .await
     }
 
     pub async fn client_count(&self) -> usize {
@@ -129,8 +155,10 @@ impl IpcServer {
 
     fn start_accept_loop(&self, listener: UnixListener, cmd_tx: mpsc::Sender<CommandEvent>) {
         let clients = self.clients.clone();
+        let client_states = self.client_states.clone();
         let next_client_id = self.next_client_id.clone();
         let max_clients = self.max_clients;
+        let owner_uid = self.owner_uid;
 
         tokio::spawn(async move {
             loop {
@@ -157,16 +185,31 @@ impl IpcServer {
                     }
                 }
 
+                // Check peer credentials for implicit authentication
+                let peer_authenticated = if let Some(peer_uid) = auth::peer_uid(&socket) {
+                    peer_uid == owner_uid
+                } else {
+                    false
+                };
+
                 let (out_tx, out_rx) = mpsc::channel::<Arc<str>>(MAX_CLIENT_QUEUE);
                 clients.lock().await.insert(client_id, out_tx.clone());
 
+                let state = ClientState {
+                    authenticated: peer_authenticated,
+                    ..Default::default()
+                };
+                client_states.lock().await.insert(client_id, state);
+
                 let clients_for_remove = clients.clone();
+                let client_states_for_remove = client_states.clone();
                 let cmd_tx_for_client = cmd_tx.clone();
 
                 tokio::spawn(async move {
                     let _ =
                         handle_client(socket, client_id, out_tx, out_rx, cmd_tx_for_client).await;
                     clients_for_remove.lock().await.remove(&client_id);
+                    client_states_for_remove.lock().await.remove(&client_id);
                 });
             }
         });
@@ -234,5 +277,5 @@ async fn handle_client(
 }
 
 #[cfg(test)]
-#[path = "server_tests.rs"]
+#[path = "server_tests/mod.rs"]
 mod tests;

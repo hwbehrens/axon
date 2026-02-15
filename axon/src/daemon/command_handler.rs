@@ -62,6 +62,17 @@ pub(crate) async fn handle_command(cmd: CommandEvent, ctx: &DaemonContext<'_>) -
         ..
     } = ctx;
     match cmd.command {
+        // v2 commands handled directly by IpcServer
+        IpcCommand::Hello { .. }
+        | IpcCommand::Auth { .. }
+        | IpcCommand::Whoami
+        | IpcCommand::Inbox { .. }
+        | IpcCommand::Ack { .. }
+        | IpcCommand::Subscribe { .. } => {
+            let reply = ipc.handle_command(cmd.clone()).await?;
+            ipc.send_reply(cmd.client_id, &reply).await?;
+            return Ok(());
+        }
         IpcCommand::Send {
             to,
             kind,
