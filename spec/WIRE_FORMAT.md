@@ -423,6 +423,7 @@ Valid error codes:
 - `incompatible_version`
 - `unknown_kind`
 - `peer_not_found`
+- `invalid_envelope`
 
 `retryable` MUST be a boolean.
 

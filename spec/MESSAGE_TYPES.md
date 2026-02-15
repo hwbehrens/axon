@@ -242,7 +242,7 @@ All fields optional. Agents share what they choose.
 ### error
 ```json
 {
-  "code": "not_authorized|unknown_domain|overloaded|internal|timeout|cancelled|incompatible_version|unknown_kind|peer_not_found",
+  "code": "not_authorized|unknown_domain|overloaded|internal|timeout|cancelled|incompatible_version|unknown_kind|peer_not_found|invalid_envelope",
   "message": "Human-readable explanation of what went wrong and what to try instead",
   "retryable": false
 }
