@@ -31,6 +31,11 @@ thiserror = "2"
 async-trait = "0.1"
 x509-parser = "0.16"
 getrandom = "0.2"
+clap_complete = { version = "4", optional = true }
+clap_mangen = { version = "0.2", optional = true }
+
+[features]
+generate-docs = ["dep:clap_complete", "dep:clap_mangen"]
 
 [dev-dependencies]
 tempfile = "3"

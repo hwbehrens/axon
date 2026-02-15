@@ -1,6 +1,8 @@
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+#[cfg(feature = "generate-docs")]
+use clap::CommandFactory;
 use clap::{Parser, Subcommand};
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -11,6 +13,9 @@ use tracing_subscriber::EnvFilter;
 use axon::config::AxonPaths;
 use axon::daemon::{DaemonOptions, run_daemon};
 use axon::identity::Identity;
+
+#[cfg(feature = "generate-docs")]
+use std::path::PathBuf;
 
 #[derive(Debug, Parser)]
 #[command(name = "axon", about = "AXON — Agent eXchange Over Network")]
@@ -62,6 +67,14 @@ enum Commands {
     Identity,
     /// Print example interactions.
     Examples,
+    /// Generate shell completions and man page (internal, for packaging).
+    #[cfg(feature = "generate-docs")]
+    #[command(hide = true)]
+    GenDocs {
+        /// Output directory (creates completions/ and man/ inside it).
+        #[arg(long, value_name = "DIR")]
+        out_dir: PathBuf,
+    },
 }
 
 #[tokio::main]
@@ -179,11 +192,52 @@ async fn main() -> Result<()> {
                 .context("failed to encode identity output")?
             );
         }
+        #[cfg(feature = "generate-docs")]
+        Commands::GenDocs { out_dir } => {
+            generate_docs(&out_dir)?;
+        }
         Commands::Examples => {
             print_annotated_examples();
         }
     }
 
+    Ok(())
+}
+
+#[cfg(feature = "generate-docs")]
+fn generate_docs(out_dir: &std::path::Path) -> Result<()> {
+    use clap_complete::{Shell, generate_to};
+    use clap_mangen::Man;
+    use std::fs;
+
+    let completions_dir = out_dir.join("completions");
+    let man_dir = out_dir.join("man");
+
+    fs::create_dir_all(&completions_dir)
+        .with_context(|| format!("failed to create {}", completions_dir.display()))?;
+    fs::create_dir_all(&man_dir)
+        .with_context(|| format!("failed to create {}", man_dir.display()))?;
+
+    let mut cmd = Cli::command();
+    let bin_name = cmd.get_name().to_string();
+
+    for shell in [Shell::Bash, Shell::Zsh, Shell::Fish] {
+        generate_to(shell, &mut cmd, &bin_name, &completions_dir)
+            .with_context(|| format!("failed generating {shell:?} completion"))?;
+    }
+
+    let man = Man::new(Cli::command());
+    let mut buffer: Vec<u8> = Vec::new();
+    man.render(&mut buffer)
+        .context("failed rendering man page")?;
+    let man_path = man_dir.join("axon.1");
+    fs::write(&man_path, &buffer)
+        .with_context(|| format!("failed writing {}", man_path.display()))?;
+
+    eprintln!(
+        "Generated completions and man page in {}",
+        out_dir.display()
+    );
     Ok(())
 }
 
