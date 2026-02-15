@@ -7,7 +7,7 @@ use tokio::runtime::Runtime;
 use axon::peer_table::PeerTable;
 
 fn make_agent_id(i: usize) -> axon::message::AgentId {
-    format!("{i:032x}").into()
+    format!("ed25519.{i:032x}").into()
 }
 
 fn make_pubkey(i: usize) -> String {

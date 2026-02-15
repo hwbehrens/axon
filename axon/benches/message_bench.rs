@@ -8,8 +8,8 @@ fn make_small_envelope() -> Envelope {
     Envelope {
         v: 1,
         id: Uuid::new_v4(),
-        from: "a".repeat(32).into(),
-        to: "b".repeat(32).into(),
+        from: format!("ed25519.{}", "a".repeat(32)).into(),
+        to: format!("ed25519.{}", "b".repeat(32)).into(),
         ts: 1700000000000,
         kind: MessageKind::Ping,
         ref_id: None,
@@ -21,8 +21,8 @@ fn make_medium_envelope() -> Envelope {
     Envelope {
         v: 1,
         id: Uuid::new_v4(),
-        from: "a".repeat(32).into(),
-        to: "b".repeat(32).into(),
+        from: format!("ed25519.{}", "a".repeat(32)).into(),
+        to: format!("ed25519.{}", "b".repeat(32)).into(),
         ts: 1700000000000,
         kind: MessageKind::Query,
         ref_id: None,
@@ -42,8 +42,8 @@ fn make_large_envelope() -> Envelope {
     Envelope {
         v: 1,
         id: Uuid::new_v4(),
-        from: "a".repeat(32).into(),
-        to: "b".repeat(32).into(),
+        from: format!("ed25519.{}", "a".repeat(32)).into(),
+        to: format!("ed25519.{}", "b".repeat(32)).into(),
         ts: 1700000000000,
         kind: MessageKind::Response,
         ref_id: Some(Uuid::new_v4()),
