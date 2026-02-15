@@ -282,6 +282,48 @@ fn message_ids_are_unique() {
     assert_ne!(env1.id, env2.id, "UUID v4 should generate unique IDs");
 }
 
+/// WIRE_FORMAT.md §9.2: invalid_envelope is a valid error code that round-trips
+/// through serialization. Added to spec in this PR (was missing).
+#[test]
+fn invalid_envelope_error_code_in_spec() {
+    let error_payload = axon::message::ErrorPayload {
+        code: axon::message::ErrorCode::InvalidEnvelope,
+        message: "envelope validation failed: agent IDs must be in the format ed25519.<32 hex chars>".to_string(),
+        retryable: false,
+    };
+    let json = serde_json::to_value(&error_payload).unwrap();
+    assert_eq!(json["code"], "invalid_envelope");
+    assert_eq!(json["retryable"], false);
+
+    // Round-trip: deserialize back
+    let decoded: axon::message::ErrorPayload = serde_json::from_value(json).unwrap();
+    assert_eq!(decoded.code, axon::message::ErrorCode::InvalidEnvelope);
+    assert!(!decoded.retryable);
+}
+
+/// WIRE_FORMAT.md §9.2: All error codes from the spec must serialize to their
+/// expected snake_case string representation.
+#[test]
+fn all_spec_error_codes_serialize_correctly() {
+    use axon::message::ErrorCode;
+    let expected = vec![
+        (ErrorCode::NotAuthorized, "not_authorized"),
+        (ErrorCode::UnknownDomain, "unknown_domain"),
+        (ErrorCode::Overloaded, "overloaded"),
+        (ErrorCode::Internal, "internal"),
+        (ErrorCode::Timeout, "timeout"),
+        (ErrorCode::Cancelled, "cancelled"),
+        (ErrorCode::IncompatibleVersion, "incompatible_version"),
+        (ErrorCode::UnknownKind, "unknown_kind"),
+        (ErrorCode::PeerNotFound, "peer_not_found"),
+        (ErrorCode::InvalidEnvelope, "invalid_envelope"),
+    ];
+    for (code, expected_str) in expected {
+        let json = serde_json::to_value(&code).unwrap();
+        assert_eq!(json.as_str().unwrap(), expected_str, "ErrorCode::{code:?} serializes wrong");
+    }
+}
+
 /// spec.md §10: Version mismatch in hello triggers error(incompatible_version).
 #[test]
 fn version_mismatch_produces_incompatible_version_error() {
