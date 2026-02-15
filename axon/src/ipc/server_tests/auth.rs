@@ -61,7 +61,11 @@ async fn auth_with_token() {
     // Step 1: Hello handshake
     let hello_event = CommandEvent {
         client_id: 999,
-        command: IpcCommand::Hello { version: 2 },
+        command: IpcCommand::Hello {
+            version: 2,
+            req_id: None,
+            consumer: "default".to_string(),
+        },
     };
     let reply = server
         .handle_command(hello_event)
@@ -80,6 +84,7 @@ async fn auth_with_token() {
         client_id: 999,
         command: IpcCommand::Auth {
             token: token.clone(),
+            req_id: Some("a1".to_string()),
         },
     };
     let reply = server
@@ -87,7 +92,7 @@ async fn auth_with_token() {
         .await
         .expect("handle auth");
     match reply {
-        DaemonReply::Auth { ok, auth } => {
+        DaemonReply::Auth { ok, auth, .. } => {
             assert!(ok);
             assert_eq!(auth, "accepted");
         }
@@ -99,8 +104,8 @@ async fn auth_with_token() {
         client_id: 999,
         command: IpcCommand::Inbox {
             limit: 10,
-            since: None,
             kinds: None,
+            req_id: Some("r1".to_string()),
         },
     };
     let reply = server
@@ -149,7 +154,7 @@ async fn auth_with_peer_credentials_succeeds_even_with_wrong_token() {
 
     // Send auth with wrong token - but peer credentials will accept it
     write_half
-        .write_all(b"{\"cmd\":\"auth\",\"token\":\"wrong\"}\n")
+        .write_all(b"{\"cmd\":\"auth\",\"token\":\"wrong\",\"req_id\":\"a1\"}\n")
         .await
         .expect("write");
 
@@ -206,9 +211,9 @@ async fn whoami_returns_identity() {
     let mut line = String::new();
     reader.read_line(&mut line).await.expect("read hello reply");
 
-    // Now send whoami
+    // Now send whoami (v2 commands require req_id)
     write_half
-        .write_all(b"{\"cmd\":\"whoami\"}\n")
+        .write_all(b"{\"cmd\":\"whoami\",\"req_id\":\"w1\"}\n")
         .await
         .expect("write whoami");
 
@@ -252,7 +257,11 @@ async fn auth_gating_v2_client_needs_auth() {
     // First send hello to establish v2 protocol
     let hello_event = CommandEvent {
         client_id: 999,
-        command: IpcCommand::Hello { version: 2 },
+        command: IpcCommand::Hello {
+            version: 2,
+            req_id: None,
+            consumer: "default".to_string(),
+        },
     };
     let _ = server
         .handle_command(hello_event)
@@ -265,8 +274,8 @@ async fn auth_gating_v2_client_needs_auth() {
         client_id: 999,
         command: IpcCommand::Inbox {
             limit: 10,
-            since: None,
             kinds: None,
+            req_id: Some("r1".to_string()),
         },
     };
     let reply = server
@@ -276,9 +285,9 @@ async fn auth_gating_v2_client_needs_auth() {
 
     // Should get auth_required error
     match reply {
-        DaemonReply::Error { ok, error } => {
+        DaemonReply::Error { ok, error, .. } => {
             assert!(!ok);
-            assert_eq!(error, "auth_required");
+            assert_eq!(error, IpcErrorCode::AuthRequired);
         }
         _ => panic!("Expected Error reply, got {:?}", reply),
     }
@@ -303,15 +312,15 @@ async fn v2_command_without_hello_returns_hello_required() {
         client_id: 999,
         command: IpcCommand::Inbox {
             limit: 10,
-            since: None,
             kinds: None,
+            req_id: None,
         },
     };
     let reply = server.handle_command(inbox_event).await.expect("handle");
     match reply {
-        DaemonReply::Error { ok, error } => {
+        DaemonReply::Error { ok, error, .. } => {
             assert!(!ok);
-            assert_eq!(error, "hello_required");
+            assert_eq!(error, IpcErrorCode::HelloRequired);
         }
         _ => panic!("Expected hello_required error, got {:?}", reply),
     }
@@ -319,13 +328,13 @@ async fn v2_command_without_hello_returns_hello_required() {
     // Try whoami without hello
     let whoami_event = CommandEvent {
         client_id: 1000,
-        command: IpcCommand::Whoami,
+        command: IpcCommand::Whoami { req_id: None },
     };
     let reply = server.handle_command(whoami_event).await.expect("handle");
     match reply {
-        DaemonReply::Error { ok, error } => {
+        DaemonReply::Error { ok, error, .. } => {
             assert!(!ok);
-            assert_eq!(error, "hello_required");
+            assert_eq!(error, IpcErrorCode::HelloRequired);
         }
         _ => panic!("Expected hello_required error, got {:?}", reply),
     }
@@ -346,7 +355,11 @@ async fn auth_empty_token() {
     // Test auth command directly to avoid peer credential auto-auth
     let hello_event = CommandEvent {
         client_id: 999,
-        command: IpcCommand::Hello { version: 2 },
+        command: IpcCommand::Hello {
+            version: 2,
+            req_id: None,
+            consumer: "default".to_string(),
+        },
     };
     let _ = server
         .handle_command(hello_event)
@@ -358,6 +371,7 @@ async fn auth_empty_token() {
         client_id: 999,
         command: IpcCommand::Auth {
             token: String::new(),
+            req_id: Some("a1".to_string()),
         },
     };
     let reply = server
@@ -366,9 +380,9 @@ async fn auth_empty_token() {
         .expect("handle auth");
 
     match reply {
-        DaemonReply::Error { ok, error } => {
+        DaemonReply::Error { ok, error, .. } => {
             assert!(!ok);
-            assert_eq!(error, "auth_failed");
+            assert_eq!(error, IpcErrorCode::AuthFailed);
         }
         _ => panic!("Expected Error reply with auth_failed, got {:?}", reply),
     }
@@ -389,7 +403,11 @@ async fn auth_oversized_token() {
     // Test auth command directly to avoid peer credential auto-auth
     let hello_event = CommandEvent {
         client_id: 999,
-        command: IpcCommand::Hello { version: 2 },
+        command: IpcCommand::Hello {
+            version: 2,
+            req_id: None,
+            consumer: "default".to_string(),
+        },
     };
     let _ = server
         .handle_command(hello_event)
@@ -400,7 +418,10 @@ async fn auth_oversized_token() {
     let oversized = "a".repeat(1000);
     let auth_event = CommandEvent {
         client_id: 999,
-        command: IpcCommand::Auth { token: oversized },
+        command: IpcCommand::Auth {
+            token: oversized,
+            req_id: Some("a1".to_string()),
+        },
     };
     let reply = server
         .handle_command(auth_event)
@@ -408,9 +429,9 @@ async fn auth_oversized_token() {
         .expect("handle auth");
 
     match reply {
-        DaemonReply::Error { ok, error } => {
+        DaemonReply::Error { ok, error, .. } => {
             assert!(!ok);
-            assert_eq!(error, "auth_failed");
+            assert_eq!(error, IpcErrorCode::AuthFailed);
         }
         _ => panic!("Expected Error reply with auth_failed, got {:?}", reply),
     }
@@ -433,7 +454,11 @@ async fn v2_client_send_without_auth_requires_auth() {
     // Step 1: Hello handshake
     let hello_event = CommandEvent {
         client_id: 888,
-        command: IpcCommand::Hello { version: 2 },
+        command: IpcCommand::Hello {
+            version: 2,
+            req_id: None,
+            consumer: "default".to_string(),
+        },
     };
     let _ = server
         .handle_command(hello_event)
@@ -448,6 +473,7 @@ async fn v2_client_send_without_auth_requires_auth() {
             kind: MessageKind::Notify,
             payload: json!({}),
             ref_id: None,
+            req_id: Some("s1".to_string()),
         },
     };
     let reply = server
@@ -456,10 +482,11 @@ async fn v2_client_send_without_auth_requires_auth() {
         .expect("handle send");
 
     match reply {
-        DaemonReply::Error { ok, error } => {
+        DaemonReply::Error { ok, error, .. } => {
             assert!(!ok);
             assert_eq!(
-                error, "auth_required",
+                error,
+                IpcErrorCode::AuthRequired,
                 "v2 client should need auth for send"
             );
         }
@@ -486,6 +513,7 @@ async fn auth_malformed_token_non_hex() {
         client_id: 999,
         command: IpcCommand::Auth {
             token: malformed.to_string(),
+            req_id: None,
         },
     };
     let reply = server
@@ -494,9 +522,13 @@ async fn auth_malformed_token_non_hex() {
         .expect("handle auth");
 
     match reply {
-        DaemonReply::Error { ok, error } => {
+        DaemonReply::Error { ok, error, .. } => {
             assert!(!ok);
-            assert_eq!(error, "auth_failed", "non-hex token should be rejected");
+            assert_eq!(
+                error,
+                IpcErrorCode::AuthFailed,
+                "non-hex token should be rejected"
+            );
         }
         _ => panic!("Expected auth_failed error, got {:?}", reply),
     }
@@ -519,7 +551,10 @@ async fn auth_malformed_token_wrong_length() {
     let malformed = "a".repeat(32);
     let auth_event = CommandEvent {
         client_id: 999,
-        command: IpcCommand::Auth { token: malformed },
+        command: IpcCommand::Auth {
+            token: malformed,
+            req_id: None,
+        },
     };
     let reply = server
         .handle_command(auth_event)
@@ -527,10 +562,11 @@ async fn auth_malformed_token_wrong_length() {
         .expect("handle auth");
 
     match reply {
-        DaemonReply::Error { ok, error } => {
+        DaemonReply::Error { ok, error, .. } => {
             assert!(!ok);
             assert_eq!(
-                error, "auth_failed",
+                error,
+                IpcErrorCode::AuthFailed,
                 "wrong-length token should be rejected"
             );
         }
@@ -555,7 +591,11 @@ async fn auth_fails_closed_when_no_token_configured() {
     // Hello first
     let hello_event = CommandEvent {
         client_id: 999,
-        command: IpcCommand::Hello { version: 2 },
+        command: IpcCommand::Hello {
+            version: 2,
+            req_id: None,
+            consumer: "default".to_string(),
+        },
     };
     let _ = server
         .handle_command(hello_event)
@@ -567,6 +607,7 @@ async fn auth_fails_closed_when_no_token_configured() {
         client_id: 999,
         command: IpcCommand::Auth {
             token: "a".repeat(64),
+            req_id: Some("a1".to_string()),
         },
     };
     let reply = server
@@ -575,9 +616,9 @@ async fn auth_fails_closed_when_no_token_configured() {
         .expect("handle auth");
 
     match reply {
-        DaemonReply::Error { ok, error } => {
+        DaemonReply::Error { ok, error, .. } => {
             assert!(!ok);
-            assert_eq!(error, "auth_failed");
+            assert_eq!(error, IpcErrorCode::AuthFailed);
         }
         _ => panic!("Expected auth_failed error, got {:?}", reply),
     }

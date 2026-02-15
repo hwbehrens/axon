@@ -8,6 +8,8 @@ use serde_json::{Value, json};
 
 #[path = "spec_compliance/envelope.rs"]
 mod envelope;
+#[path = "spec_compliance/ipc_v2.rs"]
+mod ipc_v2;
 #[path = "spec_compliance/payloads.rs"]
 mod payloads;
 #[path = "spec_compliance/stream_mapping.rs"]

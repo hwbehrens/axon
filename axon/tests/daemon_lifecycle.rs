@@ -88,6 +88,32 @@ async fn wait_for_socket(paths: &AxonPaths, timeout_dur: Duration) -> bool {
     }
 }
 
+/// Poll the peers IPC command until a specific peer is NOT "connected", with a timeout.
+async fn wait_for_peer_disconnected(
+    socket_path: &std::path::Path,
+    peer_agent_id: &str,
+    timeout_dur: Duration,
+) -> bool {
+    let deadline = tokio::time::Instant::now() + timeout_dur;
+    loop {
+        if tokio::time::Instant::now() >= deadline {
+            return false;
+        }
+        if let Ok(resp) = ipc_command(socket_path, json!({"cmd": "peers"})).await {
+            if let Some(peers) = resp["peers"].as_array() {
+                let is_connected = peers.iter().any(|p| {
+                    p["id"].as_str() == Some(peer_agent_id)
+                        && p["status"].as_str() == Some("connected")
+                });
+                if !is_connected {
+                    return true;
+                }
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
 /// Poll the peers IPC command until a specific peer shows as "connected", with a timeout.
 async fn wait_for_peer_connected(
     socket_path: &std::path::Path,

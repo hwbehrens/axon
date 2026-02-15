@@ -9,7 +9,7 @@ use reconnect::{ReconnectState, attempt_reconnects};
 use replay_cache::ReplayCache;
 
 use std::collections::HashMap;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -123,31 +123,150 @@ pub async fn run_daemon(opts: DaemonOptions) -> Result<()> {
 
     // --- IPC ---
     // Generate IPC token if it doesn't exist, then load it
-    let ipc_token = if !paths.ipc_token.exists() {
+    let token_path = config.effective_token_path(&paths.root);
+    let ipc_token = if !token_path.exists() {
         // Generate a random 256-bit token (64 hex chars)
         let mut token_bytes = [0u8; 32];
         getrandom::getrandom(&mut token_bytes).context("failed to generate random token")?;
         let token = hex::encode(token_bytes);
 
-        // Write to file with mode 0600
-        tokio::fs::write(&paths.ipc_token, &token)
-            .await
-            .context("failed to write IPC token file")?;
-        tokio::fs::set_permissions(&paths.ipc_token, std::fs::Permissions::from_mode(0o600))
-            .await
-            .context("failed to set IPC token permissions")?;
+        // Atomic write: write to temp file then rename (IPC.md §2.2)
+        // Use randomized temp name to prevent symlink attacks on predictable paths
+        let mut tmp_name_bytes = [0u8; 8];
+        getrandom::getrandom(&mut tmp_name_bytes)
+            .context("failed to generate random temp filename")?;
+        let tmp_name = format!(".ipc-token.{}.tmp", hex::encode(tmp_name_bytes));
+        let tmp_path = token_path
+            .parent()
+            .unwrap_or(std::path::Path::new("."))
+            .join(tmp_name);
 
-        info!(path = %paths.ipc_token.display(), "generated new IPC token");
+        // Check for existing symlink at temp path (security: prevent symlink attacks)
+        if tmp_path.exists() {
+            let tmp_meta = tokio::fs::symlink_metadata(&tmp_path)
+                .await
+                .with_context(|| {
+                    format!(
+                        "failed to read metadata for temp token path: {}",
+                        tmp_path.display()
+                    )
+                })?;
+            if tmp_meta.file_type().is_symlink() {
+                anyhow::bail!(
+                    "IPC token temp path is a symlink (security violation): {}. \
+                     Remove it and restart the daemon.",
+                    tmp_path.display()
+                );
+            }
+            // Remove stale non-symlink temp file
+            tokio::fs::remove_file(&tmp_path).await.with_context(|| {
+                format!("failed to remove stale temp file: {}", tmp_path.display())
+            })?;
+        }
+
+        // Create with O_CREAT|O_EXCL semantics (create_new) and restrictive permissions
+        let token_clone = token.clone();
+        let tmp_path_clone = tmp_path.clone();
+        tokio::task::spawn_blocking(move || {
+            use std::io::Write;
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&tmp_path_clone)
+                .with_context(|| {
+                    format!(
+                        "failed to create IPC token temp file: {}",
+                        tmp_path_clone.display()
+                    )
+                })?;
+            file.write_all(token_clone.as_bytes())
+                .context("failed to write IPC token to temp file")?;
+            Ok::<(), anyhow::Error>(())
+        })
+        .await
+        .context("token write task panicked")??;
+
+        tokio::fs::rename(&tmp_path, &token_path)
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to rename IPC token temp file from {} to {}",
+                    tmp_path.display(),
+                    token_path.display()
+                )
+            })?;
+
+        info!(path = %token_path.display(), "generated new IPC token");
         Some(token)
     } else {
-        // Load existing token
-        match tokio::fs::read_to_string(&paths.ipc_token).await {
+        // Validate existing token file (IPC.md §2.2):
+        // Must not be a symlink, must be a regular file, must be owned by us
+        let meta = tokio::fs::symlink_metadata(&token_path)
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to read metadata for IPC token: {}",
+                    token_path.display()
+                )
+            })?;
+
+        if meta.file_type().is_symlink() {
+            anyhow::bail!(
+                "IPC token file is a symlink (security violation): {}. \
+                 Remove it and restart the daemon.",
+                token_path.display()
+            );
+        }
+
+        if !meta.file_type().is_file() {
+            anyhow::bail!(
+                "IPC token path is not a regular file: {}. \
+                 Remove it and restart the daemon.",
+                token_path.display()
+            );
+        }
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            use std::os::unix::fs::PermissionsExt;
+            let owner_uid = meta.uid();
+            let my_uid = unsafe { libc::getuid() };
+            if owner_uid != my_uid {
+                anyhow::bail!(
+                    "IPC token file is owned by UID {} but daemon runs as UID {} \
+                     (security violation): {}. Remove it and restart the daemon.",
+                    owner_uid,
+                    my_uid,
+                    token_path.display()
+                );
+            }
+            let mode = meta.mode() & 0o777;
+            if mode != 0o600 {
+                warn!(
+                    path = %token_path.display(),
+                    mode = format!("{:o}", mode),
+                    "IPC token file has unexpected permissions (expected 0600), fixing"
+                );
+                tokio::fs::set_permissions(&token_path, std::fs::Permissions::from_mode(0o600))
+                    .await
+                    .with_context(|| {
+                        format!(
+                            "failed to fix permissions on IPC token file: {}",
+                            token_path.display()
+                        )
+                    })?;
+            }
+        }
+
+        match tokio::fs::read_to_string(&token_path).await {
             Ok(token) => Some(token.trim().to_string()),
             Err(e) => {
                 anyhow::bail!(
                     "failed to read IPC token at {}: {e}. \
                      Remove the file to regenerate, or fix permissions.",
-                    paths.ipc_token.display()
+                    token_path.display()
                 );
             }
         }
@@ -160,6 +279,7 @@ pub async fn run_daemon(opts: DaemonOptions) -> Result<()> {
         name: config.name.clone(),
         version: env!("CARGO_PKG_VERSION").to_string(),
         token: ipc_token,
+        allow_v1: config.effective_allow_v1(),
         buffer_size: config
             .ipc
             .as_ref()
@@ -170,6 +290,7 @@ pub async fn run_daemon(opts: DaemonOptions) -> Result<()> {
             .as_ref()
             .and_then(|c| c.buffer_ttl_secs)
             .unwrap_or(86400),
+        buffer_byte_cap: config.ipc.as_ref().and_then(|c| c.buffer_byte_cap),
         uptime_secs: Arc::new(move || start.elapsed().as_secs()),
     };
 

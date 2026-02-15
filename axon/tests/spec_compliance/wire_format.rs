@@ -90,14 +90,14 @@ fn agent_id_deterministic_from_keypair() {
 #[test]
 fn ipc_peers_command_shape() {
     let cmd: axon::ipc::IpcCommand = serde_json::from_str(r#"{"cmd":"peers"}"#).unwrap();
-    assert!(matches!(cmd, axon::ipc::IpcCommand::Peers));
+    assert!(matches!(cmd, axon::ipc::IpcCommand::Peers { .. }));
 }
 
 /// spec.md §5: `{"cmd":"status"}` is a valid IPC command.
 #[test]
 fn ipc_status_command_shape() {
     let cmd: axon::ipc::IpcCommand = serde_json::from_str(r#"{"cmd":"status"}"#).unwrap();
-    assert!(matches!(cmd, axon::ipc::IpcCommand::Status));
+    assert!(matches!(cmd, axon::ipc::IpcCommand::Status { .. }));
 }
 
 /// spec.md §5: send command includes to, kind, and payload.
@@ -124,11 +124,12 @@ fn ipc_send_command_shape() {
 fn ipc_error_response_shape() {
     let reply = axon::ipc::DaemonReply::Error {
         ok: false,
-        error: "peer not found: deadbeef".to_string(),
+        error: axon::ipc::IpcErrorCode::PeerNotFound,
+        req_id: None,
     };
     let j: Value = serde_json::to_value(&reply).unwrap();
     assert_eq!(j["ok"], false);
-    assert!(j["error"].as_str().unwrap().contains("peer not found"));
+    assert_eq!(j["error"], "peer_not_found");
 }
 
 /// spec.md §5: inbound messages forwarded with envelope.
@@ -162,7 +163,7 @@ fn ipc_v2_hello_command_shape() {
     }))
     .unwrap();
     match cmd {
-        axon::ipc::IpcCommand::Hello { version } => {
+        axon::ipc::IpcCommand::Hello { version, .. } => {
             assert_eq!(version, 2);
         }
         _ => panic!("expected Hello"),
@@ -175,8 +176,10 @@ fn ipc_v2_hello_response_shape() {
     let reply = axon::ipc::DaemonReply::Hello {
         ok: true,
         version: 2,
+        daemon_max_version: 2,
         agent_id: "ed25519.test1234567890abcdef1234567890".to_string(),
         features: vec!["auth".to_string(), "buffer".to_string()],
+        req_id: None,
     };
     let j: Value = serde_json::to_value(&reply).unwrap();
     assert_eq!(j["ok"], true);
@@ -194,7 +197,7 @@ fn ipc_v2_auth_command_shape() {
     }))
     .unwrap();
     match cmd {
-        axon::ipc::IpcCommand::Auth { token } => {
+        axon::ipc::IpcCommand::Auth { token, .. } => {
             assert_eq!(token.len(), 64);
         }
         _ => panic!("expected Auth"),
@@ -207,6 +210,7 @@ fn ipc_v2_auth_success_response_shape() {
     let reply = axon::ipc::DaemonReply::Auth {
         ok: true,
         auth: "accepted".to_string(),
+        req_id: None,
     };
     let j: Value = serde_json::to_value(&reply).unwrap();
     assert_eq!(j["ok"], true);
@@ -218,7 +222,8 @@ fn ipc_v2_auth_success_response_shape() {
 fn ipc_v2_auth_failure_response_shape() {
     let reply = axon::ipc::DaemonReply::Error {
         ok: false,
-        error: "auth_failed".to_string(),
+        error: axon::ipc::IpcErrorCode::AuthFailed,
+        req_id: None,
     };
     let j: Value = serde_json::to_value(&reply).unwrap();
     assert_eq!(j["ok"], false);
@@ -232,7 +237,7 @@ fn ipc_v2_whoami_command_and_response_shape() {
         "cmd": "whoami"
     }))
     .unwrap();
-    assert!(matches!(cmd, axon::ipc::IpcCommand::Whoami));
+    assert!(matches!(cmd, axon::ipc::IpcCommand::Whoami { .. }));
 
     let reply = axon::ipc::DaemonReply::Whoami {
         ok: true,
@@ -244,6 +249,7 @@ fn ipc_v2_whoami_command_and_response_shape() {
             ipc_version: 2,
             uptime_secs: 123,
         },
+        req_id: None,
     };
     let j: Value = serde_json::to_value(&reply).unwrap();
     assert_eq!(j["ok"], true);
@@ -261,13 +267,8 @@ fn ipc_v2_inbox_command_shape() {
     }))
     .unwrap();
     match cmd {
-        axon::ipc::IpcCommand::Inbox {
-            limit,
-            since,
-            kinds,
-        } => {
+        axon::ipc::IpcCommand::Inbox { limit, kinds, .. } => {
             assert_eq!(limit, 10);
-            assert!(since.is_none());
             assert!(kinds.is_none());
         }
         _ => panic!("expected Inbox"),
@@ -279,23 +280,17 @@ fn ipc_v2_inbox_command_shape() {
 fn ipc_v2_inbox_command_with_filters() {
     let cmd: axon::ipc::IpcCommand = serde_json::from_value(json!({
         "cmd": "inbox",
-        "limit": 5,
-        "since": "550e8400-e29b-41d4-a716-446655440000",
-        "kinds": ["notify", "query"]
+        "limit": 100,
+        "kinds": ["query", "notify"]
     }))
     .unwrap();
     match cmd {
-        axon::ipc::IpcCommand::Inbox {
-            limit,
-            since,
-            kinds,
-        } => {
-            assert_eq!(limit, 5);
-            assert_eq!(since.unwrap(), "550e8400-e29b-41d4-a716-446655440000");
+        axon::ipc::IpcCommand::Inbox { limit, kinds, .. } => {
+            assert_eq!(limit, 100);
             let k = kinds.unwrap();
             assert_eq!(k.len(), 2);
-            assert!(k.contains(&MessageKind::Notify));
-            assert!(k.contains(&MessageKind::Query));
+            assert!(k.contains(&"query".to_string()));
+            assert!(k.contains(&"notify".to_string()));
         }
         _ => panic!("expected Inbox"),
     }
@@ -307,7 +302,9 @@ fn ipc_v2_inbox_response_shape() {
     let reply = axon::ipc::DaemonReply::Inbox {
         ok: true,
         messages: vec![],
+        next_seq: Some(1),
         has_more: false,
+        req_id: None,
     };
     let j: Value = serde_json::to_value(&reply).unwrap();
     assert_eq!(j["ok"], true);
@@ -320,15 +317,12 @@ fn ipc_v2_inbox_response_shape() {
 fn ipc_v2_ack_command_shape() {
     let cmd: axon::ipc::IpcCommand = serde_json::from_value(json!({
         "cmd": "ack",
-        "ids": [
-            "550e8400-e29b-41d4-a716-446655440000",
-            "6ba7b810-9dad-11d1-80b4-00c04fd430c8"
-        ]
+        "up_to_seq": 102
     }))
     .unwrap();
     match cmd {
-        axon::ipc::IpcCommand::Ack { ids } => {
-            assert_eq!(ids.len(), 2);
+        axon::ipc::IpcCommand::Ack { up_to_seq, .. } => {
+            assert_eq!(up_to_seq, 102);
         }
         _ => panic!("expected Ack"),
     }
@@ -337,10 +331,14 @@ fn ipc_v2_ack_command_shape() {
 /// IPC.md §3.4: ack response includes count of acknowledged messages.
 #[test]
 fn ipc_v2_ack_response_shape() {
-    let reply = axon::ipc::DaemonReply::Ack { ok: true, acked: 2 };
+    let reply = axon::ipc::DaemonReply::Ack {
+        ok: true,
+        acked_seq: 102,
+        req_id: None,
+    };
     let j: Value = serde_json::to_value(&reply).unwrap();
     assert_eq!(j["ok"], true);
-    assert_eq!(j["acked"], 2);
+    assert_eq!(j["acked_seq"], 102);
 }
 
 /// IPC.md §3.5: subscribe command with optional since and kinds.
@@ -348,13 +346,13 @@ fn ipc_v2_ack_response_shape() {
 fn ipc_v2_subscribe_command_shape() {
     let cmd: axon::ipc::IpcCommand = serde_json::from_value(json!({
         "cmd": "subscribe",
-        "since": "550e8400-e29b-41d4-a716-446655440000",
+        "replay": true,
         "kinds": ["notify"]
     }))
     .unwrap();
     match cmd {
-        axon::ipc::IpcCommand::Subscribe { since, kinds } => {
-            assert_eq!(since.unwrap(), "550e8400-e29b-41d4-a716-446655440000");
+        axon::ipc::IpcCommand::Subscribe { replay, kinds, .. } => {
+            assert!(replay);
             assert_eq!(kinds.unwrap().len(), 1);
         }
         _ => panic!("expected Subscribe"),
@@ -368,11 +366,14 @@ fn ipc_v2_subscribe_response_shape() {
         ok: true,
         subscribed: true,
         replayed: 3,
+        replay_to_seq: Some(5),
+        req_id: None,
     };
     let j: Value = serde_json::to_value(&reply).unwrap();
     assert_eq!(j["ok"], true);
     assert_eq!(j["subscribed"], true);
     assert_eq!(j["replayed"], 3);
+    assert_eq!(j["replay_to_seq"], 5);
 }
 
 // =========================================================================

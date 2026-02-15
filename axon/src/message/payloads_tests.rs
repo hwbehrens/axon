@@ -121,11 +121,30 @@ fn notify_payload_defaults() {
 #[test]
 fn cancel_payload_serde() {
     let c = CancelPayload {
-        reason: Some("Plans changed".to_string()),
+        reason: "Plans changed".to_string(),
     };
     let v = serde_json::to_value(&c).unwrap();
     let back: CancelPayload = serde_json::from_value(v).unwrap();
     assert_eq!(c, back);
+}
+
+#[test]
+fn cancel_reason_required() {
+    let result = serde_json::from_value::<CancelPayload>(json!({}));
+    assert!(result.is_err());
+}
+
+#[test]
+fn result_error_serializes_as_null() {
+    let res = ResultPayload {
+        status: TaskStatus::Completed,
+        outcome: "Done".to_string(),
+        data: None,
+        error: None,
+    };
+    let v = serde_json::to_value(&res).unwrap();
+    assert!(v.get("error").is_some(), "error field must be present");
+    assert!(v["error"].is_null(), "error field must be null");
 }
 
 #[test]

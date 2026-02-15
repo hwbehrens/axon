@@ -205,15 +205,17 @@ Line-delimited JSON over Unix socket. Each line is one complete JSON object. Pro
 ```
 
 ### v2 Commands
-- **`hello`** — Protocol version negotiation and feature discovery.
+- **`hello`** — Protocol version negotiation, feature discovery, and consumer registration.
 - **`auth`** — Token-based authentication (fallback when peer credentials unavailable).
 - **`whoami`** — Daemon identity (agent_id, public key, version).
 - **`inbox`** — Fetch buffered inbound messages (poll pattern).
-- **`ack`** — Acknowledge processed messages, removing them from the buffer.
+- **`ack`** — Advance consumer acknowledgement cursor.
 - **`subscribe`** — Stream inbound messages with optional replay and kind filtering.
 
+IPC v2 commands include a `req_id` echoed in responses so clients can correlate responses while `subscribe` events interleave. See `IPC.md` §1.3.
+
 ### Receive Buffer
-The IPC layer maintains a bounded in-memory receive buffer (default: 1000 messages, 24h TTL) so that messages arriving between client connections are not lost. This is an IPC-layer concern — QUIC peer-to-peer delivery semantics are unchanged. Optional disk persistence available. See `IPC.md` §4.
+The IPC layer maintains a bounded in-memory receive buffer (default: 1000 messages, 24h TTL) so that messages arriving between client connections are not lost. Buffered messages have a daemon-assigned monotonic `seq`. IPC v2 inbox/ack state is tracked per `consumer` (from `hello`), and `ack` advances `acked_seq` for that consumer. See `IPC.md` §4.
 
 ### Authentication
 Peer credential verification (`SO_PEERCRED`/`getpeereid`) as primary mechanism; token file as fallback. v1 clients (no `hello`) are exempt. See `IPC.md` §2.

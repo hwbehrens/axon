@@ -25,8 +25,6 @@ async fn v2_client_without_subscribe_gets_no_messages() {
     let mut reader = BufReader::new(&mut client);
     reader.read_line(&mut line).await.expect("read hello reply");
 
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-
     // Broadcast a message
     let envelope = Envelope::new(
         "ed25519.sender".to_string(),
@@ -91,50 +89,40 @@ async fn subscribe_with_replay() {
             .expect("broadcast");
     }
 
-    // Get first message ID
+    // Subscribe with replay=true (should replay buffered messages)
     write_half
-        .write_all(b"{\"cmd\":\"inbox\",\"limit\":1}\n")
-        .await
-        .expect("write");
-    let cmd = cmd_rx.recv().await.expect("recv");
-    let reply = server.handle_command(cmd).await.expect("handle");
-    server.send_reply(1, &reply).await.expect("send reply");
-    line.clear();
-    reader.read_line(&mut line).await.expect("read");
-    let v: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
-    let first_id = v["messages"][0]["envelope"]["id"].as_str().unwrap();
-
-    // Subscribe with since=first_id (should replay second message)
-    let subscribe_cmd = format!("{{\"cmd\":\"subscribe\",\"since\":\"{}\"}}\n", first_id);
-    write_half
-        .write_all(subscribe_cmd.as_bytes())
+        .write_all(b"{\"cmd\":\"subscribe\",\"replay\":true,\"req_id\":\"r1\"}\n")
         .await
         .expect("write");
     let cmd = cmd_rx.recv().await.expect("recv");
     let reply = server.handle_command(cmd).await.expect("handle");
 
     // Verify the reply is a subscribe response with replayed count
-    match reply {
+    match &reply {
         DaemonReply::Subscribe {
             ok,
             subscribed,
             replayed,
+            replay_to_seq,
+            ..
         } => {
             assert!(ok);
             assert!(subscribed);
-            assert!(replayed >= 1, "Expected at least 1 replayed message");
+            assert!(*replayed >= 1, "Expected at least 1 replayed message");
+            assert!(replay_to_seq.is_some());
         }
         _ => panic!("Expected Subscribe reply, got {:?}", reply),
     }
 
     server.send_reply(1, &reply).await.expect("send reply");
 
-    // Read replies - might get subscribe reply and/or replayed messages
-    // The order may vary due to async channel behavior
+    // Replay events are sent before the subscribe reply (deterministic order):
+    // replay messages are pushed to the client channel during handle_command,
+    // then the subscribe reply is sent via send_reply.
+    let mut replay_count = 0;
     let mut got_subscribe_reply = false;
-    let mut got_replayed_message = false;
 
-    for _ in 0..3 {
+    for _ in 0..4 {
         line.clear();
         let read_result = tokio::time::timeout(
             std::time::Duration::from_millis(500),
@@ -152,19 +140,22 @@ async fn subscribe_with_replay() {
 
         let v: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
 
-        if v.get("subscribed").is_some() {
+        if v.get("event").is_some() {
+            assert!(
+                !got_subscribe_reply,
+                "replay events must come before subscribe reply"
+            );
+            assert_eq!(v["event"], "inbound");
+            assert_eq!(v["replay"], true);
+            replay_count += 1;
+        } else if v.get("subscribed").is_some() {
             got_subscribe_reply = true;
             assert_eq!(v["ok"], true);
-        } else if v.get("inbound").is_some() {
-            got_replayed_message = true;
-            assert_eq!(v["inbound"], true);
         }
     }
 
-    assert!(
-        got_subscribe_reply || got_replayed_message,
-        "Expected to receive subscribe reply or replayed messages"
-    );
+    assert!(got_subscribe_reply, "must receive subscribe reply");
+    assert_eq!(replay_count, 2, "must replay exactly 2 buffered messages");
 }
 
 #[tokio::test]
@@ -194,7 +185,7 @@ async fn subscription_replacement() {
 
     // Subscribe to "query" only
     write_half
-        .write_all(b"{\"cmd\":\"subscribe\",\"kinds\":[\"query\"]}\n")
+        .write_all(b"{\"cmd\":\"subscribe\",\"kinds\":[\"query\"],\"req_id\":\"r1\"}\n")
         .await
         .expect("write");
     let cmd = cmd_rx.recv().await.expect("recv");
@@ -205,7 +196,7 @@ async fn subscription_replacement() {
 
     // Now replace subscription with "notify" only
     write_half
-        .write_all(b"{\"cmd\":\"subscribe\",\"kinds\":[\"notify\"]}\n")
+        .write_all(b"{\"cmd\":\"subscribe\",\"kinds\":[\"notify\"],\"req_id\":\"r2\"}\n")
         .await
         .expect("write");
     let cmd = cmd_rx.recv().await.expect("recv");
@@ -226,9 +217,6 @@ async fn subscription_replacement() {
         .await
         .expect("broadcast query");
 
-    // Give time for broadcast
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-
     // Send a notify message - client SHOULD receive it
     let notify_envelope = Envelope::new(
         "ed25519.sender".to_string(),
@@ -246,7 +234,7 @@ async fn subscription_replacement() {
     reader.read_line(&mut line).await.expect("read notify");
     let parsed: serde_json::Value = serde_json::from_str(&line).expect("parse");
 
-    // Should be the notify message
-    assert_eq!(parsed["inbound"], true);
+    // Should be the notify message (v2 clients get InboundEvent format)
+    assert_eq!(parsed["event"], "inbound");
     assert_eq!(parsed["envelope"]["kind"], "notify");
 }

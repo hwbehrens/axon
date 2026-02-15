@@ -15,6 +15,9 @@ mutants.out/
 # Local tool settings
 .claude/
 
+# Evaluations (agent scoring reports)
+evaluations/
+
 # Secrets / certs (safety net)
 *.pem
 *.key

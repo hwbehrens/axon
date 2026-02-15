@@ -34,6 +34,7 @@ async fn concurrent_ipc_flood() {
                             peers_connected: 0,
                             messages_sent: 0,
                             messages_received: 0,
+                            req_id: None,
                         },
                     )
                     .await;
@@ -122,6 +123,7 @@ async fn ipc_malformed_input_resilience() {
                             peers_connected: 0,
                             messages_sent: 0,
                             messages_received: 0,
+                            req_id: None,
                         },
                     )
                     .await;
@@ -253,6 +255,7 @@ async fn ipc_client_disconnect_under_load() {
                             peers_connected: 0,
                             messages_sent: 0,
                             messages_received: 0,
+                            req_id: None,
                         },
                     )
                     .await;

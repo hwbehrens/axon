@@ -28,8 +28,7 @@ async fn broadcasts_inbound_to_multiple_clients() {
         .await
         .expect("connect client B");
 
-    // Give the accept loop a moment to register clients.
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    wait_for_clients(&server, 2).await;
 
     let envelope = Envelope::new(
         "ed25519.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
@@ -74,7 +73,7 @@ async fn send_command_round_trip() {
         .expect("timeout")
         .expect("recv");
 
-    assert!(matches!(cmd.command, IpcCommand::Peers));
+    assert!(matches!(cmd.command, IpcCommand::Peers { .. }));
 
     server
         .send_reply(
@@ -82,6 +81,7 @@ async fn send_command_round_trip() {
             &DaemonReply::Peers {
                 ok: true,
                 peers: vec![],
+                req_id: None,
             },
         )
         .await
@@ -114,7 +114,7 @@ async fn invalid_command_returns_error() {
     let mut reader = BufReader::new(client);
     reader.read_line(&mut line).await.expect("read");
     assert!(line.contains("\"ok\":false"));
-    assert!(line.contains("invalid command"));
+    assert!(line.contains("invalid_command"));
 }
 
 #[tokio::test]
@@ -143,11 +143,16 @@ async fn client_disconnect_does_not_affect_others() {
     let client_a = UnixStream::connect(&socket_path).await.expect("connect A");
     let mut client_b = UnixStream::connect(&socket_path).await.expect("connect B");
 
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    assert_eq!(server.client_count().await, 2);
+    wait_for_clients(&server, 2).await;
 
     drop(client_a);
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    // Wait for disconnect to propagate
+    for _ in 0..100 {
+        if server.client_count().await < 2 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
 
     let envelope = Envelope::new(
         "ed25519.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
@@ -178,7 +183,7 @@ async fn v1_client_receives_all_messages() {
     // v1 client (no hello)
     let mut client = UnixStream::connect(&socket_path).await.expect("connect");
 
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    wait_for_clients(&server, 1).await;
 
     // Broadcast a message
     let envelope = Envelope::new(

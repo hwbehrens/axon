@@ -131,7 +131,7 @@ pub struct ResultPayload {
     pub outcome: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data: Option<Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub error: Option<String>,
 }
 
@@ -145,8 +145,7 @@ pub struct NotifyPayload {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CancelPayload {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reason: Option<String>,
+    pub reason: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -12,35 +12,62 @@ The IPC interface bridges local client processes (CLI tools, agents) with the AX
 
 ### 1.1 Design Principles
 
-1. **Zero overhead when unused.** Clients using only `send`/`peers`/`status` MUST NOT pay for buffer or auth features.
+1. **Zero overhead for v1 clients.** Clients using only `send`/`peers`/`status` MUST NOT pay for buffer or auth features.
 2. **The daemon stays lightweight.** No HTTP client. No external dependencies beyond the QUIC transport.
 3. **Existing commands are unchanged.** All v1 commands work identically.
 4. **Boundary is the Unix socket.** QUIC transport semantics are unaffected. Peer-to-peer delivery is unchanged: if a peer is unreachable, `send` fails immediately.
 
-### 1.2 Protocol Versioning
+### 1.2 Protocol Versioning and Handshake
 
-On connection, the client SHOULD send a `hello` command as its first message:
+IPC is line-delimited JSON (one complete JSON object per line).
+IPC **v2+** adds an explicit `hello` handshake.
 
+**Client → daemon (`hello` request):**
 ```json
-{"cmd": "hello", "version": 2}
+{"cmd": "hello", "req_id": "1", "version": 2, "consumer": "default"}
 ```
 
-**Response:**
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `req_id` | string | Recommended | Opaque request identifier echoed in the response. Not required for `hello` since the protocol version is not yet negotiated. |
+| `version` | integer | Yes | Highest IPC version the client supports. |
+| `consumer` | string | No | Consumer name used for inbox/ack state. Default: `"default"`. Max 64 bytes UTF-8. |
+
+**Daemon → client (`hello` response):**
 ```json
-{"ok": true, "version": 2, "agent_id": "ed25519.a1b2c3d4...", "features": ["auth", "buffer", "subscribe"]}
+{"ok": true, "req_id": "1", "version": 2, "daemon_max_version": 2, "agent_id": "ed25519.a1b2c3d4...", "features": ["buffer", "subscribe", "auth"]}
 ```
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `version` | integer | Highest IPC protocol version the daemon supports. |
+| `version` | integer | **Negotiated** IPC version for this connection: `min(client.version, daemon_max_version)`. |
+| `daemon_max_version` | integer | Maximum IPC version supported by the daemon. |
 | `agent_id` | string | This daemon's agent identity. |
 | `features` | array of string | Optional features available in this build. |
 
-If a client skips `hello`, the daemon MUST assume v1 semantics and accept all v1 commands without authentication. This ensures backward compatibility.
+**Negotiation rule:** The daemon computes `version = min(client.version, daemon_max_version)` and returns it. Clients MUST NOT compute negotiation themselves; they MUST use the `version` field from the response.
 
-If a client skips `hello` and sends a v2-only command (`whoami`, `inbox`, `ack`, `subscribe`), the daemon MUST reject it with `hello_required`. These commands are only available after a successful `hello` handshake.
+After a successful `hello`, all semantics on that connection are governed by the negotiated `version`.
 
-If a client sends `hello` with a `version` higher than the daemon supports, the daemon MUST respond with its own highest supported version. The **negotiated version** for the connection is `min(client_requested, daemon_supported)`. All subsequent semantics on that connection are governed by the negotiated version. If the negotiated version is 1, v2 rules (auth gating, subscription-only delivery) do not apply.
+**v1 compatibility:** If a client does not send `hello`, the daemon MUST assume v1 semantics and accept all v1 commands without authentication. This ensures backward compatibility.
+
+If a client skips `hello` and sends a v2-only command (`whoami`, `inbox`, `ack`, `subscribe`), the daemon MUST reject it with `hello_required`.
+
+**Hardened mode:** When `ipc.allow_v1 = false`, the daemon MUST reject any connection that does not complete `hello` negotiating `version >= 2`. A `hello` that negotiates version 1 MUST be rejected with error code `unsupported_version`. See §8.
+
+### 1.3 Request/Response Correlation (v2+)
+
+For negotiated IPC `version >= 2`:
+- Every client command MUST include `req_id` (string).
+- Every command response MUST include the same `req_id`.
+- Exception: `hello` MAY omit `req_id` since the protocol version is not yet negotiated when `hello` is sent. If `hello` includes `req_id`, the daemon MUST echo it. All commands after `hello` MUST include `req_id`.
+- The daemon MAY send pushed inbound events at any time while a subscription is active (see §3.5), including between a request and its response.
+
+A pushed inbound event is identified by the presence of `"event": "inbound"` (see §3.5). It never carries `ok` or `req_id`.
+
+Clients MUST demultiplex by:
+- If the object contains `"event": "inbound"`, treat it as a pushed event.
+- Otherwise, treat it as a response and correlate by `req_id`.
 
 ---
 
@@ -62,41 +89,45 @@ When peer credential extraction is unavailable or fails, the daemon falls back t
 2. The client MUST send `auth` after `hello`. Until authenticated, commands other than `hello`, `auth`, and `status` return error code `auth_required`.
 3. Token rotation is a filesystem operation (regenerate file, `SIGHUP` daemon). It is NOT an IPC command.
 
+**Token file creation requirements (normative):**
+- The daemon MUST create the token file with mode `0600`.
+- The daemon MUST write the token atomically (write to a temporary file then `rename`) OR open with `O_CREAT|O_EXCL` to avoid races.
+- The daemon MUST NOT follow symlinks when creating or writing the token file.
+- If the existing token file is not a regular file owned by the daemon UID, the daemon MUST refuse to use it and MUST log an error.
+
 ### 2.3 `auth` Command
 
 **Request:**
 ```json
-{"cmd": "auth", "token": "<hex-encoded-256-bit-token>"}
+{"cmd": "auth", "req_id": "2", "token": "<hex-encoded-256-bit-token>"}
 ```
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
+| `req_id` | string | Yes (v2+) | Response correlation. |
 | `token` | string (hex) | Yes | 64-character hex-encoded token from `~/.axon/ipc-token`. |
 
 **Response (success):**
 ```json
-{"ok": true, "auth": "accepted"}
+{"ok": true, "req_id": "2", "auth": "accepted"}
 ```
 
 **Response (failure):**
 ```json
-{"ok": false, "error": "auth_failed"}
+{"ok": false, "req_id": "2", "error": "auth_failed"}
 ```
 
 When peer credentials already authenticated the connection, `auth` is accepted but unnecessary.
 
 ### 2.4 Hardening Configuration
 
-By default, the daemon accepts v1 clients without authentication for backward compatibility. Deployments requiring stronger local security MAY enable:
+By default, the daemon accepts v1 clients without authentication for backward compatibility. Deployments requiring stronger local security MAY set `ipc.allow_v1 = false`:
 
 | Config Key | Default | Effect |
 |---|---|---|
-| `ipc.require_hello` | `false` | When `true`, reject all commands except `hello` until handshake completes. Disables v1 unauthenticated access. |
-| `ipc.require_auth` | `false` | When `true`, require authentication for ALL connections (including v1). Useful when socket ACLs allow more than one UID. |
+| `ipc.allow_v1` | `true` | When `false`, the daemon rejects IPC v1 behavior and requires `hello` negotiating `version >= 2` for all connections. |
 
-When `require_hello = true`, the backward compatibility table in §7 changes: "skips hello" rows become rejections.
-
-> **Note on `status` before auth:** On v2 connections in token mode, `status` is accessible without authentication. This may expose operational details (uptime, peer count, buffer count). Deployments where this is a concern SHOULD use `require_auth = true` or restrict socket access via filesystem permissions.
+When `ipc.allow_v1 = false`, any command received before a successful `hello` MUST be rejected with `hello_required`, and a `hello` that negotiates version 1 MUST be rejected with `unsupported_version`.
 
 ---
 
@@ -116,13 +147,14 @@ Returns this daemon's identity.
 
 **Request:**
 ```json
-{"cmd": "whoami"}
+{"cmd": "whoami", "req_id": "3"}
 ```
 
 **Response:**
 ```json
 {
   "ok": true,
+  "req_id": "3",
   "agent_id": "ed25519.a1b2c3d4e5f6a7b8...",
   "public_key": "<base64-encoded-Ed25519-public-key>",
   "name": "<human-readable-name-from-config>",
@@ -134,88 +166,92 @@ Returns this daemon's identity.
 
 ### 3.3 `inbox`
 
-Fetch messages from the receive buffer.
+Fetch buffered inbound messages for the connection's `consumer`.
 
 **Request:**
 ```json
-{
-  "cmd": "inbox",
-  "limit": 50,
-  "since": "2026-02-15T08:00:00Z",
-  "kinds": ["query", "delegate"]
-}
+{"cmd": "inbox", "req_id": "4", "limit": 50, "kinds": ["query", "delegate"]}
 ```
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
+| `req_id` | string | Yes | — | Response correlation (see §1.3). |
 | `limit` | integer | No | 50 | Maximum messages to return. Range: 1–1000. |
-| `since` | string | No | *(all buffered)* | Cursor for pagination. If the value is a valid UUID, return messages buffered **after** the message with that ID (in buffer order). If not a UUID, parse as ISO 8601 timestamp and return messages buffered **after** that time. If the UUID is not found in the buffer, return all messages (same as omitting `since`). |
-| `kinds` | array of string | No | *(all kinds)* | Filter by message kind. Unknown kinds MUST be silently ignored. |
+| `kinds` | array of string | No | *(all kinds)* | Filter by envelope `kind`. Unknown kinds MUST cause `invalid_command`. |
 
 **Response:**
 ```json
 {
   "ok": true,
+  "req_id": "4",
   "messages": [
-    {"envelope": { }, "buffered_at": "2026-02-15T08:30:00.123Z"},
-    {"envelope": { }, "buffered_at": "2026-02-15T08:31:00.456Z"}
+    {"seq": 101, "buffered_at_ms": 1771108200123, "envelope": {}},
+    {"seq": 102, "buffered_at_ms": 1771108260456, "envelope": {}}
   ],
+  "next_seq": 102,
   "has_more": false
 }
 ```
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `messages` | array | Buffered envelopes with receipt timestamp. Ordered oldest-first. |
-| `has_more` | boolean | `true` if more messages exist beyond `limit`. |
+| `messages` | array | Buffered envelopes with receipt metadata. Ordered oldest-first. Each message includes daemon-assigned `seq`. |
+| `next_seq` | integer \| null | The highest `seq` returned in this response, or `null` if no messages were returned. |
+| `has_more` | boolean | `true` if more messages are available beyond `limit`. |
 
-When the buffer is empty, the response is `{"ok": true, "messages": [], "has_more": false}`.
+**Selection rule:** `inbox` returns messages with `seq > consumer.acked_seq` that match `kinds`.
+
+When the buffer is empty or all messages have been acknowledged, the response is `{"ok": true, "req_id": "4", "messages": [], "next_seq": null, "has_more": false}`.
 
 ### 3.4 `ack`
 
-Acknowledge processed messages. The daemon removes them from the receive buffer.
+Advance the consumer's acknowledgement cursor. This marks messages as processed for that consumer.
 
 **Request:**
 ```json
-{"cmd": "ack", "ids": ["uuid-1", "uuid-2"]}
+{"cmd": "ack", "req_id": "5", "up_to_seq": 102}
 ```
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `ids` | array of UUID | Yes | Message IDs (envelope `id` field) to acknowledge. Unknown IDs MUST be silently ignored. |
+| `req_id` | string | Yes | Response correlation. |
+| `up_to_seq` | integer | Yes | Acknowledge all messages with `seq <= up_to_seq` for this consumer. |
+
+**Rules:**
+- The daemon MUST only accept `up_to_seq` values that were previously delivered to this consumer via `inbox` or `subscribe`.
+- If `up_to_seq` is greater than the highest delivered sequence for this consumer, the daemon MUST respond with `ack_out_of_range`.
 
 **Response:**
 ```json
-{"ok": true, "acked": 2}
+{"ok": true, "req_id": "5", "acked_seq": 102}
 ```
 
 ### 3.5 `subscribe`
 
-Opens a streaming subscription on the current connection. The daemon pushes matching inbound messages as they arrive.
+Opens a streaming subscription on the current connection for the connection's `consumer`.
 
 **Request:**
 ```json
-{
-  "cmd": "subscribe",
-  "since": "2026-02-15T08:00:00Z",
-  "kinds": ["query", "delegate", "notify"]
-}
+{"cmd": "subscribe", "req_id": "6", "kinds": ["query", "delegate", "notify"], "replay": true}
 ```
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `since` | string | No | *(no replay)* | Replay buffered messages after this point before streaming live. |
-| `kinds` | array of string | No | *(all kinds)* | Filter by message kind. |
+| `req_id` | string | Yes | — | Response correlation. |
+| `kinds` | array of string | No | *(all kinds)* | Filter by envelope `kind`. Unknown kinds MUST cause `invalid_command`. |
+| `replay` | boolean | No | `true` | If `true`, the daemon first replays buffered messages with `seq > consumer.acked_seq` that match `kinds`, then switches to live delivery. |
 
-**Response (immediate):**
+**Immediate response:**
 ```json
-{"ok": true, "subscribed": true, "replayed": 3}
+{"ok": true, "req_id": "6", "subscribed": true, "replayed": 3, "replay_to_seq": 105}
 ```
 
-Followed by zero or more pushed messages:
+**Pushed inbound event (replay or live):**
 ```json
-{"inbound": true, "envelope": { }}
+{"event": "inbound", "replay": false, "seq": 106, "buffered_at_ms": 1771108300123, "envelope": {}}
 ```
+
+**Replay snapshot rule (normative):** When `subscribe` is received, the daemon defines a snapshot `replay_to_seq` equal to the current highest buffered `seq`. If `replay = true`, it MUST emit replay events (with `"replay": true`) in increasing `seq` order up to `replay_to_seq`, then begin emitting live events (with `"replay": false`) for newly buffered messages (`seq > replay_to_seq`). No message may be emitted twice on the same subscription.
 
 A connection MAY have at most one active subscription. Sending `subscribe` again MUST replace the previous filter.
 
@@ -225,19 +261,22 @@ A connection MAY have at most one active subscription. Sending `subscribe` again
 |---|---|
 | **v1** (no `hello`) | Legacy broadcast: all inbound messages pushed to all connected v1 clients. |
 | **v2, no subscription** | No unsolicited inbound messages. Client MUST use `inbox` (pull) to retrieve buffered messages. |
-| **v2, active subscription** | Inbound messages matching the subscription filter are pushed as `{"inbound": true, ...}` lines. Non-matching messages are buffered only. |
+| **v2, active subscription** | Inbound messages matching the subscription filter are pushed as `{"event": "inbound", ...}` lines. Non-matching messages are buffered only. |
 
 v1 broadcast and v2 subscriptions are separate delivery paths. A v2 client never receives legacy broadcast messages.
 
-### 3.6 Stream Interleaving
+### 3.6 Stream Interleaving (v2+)
 
-A v2 connection with an active subscription carries both request/response traffic and pushed inbound messages on a single line-delimited stream. The following rule applies:
+While a subscription is active, the daemon MAY interleave pushed inbound events with command responses on the same connection.
 
-- While a subscription is active, the client SHOULD limit commands to `ack` and `subscribe` (to replace the filter). The daemon MAY interleave pushed `{"inbound": true, ...}` messages between any two response lines.
-- Each response line is atomic (complete JSON object, newline-terminated) and MUST NOT be split by interleaved pushes.
-- Clients that need concurrent request/response alongside streaming SHOULD open a second IPC connection for commands.
+Determinism rules:
+1. Each JSON object is newline-delimited and MUST be sent atomically (no splitting a JSON object across multiple lines).
+2. Every response object MUST contain `req_id`.
+3. Pushed inbound events MUST contain `"event": "inbound"` and MUST NOT contain `ok` or `req_id`.
 
-> **Rationale:** Adding `req_id` correlation would be more robust but adds complexity. For v2, the simple interleaving rule is sufficient given LLM agent usage patterns (subscribe on one connection, poll/send on another). A future v3 MAY introduce request IDs if needed.
+Clients MUST demultiplex by:
+- If the object contains `"event": "inbound"`, treat it as a pushed event.
+- Otherwise, treat it as a response and correlate by `req_id`.
 
 ---
 
@@ -249,65 +288,41 @@ The receive buffer preserves inbound messages that arrive when no IPC client is 
 
 ### 4.2 Semantics
 
-- **Storage:** In-memory `VecDeque`. Optional disk persistence (§4.3).
-- **Capacity:** Configurable via `ipc.buffer_size` in `config.toml`. Default: **0 (disabled)**. When `buffer_size = 0`, no messages are buffered and `inbox` always returns empty. Set to a positive value (e.g., 1000) to enable.
-- **Byte bound:** Configurable via `ipc.buffer_max_bytes`. Default: 4194304 (4MB). When total buffered bytes exceed this limit, the oldest messages are evicted until under the limit. This ensures the buffer respects the daemon's <5MB RSS goal regardless of `buffer_size`.
+- **Storage:** In-memory `VecDeque`.
+- **Ordering:** Each buffered message is assigned a monotonically increasing `seq: u64` by the daemon. Sequence numbers are unique within a daemon process lifetime and never reused. They reset on daemon restart.
+- **Capacity:** Configurable via `ipc.buffer_size` in `config.toml`. Default: **1000**. When `buffer_size = 0`, no messages are buffered and `inbox` always returns empty.
+- **Byte bound:** The daemon enforces an internal hard byte cap (default: 4 MB) to keep memory bounded regardless of `buffer_size`. When total buffered bytes exceed this limit, the oldest messages are evicted until under the limit.
 - **TTL:** Configurable via `ipc.buffer_ttl_secs`. Default: 86400 (24 hours). Expired messages are evicted on the next `inbox` call or buffer append.
 - **Eviction:** When the buffer is full (by count or bytes), the oldest message is dropped (FIFO). No per-kind bucketing.
-- **Delivery interaction:** Inbound messages are delivered to subscribed/broadcast clients AND (when buffering is enabled) appended to the buffer. The `ack` command removes messages from the buffer. Unacked messages persist until TTL expiry or eviction.
-- **Shared mailbox:** The receive buffer is a single shared mailbox for the daemon instance. Multiple connected clients share the same buffer. `ack` from any client removes messages for all clients. Multiple local processes consuming from the same daemon MUST coordinate externally to avoid stealing messages from each other. Clients SHOULD `ack` once they have durably processed a message to avoid unbounded replays.
+- **Delivery interaction:** Inbound messages are delivered to subscribed/broadcast clients AND appended to the buffer. Messages persist until TTL expiry or eviction; `ack` advances per-consumer cursors but does not delete messages from the buffer (other consumers may not have processed them yet).
 
-> **Zero overhead when unused:** When `buffer_size = 0` (default), no allocation occurs for the receive buffer. Clients that only use `send`/`peers`/`status` pay no buffering cost.
+### 4.3 Consumer Semantics (normative)
 
-### 4.3 Disk Persistence (Reserved, Non-Normative)
+Inbox/ack state is scoped by `consumer` (from `hello`).
 
-> **Status: Future.** This section is non-normative and describes a reserved design direction. It is NOT implemented in the current version. The `ipc.persist` configuration key is reserved. Implementers MUST NOT treat this section as required behavior.
-
-When `ipc.persist = true` in `config.toml`:
-
-- Inbound messages are written as individual JSON files to `~/.axon/inbox/<message-id>.json`.
-- On startup, the daemon scans this directory to rebuild the buffer.
-- `ack` deletes the corresponding file.
-- Maximum disk usage is bounded by `buffer_size × max_message_size`.
-- File format: the full `Envelope` JSON, one file per message.
-
-> **Performance note:** One file per message incurs fsync cost and directory scan overhead on restart. This design is intentionally simple for low-volume use. High-volume deployments may require a different approach (embedded log, etc.).
-
-When `ipc.persist = false` (default), the buffer is memory-only and lost on daemon restart.
+- Each consumer has `acked_seq` (initially `0`).
+- `inbox` and `subscribe` (with `replay = true`) deliver messages with `seq > acked_seq` that match the requested `kinds`.
+- `ack(up_to_seq)` advances `acked_seq` for that consumer only.
+- The daemon MAY garbage-collect inactive consumer state after an implementation-defined period. If consumer state is garbage-collected, its `acked_seq` resets to `0`.
+- **Single-consumer recommendation:** For simple deployments, use the default consumer name (`"default"`) from a single process. Multiple consumers are supported but require each process to use a distinct consumer name to avoid cursor interference.
 
 ---
 
 ## 5. Error Codes
 
-All error responses use the format `{"ok": false, "error": "<code>"}`. Additional fields MAY be present.
+All error responses use the format `{"ok": false, "req_id": "<id>", "error": "<code>"}`. Additional fields MAY be present. For v1 connections, `req_id` is omitted.
 
 | Code | HTTP-like | Condition |
 |------|-----------|-----------|
 | `hello_required` | 400 | v2 command sent without prior `hello` handshake. |
+| `unsupported_version` | 400 | `hello` negotiated a version the daemon cannot accept (e.g., v1 when `allow_v1 = false`). |
 | `auth_required` | 401 | Command requires authentication (v2+ connection, token mode). |
 | `auth_failed` | 403 | Invalid token or unauthorized UID. |
-| `invalid_command` | 400 | Malformed JSON, unknown `cmd`, or missing required field. |
+| `invalid_command` | 400 | Malformed JSON, unknown `cmd`, missing required field, or invalid field value (e.g., unknown message kind in `kinds` filter). |
+| `ack_out_of_range` | 400 | `up_to_seq` exceeds the highest sequence delivered to this consumer. |
 | `peer_not_found` | 404 | Target agent_id not in peer table. |
 | `peer_unreachable` | 502 | Peer known but QUIC connection failed or timed out. |
-| `rate_limited` | 429 | Client exceeded send rate limit. |
 | `internal_error` | 500 | Unexpected daemon error. |
-
-Rate limit response includes retry guidance:
-```json
-{"ok": false, "error": "rate_limited", "retry_after_ms": 1000}
-```
-
-### 5.1 Rate Limits (Reserved, Non-Normative)
-
-> **Status: Future.** This section is non-normative and describes a reserved design direction. It is NOT implemented in the current version. The configuration keys and error code are reserved. Implementers MUST NOT treat this section as required behavior.
-
-| Limit | Default | Configurable |
-|-------|---------|-------------|
-| Per-client send rate | 60 messages/minute | `ipc.rate_limit_per_client` |
-| Global outbound rate | 300 messages/minute | `ipc.rate_limit_global` |
-| Max concurrent IPC clients | 8 | `ipc.max_clients` |
-
-Rate limits will use a sliding window. When a client exceeds the limit, subsequent `send` commands will return `rate_limited` with `retry_after_ms` indicating when the window resets.
 
 ---
 
@@ -318,7 +333,7 @@ When multiple agents share a host, each MUST run its own daemon instance with:
 - Separate socket path (e.g., `~/.axon/<agent-name>/axon.sock`)
 - Separate QUIC port
 - Separate identity (keypair)
-- Separate receive buffer and inbox directory
+- Separate receive buffer
 
 The daemon does NOT multiplex between agents. One daemon = one identity.
 
@@ -328,12 +343,12 @@ The daemon does NOT multiplex between agents. One daemon = one identity.
 
 ## 7. Backward Compatibility
 
-| Client behavior | Daemon response (default) | With `require_hello = true` |
-|----------------|--------------------------|----------------------------|
+| Client behavior | Daemon response (default) | With `allow_v1 = false` |
+|----------------|--------------------------|------------------------|
 | Skips `hello`, sends v1 commands directly | Accepted. Legacy broadcast. No auth required. | Rejected with `hello_required`. |
 | Skips `hello`, sends v2 command | Rejected with `hello_required`. | Rejected with `hello_required`. |
-| Sends `hello` with `version: 2` | Daemon responds with supported version. Auth required (token mode) or implicit (peer credentials). | Same. |
-| Sends `hello` with `version: 1` | Negotiated version 1. v1 semantics apply (broadcast, no auth required). | Negotiated version 1. With `require_auth = true`, auth is still required. |
+| Sends `hello` with `version: 2` | Negotiated version 2. Auth required (token mode) or implicit (peer credentials). | Same. |
+| Sends `hello` with `version: 1` | Negotiated version 1. v1 semantics apply (broadcast, no auth required). | Rejected with `unsupported_version`. |
 | Sends unknown `cmd` | `{"ok": false, "error": "invalid_command"}` | Same. |
 | v2 client connects to v1 daemon | `hello` returns `invalid_command`. Client SHOULD fall back to v1 behavior. | N/A (v1 daemon). |
 
@@ -345,21 +360,15 @@ New `config.toml` fields under `[ipc]`:
 
 ```toml
 [ipc]
+# Compatibility
+allow_v1 = true             # Accept v1 (no-hello) connections
+
 # Receive buffer
-buffer_size = 0             # Max buffered messages (0 = disabled)
-buffer_max_bytes = 4194304  # Max total buffered bytes (4MB)
-buffer_ttl_secs = 86400     # Message TTL in seconds
-persist = false             # Write buffer to disk (Future)
+buffer_size = 1000          # Max buffered messages (0 = disabled)
+buffer_ttl_secs = 86400     # Message TTL in seconds (24 hours)
 
-# Rate limits (Future)
-rate_limit_per_client = 60  # Max sends per client per minute
-rate_limit_global = 300     # Max total outbound per minute
-max_clients = 8             # Max simultaneous IPC connections
-
-# Auth
-token_path = "~/.axon/ipc-token"  # Token file location (token mode only)
-require_hello = false       # Reject commands before hello handshake
-require_auth = false        # Require auth for all connections (including v1)
+# Auth (token mode fallback)
+token_path = "~/.axon/ipc-token"  # Token file location
 ```
 
 All fields are optional with the defaults shown.
