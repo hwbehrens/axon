@@ -91,23 +91,25 @@ impl Identity {
         let seed = self.signing_key.to_bytes();
         let public_key = self.signing_key.verifying_key().to_bytes();
         let pkcs8 = ed25519_pkcs8_v2(&seed, &public_key);
-        let key_pair = KeyPair::from_der_and_sign_algo(&pkcs8, &PKCS_ED25519)
+
+        let private_key_der = rustls::pki_types::PrivateKeyDer::Pkcs8(
+            rustls::pki_types::PrivatePkcs8KeyDer::from(pkcs8.clone()),
+        );
+        let key_pair = KeyPair::from_der_and_sign_algo(&private_key_der, &PKCS_ED25519)
             .context("failed to build rcgen key pair")?;
 
-        let mut params = CertificateParams::new(vec!["localhost".to_string()]);
-        params.alg = &PKCS_ED25519;
+        let mut params = CertificateParams::new(vec!["localhost".to_string()])
+            .context("failed to create certificate params")?;
         params.distinguished_name = DistinguishedName::new();
         params
             .distinguished_name
             .push(DnType::CommonName, format!("axon-{}", self.agent_id));
-        params.key_pair = Some(key_pair);
 
-        let cert =
-            rcgen::Certificate::from_params(params).context("failed to build certificate")?;
-        let cert_der = cert
-            .serialize_der()
-            .context("failed to serialize certificate")?;
-        let key_der = cert.serialize_private_key_der();
+        let cert = params
+            .self_signed(&key_pair)
+            .context("failed to build self-signed certificate")?;
+        let cert_der = cert.der().to_vec();
+        let key_der = pkcs8;
 
         Ok(QuicCertificate { cert_der, key_der })
     }

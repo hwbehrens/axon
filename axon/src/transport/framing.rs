@@ -19,10 +19,7 @@ pub(crate) async fn send_unidirectional(
         .await
         .context("failed to open uni stream")?;
     write_framed(&mut stream, &bytes).await?;
-    stream
-        .finish()
-        .await
-        .context("failed to finish uni stream")?;
+    stream.finish().context("failed to finish uni stream")?;
     Ok(())
 }
 
@@ -40,9 +37,7 @@ pub(crate) async fn send_request(
         .await
         .context("failed to open bidi stream")?;
     write_framed(&mut send, &bytes).await?;
-    send.finish()
-        .await
-        .context("failed to finish request stream")?;
+    send.finish().context("failed to finish request stream")?;
 
     let response_bytes = timeout(REQUEST_TIMEOUT, read_framed(&mut recv))
         .await
