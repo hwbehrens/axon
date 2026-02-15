@@ -10,6 +10,7 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 arbitrary = { version = "1", features = ["derive"] }
+quinn-proto = { version = "0.10", features = ["arbitrary"] }
 axon = { path = ".." }
 serde_json = "1"
 toml = "0.8"
