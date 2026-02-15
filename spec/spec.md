@@ -99,16 +99,12 @@ Two implementations for v0.2: `MdnsDiscovery` and `StaticDiscovery`. Both feed t
 5. Connection stays open. Keepalive: QUIC idle timeout 60s with keepalive pings at 15s.
 6. On disconnect: reconnect with exponential backoff (1s, 2s, 4s, ... max 30s). 0-RTT on reconnect.
 
-### Message Sending
-- Each message = one **unidirectional QUIC stream**.
+### Stream Mapping
+- **Bidirectional streams** for request/response pairs: `hello↔hello`, `ping↔pong`, `query↔response`, `delegate↔ack`, `cancel↔ack`, `discover↔capabilities`. Write request, read response, close. Timeout: 30s default (configurable per message).
+- **Unidirectional streams** for fire-and-forget: `notify`, `result` (async task completion), unsolicited `error`.
 - Stream contains: `[u32 length prefix, big-endian] [message bytes]`.
 - Max message size: 64KB.
-- Why uni streams? No HOL blocking. Each message is independent. Simple flow: open stream, write, finish.
-
-### Request/Response Pattern
-- For queries that expect a response: sender opens a **bidirectional stream**.
-- Write request, read response, close.
-- Timeout: 30s default (configurable per message).
+- No HOL blocking — each message gets its own stream.
 
 ### Listening
 - Default port: 7100 (configurable via `--port` or config.toml).
@@ -128,11 +124,19 @@ Two implementations for v0.2: `MdnsDiscovery` and `StaticDiscovery`. Both feed t
   "from": "a1b2c3d4...",
   "to": "e5f6a7b8...",
   "ts": 1771108000000,
-  "kind": "query|response|delegate|notify",
-  "reply_to": null,
+  "kind": "<message kind>",
+  "ref": null,
   "payload": { ... }
 }
 ```
+
+- `v`: protocol version (negotiated via hello).
+- `id`: unique message identifier (UUID v4).
+- `from` / `to`: agent IDs (SHA-256 of public key, hex, first 16 bytes = 32 chars).
+- `ts`: unix milliseconds.
+- `kind`: message type string. See `message-types.md` for the full set.
+- `ref`: the message ID this responds to. Null for initiating messages.
+- `payload`: kind-specific data. Unknown fields MUST be ignored (forward compatibility).
 
 ### Payload Kinds
 
@@ -140,15 +144,16 @@ Two implementations for v0.2: `MdnsDiscovery` and `StaticDiscovery`. Both feed t
 ```json
 {
   "kind": "query",
-  "domain": "calendar",
   "question": "What are the kids' swim schedules this week?",
-  "context_budget": "minimal"
+  "domain": "family.calendar",
+  "max_tokens": 200,
+  "deadline_ms": 30000
 }
 ```
-`context_budget` tells the responder how verbose to be:
-- `minimal`: one-line answer
-- `standard`: answer + relevant context (~200 tokens)
-- `full`: everything relevant
+- `question`: natural language or structured query.
+- `domain`: dot-separated topic hint. Optional. Helps receiver scope its answer.
+- `max_tokens`: numeric budget for the response. 0 = no limit. Receiver should treat as a guideline.
+- `deadline_ms`: how long sender waits before timing out. Optional, default 30000.
 
 **response** — Answer to a query.
 ```json
@@ -174,10 +179,12 @@ Two implementations for v0.2: `MdnsDiscovery` and `StaticDiscovery`. Both feed t
 ```json
 {
   "kind": "notify",
-  "topic": "hans.location",
-  "data": { "location": "heading to gym", "eta_back": "2h" }
+  "topic": "user.location",
+  "data": { "status": "heading out", "eta_back": "2h" },
+  "importance": "low"
 }
 ```
+- `importance`: `low` (background), `medium`, or `high` (act on this). Default `low`.
 
 ## 5. Local IPC: Unix Domain Socket
 
