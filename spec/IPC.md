@@ -40,13 +40,15 @@ If a client skips `hello`, the daemon MUST assume v1 semantics and accept all v1
 
 If a client skips `hello` and sends a v2-only command (`whoami`, `inbox`, `ack`, `subscribe`), the daemon MUST reject it with `hello_required`. These commands are only available after a successful `hello` handshake.
 
-If a client sends `hello` with a `version` higher than the daemon supports, the daemon MUST respond with its own highest supported version. The client SHOULD fall back to the daemon's version.
+If a client sends `hello` with a `version` higher than the daemon supports, the daemon MUST respond with its own highest supported version. The **negotiated version** for the connection is `min(client_requested, daemon_supported)`. All subsequent semantics on that connection are governed by the negotiated version. If the negotiated version is 1, v2 rules (auth gating, subscription-only delivery) do not apply.
 
 ---
 
 ## 2. Authentication
 
-Authentication is OPTIONAL for v1-compatible clients (those that skip `hello`). When `hello` is sent with `version >= 2`, authentication is REQUIRED before any command other than `hello`, `auth`, and `status`.
+Authentication is OPTIONAL for v1-compatible clients (those that skip `hello` or negotiate version 1). When `hello` negotiates `version >= 2`, authentication is REQUIRED before any command other than `hello`, `auth`, and `status`.
+
+> **Security note:** Baseline local security is provided by filesystem permissions — the socket is `0600`, so only the owning UID can connect. Peer credential auth is primarily a defense-in-depth check and an enabler for hardened configurations (e.g., group-accessible sockets or future TCP localhost transport). Token auth provides the same role as a cross-platform fallback.
 
 ### 2.1 Peer Credentials (Primary)
 
@@ -82,6 +84,19 @@ When peer credential extraction is unavailable or fails, the daemon falls back t
 ```
 
 When peer credentials already authenticated the connection, `auth` is accepted but unnecessary.
+
+### 2.4 Hardening Configuration
+
+By default, the daemon accepts v1 clients without authentication for backward compatibility. Deployments requiring stronger local security MAY enable:
+
+| Config Key | Default | Effect |
+|---|---|---|
+| `ipc.require_hello` | `false` | When `true`, reject all commands except `hello` until handshake completes. Disables v1 unauthenticated access. |
+| `ipc.require_auth` | `false` | When `true`, require authentication for ALL connections (including v1). Useful when socket ACLs allow more than one UID. |
+
+When `require_hello = true`, the backward compatibility table in §7 changes: "skips hello" rows become rejections.
+
+> **Note on `status` before auth:** On v2 connections in token mode, `status` is accessible without authentication. This may expose operational details (uptime, peer count, buffer count). Deployments where this is a concern SHOULD use `require_auth = true` or restrict socket access via filesystem permissions.
 
 ---
 
@@ -134,7 +149,7 @@ Fetch messages from the receive buffer.
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
 | `limit` | integer | No | 50 | Maximum messages to return. Range: 1–1000. |
-| `since` | string | No | *(all buffered)* | ISO 8601 timestamp or message UUID. Return messages after this point. |
+| `since` | string | No | *(all buffered)* | Cursor for pagination. If the value is a valid UUID, return messages buffered **after** the message with that ID (in buffer order). If not a UUID, parse as ISO 8601 timestamp and return messages buffered **after** that time. If the UUID is not found in the buffer, return all messages (same as omitting `since`). |
 | `kinds` | array of string | No | *(all kinds)* | Filter by message kind. Unknown kinds MUST be silently ignored. |
 
 **Response:**
@@ -204,7 +219,25 @@ Followed by zero or more pushed messages:
 
 A connection MAY have at most one active subscription. Sending `subscribe` again MUST replace the previous filter.
 
-**Interaction with broadcast:** When a subscription is active, the daemon delivers messages through the subscription filter. When no subscription is active, the daemon uses legacy broadcast behavior (all inbound messages to all connected clients). A client that has sent `hello` with `version >= 2` but has NOT subscribed receives NO unsolicited inbound messages — it must use `subscribe` or `inbox` to receive them.
+**Delivery rules by connection type:**
+
+| Connection type | Inbound delivery |
+|---|---|
+| **v1** (no `hello`) | Legacy broadcast: all inbound messages pushed to all connected v1 clients. |
+| **v2, no subscription** | No unsolicited inbound messages. Client MUST use `inbox` (pull) to retrieve buffered messages. |
+| **v2, active subscription** | Inbound messages matching the subscription filter are pushed as `{"inbound": true, ...}` lines. Non-matching messages are buffered only. |
+
+v1 broadcast and v2 subscriptions are separate delivery paths. A v2 client never receives legacy broadcast messages.
+
+### 3.6 Stream Interleaving
+
+A v2 connection with an active subscription carries both request/response traffic and pushed inbound messages on a single line-delimited stream. The following rule applies:
+
+- While a subscription is active, the client SHOULD limit commands to `ack` and `subscribe` (to replace the filter). The daemon MAY interleave pushed `{"inbound": true, ...}` messages between any two response lines.
+- Each response line is atomic (complete JSON object, newline-terminated) and MUST NOT be split by interleaved pushes.
+- Clients that need concurrent request/response alongside streaming SHOULD open a second IPC connection for commands.
+
+> **Rationale:** Adding `req_id` correlation would be more robust but adds complexity. For v2, the simple interleaving rule is sufficient given LLM agent usage patterns (subscribe on one connection, poll/send on another). A future v3 MAY introduce request IDs if needed.
 
 ---
 
@@ -216,23 +249,29 @@ The receive buffer preserves inbound messages that arrive when no IPC client is 
 
 ### 4.2 Semantics
 
-- **Storage:** In-memory `VecDeque` by default. Optional disk persistence (§4.3).
-- **Capacity:** Configurable via `ipc.buffer_size` in `config.toml`. Default: 1000 messages.
+- **Storage:** In-memory `VecDeque`. Optional disk persistence (§4.3).
+- **Capacity:** Configurable via `ipc.buffer_size` in `config.toml`. Default: **0 (disabled)**. When `buffer_size = 0`, no messages are buffered and `inbox` always returns empty. Set to a positive value (e.g., 1000) to enable.
+- **Byte bound:** Configurable via `ipc.buffer_max_bytes`. Default: 4194304 (4MB). When total buffered bytes exceed this limit, the oldest messages are evicted until under the limit. This ensures the buffer respects the daemon's <5MB RSS goal regardless of `buffer_size`.
 - **TTL:** Configurable via `ipc.buffer_ttl_secs`. Default: 86400 (24 hours). Expired messages are evicted on the next `inbox` call or buffer append.
-- **Eviction:** When the buffer is full, the oldest message is dropped (FIFO). No per-kind bucketing.
-- **Delivery interaction:** Inbound messages are BOTH delivered to subscribed/broadcast clients AND appended to the buffer. The `ack` command removes messages from the buffer. Unacked messages persist until TTL expiry or eviction.
+- **Eviction:** When the buffer is full (by count or bytes), the oldest message is dropped (FIFO). No per-kind bucketing.
+- **Delivery interaction:** Inbound messages are delivered to subscribed/broadcast clients AND (when buffering is enabled) appended to the buffer. The `ack` command removes messages from the buffer. Unacked messages persist until TTL expiry or eviction.
+- **Shared mailbox:** The receive buffer is a single shared mailbox for the daemon instance. Multiple connected clients share the same buffer. `ack` from any client removes messages for all clients. Multiple local processes consuming from the same daemon MUST coordinate externally to avoid stealing messages from each other. Clients SHOULD `ack` once they have durably processed a message to avoid unbounded replays.
 
-### 4.3 Disk Persistence (Optional)
+> **Zero overhead when unused:** When `buffer_size = 0` (default), no allocation occurs for the receive buffer. Clients that only use `send`/`peers`/`status` pay no buffering cost.
 
-**Status: Future.** Disk persistence is specified here for completeness but is not implemented in the current version. The `ipc.persist` configuration key is reserved.
+### 4.3 Disk Persistence (Reserved, Non-Normative)
+
+> **Status: Future.** This section is non-normative and describes a reserved design direction. It is NOT implemented in the current version. The `ipc.persist` configuration key is reserved. Implementers MUST NOT treat this section as required behavior.
 
 When `ipc.persist = true` in `config.toml`:
 
 - Inbound messages are written as individual JSON files to `~/.axon/inbox/<message-id>.json`.
 - On startup, the daemon scans this directory to rebuild the buffer.
 - `ack` deletes the corresponding file.
-- Maximum disk usage is bounded by `buffer_size × max_message_size` (default: 1000 × 64KB = 64MB).
+- Maximum disk usage is bounded by `buffer_size × max_message_size`.
 - File format: the full `Envelope` JSON, one file per message.
+
+> **Performance note:** One file per message incurs fsync cost and directory scan overhead on restart. This design is intentionally simple for low-volume use. High-volume deployments may require a different approach (embedded log, etc.).
 
 When `ipc.persist = false` (default), the buffer is memory-only and lost on daemon restart.
 
@@ -258,9 +297,9 @@ Rate limit response includes retry guidance:
 {"ok": false, "error": "rate_limited", "retry_after_ms": 1000}
 ```
 
-### 5.1 Rate Limits
+### 5.1 Rate Limits (Reserved, Non-Normative)
 
-> **Status: Future.** Rate limiting is specified here for completeness but is not implemented in the current version. The configuration keys and error code are reserved.
+> **Status: Future.** This section is non-normative and describes a reserved design direction. It is NOT implemented in the current version. The configuration keys and error code are reserved. Implementers MUST NOT treat this section as required behavior.
 
 | Limit | Default | Configurable |
 |-------|---------|-------------|
@@ -283,17 +322,20 @@ When multiple agents share a host, each MUST run its own daemon instance with:
 
 The daemon does NOT multiplex between agents. One daemon = one identity.
 
+> **Token path:** When running multiple agents per host, each daemon's `ipc.token_path` MUST point to its own instance directory (e.g., `~/.axon/<agent-name>/ipc-token`). The default `~/.axon/ipc-token` will collide if multiple daemons share the same home directory.
+
 ---
 
 ## 7. Backward Compatibility
 
-| Client behavior | Daemon response |
-|----------------|-----------------|
-| Skips `hello`, sends v1 commands directly | Accepted. Legacy broadcast. No auth required. |
-| Skips `hello`, sends v2 command | Rejected with `hello_required`. Client must send `hello` first. |
-| Sends `hello` with `version: 2` | Daemon responds with supported version. Auth required (token mode) or implicit (peer credentials). |
-| Sends unknown `cmd` | `{"ok": false, "error": "invalid_command"}` |
-| v2 client connects to v1 daemon | `hello` returns `invalid_command`. Client SHOULD fall back to v1 behavior. |
+| Client behavior | Daemon response (default) | With `require_hello = true` |
+|----------------|--------------------------|----------------------------|
+| Skips `hello`, sends v1 commands directly | Accepted. Legacy broadcast. No auth required. | Rejected with `hello_required`. |
+| Skips `hello`, sends v2 command | Rejected with `hello_required`. | Rejected with `hello_required`. |
+| Sends `hello` with `version: 2` | Daemon responds with supported version. Auth required (token mode) or implicit (peer credentials). | Same. |
+| Sends `hello` with `version: 1` | Negotiated version 1. v1 semantics apply (broadcast, no auth required). | Negotiated version 1. With `require_auth = true`, auth is still required. |
+| Sends unknown `cmd` | `{"ok": false, "error": "invalid_command"}` | Same. |
+| v2 client connects to v1 daemon | `hello` returns `invalid_command`. Client SHOULD fall back to v1 behavior. | N/A (v1 daemon). |
 
 ---
 
@@ -304,17 +346,20 @@ New `config.toml` fields under `[ipc]`:
 ```toml
 [ipc]
 # Receive buffer
-buffer_size = 1000          # Max buffered messages (0 = disabled)
+buffer_size = 0             # Max buffered messages (0 = disabled)
+buffer_max_bytes = 4194304  # Max total buffered bytes (4MB)
 buffer_ttl_secs = 86400     # Message TTL in seconds
-persist = false             # Write buffer to disk
+persist = false             # Write buffer to disk (Future)
 
-# Rate limits  
+# Rate limits (Future)
 rate_limit_per_client = 60  # Max sends per client per minute
 rate_limit_global = 300     # Max total outbound per minute
 max_clients = 8             # Max simultaneous IPC connections
 
 # Auth
 token_path = "~/.axon/ipc-token"  # Token file location (token mode only)
+require_hello = false       # Reject commands before hello handshake
+require_auth = false        # Require auth for all connections (including v1)
 ```
 
 All fields are optional with the defaults shown.
