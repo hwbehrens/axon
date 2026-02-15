@@ -1,6 +1,6 @@
 # AXON Specification — QUIC Architecture
 
-_Draft — Feb 14, 2026. Refine before implementing._
+_Feb 14, 2026. Reference implementation in `axon/`._
 
 ## Overview
 
@@ -24,7 +24,7 @@ OpenClaw ←→ [Unix Socket] ←→ AXON Daemon ←→ [QUIC/UDP] ←→ AXON D
 - On first run, generate an **Ed25519** signing keypair.
 - Store private key at `~/.axon/identity.key` (chmod 600).
 - Store public key at `~/.axon/identity.pub` (base64).
-- **Agent ID** = first 16 bytes of SHA-256(public key), hex-encoded (32 chars). Human-readable, collision-resistant, cryptographically derived.
+- **Agent ID** = `ed25519.` prefix + first 16 bytes of SHA-256(public key), hex-encoded. 40 chars total (e.g. `ed25519.a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4`). The type prefix enables future algorithm agility.
 
 ### Self-Signed Certificate
 - On startup, generate a self-signed X.509 certificate from the Ed25519 keypair using `rcgen`.
@@ -50,12 +50,12 @@ OpenClaw ←→ [Unix Socket] ←→ AXON Daemon ←→ [QUIC/UDP] ←→ AXON D
 ```toml
 # ~/.axon/config.toml
 [[peers]]
-agent_id = "a1b2c3d4..."
+agent_id = "ed25519.a1b2c3d4..."
 addr = "100.64.0.5:7100"     # Tailscale IP
 pubkey = "base64..."
 
 [[peers]]
-agent_id = "e5f6a7b8..."
+agent_id = "ed25519.e5f6a7b8..."
 addr = "192.168.1.50:7100"   # LAN IP
 pubkey = "base64..."
 ```
@@ -102,7 +102,7 @@ Two implementations for v0.2: `MdnsDiscovery` and `StaticDiscovery`. Both feed t
 ### Stream Mapping
 - **Bidirectional streams** for request/response pairs: `hello↔hello`, `ping↔pong`, `query↔response`, `delegate↔ack`, `cancel↔ack`, `discover↔capabilities`. Write request, read response, close. Timeout: 30s default (configurable per message).
 - **Unidirectional streams** for fire-and-forget: `notify`, `result` (async task completion), unsolicited `error`.
-- Stream contains: `[u32 length prefix, big-endian] [message bytes]`.
+- Stream contains: JSON bytes, delimited by QUIC stream FIN (no length prefix).
 - Max message size: 64KB.
 - No HOL blocking — each message gets its own stream.
 
@@ -121,8 +121,8 @@ Two implementations for v0.2: `MdnsDiscovery` and `StaticDiscovery`. Both feed t
 {
   "v": 1,
   "id": "uuid-v4",
-  "from": "a1b2c3d4...",
-  "to": "e5f6a7b8...",
+  "from": "ed25519.a1b2c3d4...",
+  "to": "ed25519.e5f6a7b8...",
   "ts": 1771108000000,
   "kind": "<message kind>",
   "ref": null,
@@ -132,7 +132,7 @@ Two implementations for v0.2: `MdnsDiscovery` and `StaticDiscovery`. Both feed t
 
 - `v`: protocol version (negotiated via hello).
 - `id`: unique message identifier (UUID v4).
-- `from` / `to`: agent IDs (SHA-256 of public key, hex, first 16 bytes = 32 chars).
+- `from` / `to`: agent IDs (typed, e.g. `ed25519.` + first 16 bytes of SHA-256 of public key, hex, 40 chars).
 - `ts`: unix milliseconds.
 - `kind`: message type string. See `message-types.md` for the full set.
 - `ref`: the message ID this responds to. Null for initiating messages.
@@ -209,7 +209,7 @@ Line-delimited JSON over Unix socket. Each line is one complete JSON object.
 {"ok": true, "msg_id": "uuid"}
 {"ok": true, "peers": [{"id": "a1b2...", "addr": "192.168.1.50:7100", "status": "connected", "rtt_ms": 0.4}]}
 {"ok": true, "uptime_secs": 3600, "peers_connected": 1, "messages_sent": 42, "messages_received": 38}
-{"ok": false, "error": "peer not found: e5f6a7b8"}
+{"ok": false, "error": "peer not found: ed25519.e5f6a7b8"}
 ```
 
 ```json
@@ -301,6 +301,8 @@ All CLI commands (except `daemon`) connect to the Unix socket, send a command, p
 - **Local IPC security:** Unix socket permissions (user-only). No authentication beyond filesystem ACLs.
 
 ## 11. Dependencies
+
+See `axon/Cargo.toml` for current pinned versions. The versions below are indicative:
 
 ```toml
 [dependencies]

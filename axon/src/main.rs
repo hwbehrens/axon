@@ -25,22 +25,17 @@ enum Commands {
     Daemon {
         #[arg(long)]
         port: Option<u16>,
+        /// Disable mDNS discovery (use static peers only).
         #[arg(long)]
-        enable_mdns: bool,
+        disable_mdns: bool,
         /// Override the derived agent_id (for testing/aliasing).
         #[arg(long)]
         agent_id: Option<String>,
     },
     /// Send a query to another agent.
-    Send {
-        agent_id: String,
-        message: String,
-    },
+    Send { agent_id: String, message: String },
     /// Delegate a task to another agent.
-    Delegate {
-        agent_id: String,
-        task: String,
-    },
+    Delegate { agent_id: String, task: String },
     /// Send a notification (fire-and-forget).
     Notify {
         agent_id: String,
@@ -48,13 +43,9 @@ enum Commands {
         data: String,
     },
     /// Send a ping to another agent.
-    Ping {
-        agent_id: String,
-    },
+    Ping { agent_id: String },
     /// Discover another agent's capabilities.
-    Discover {
-        agent_id: String,
-    },
+    Discover { agent_id: String },
     /// Cancel a previously delegated task.
     Cancel {
         agent_id: String,
@@ -81,12 +72,12 @@ async fn main() -> Result<()> {
     match cli.command {
         Commands::Daemon {
             port,
-            enable_mdns,
+            disable_mdns,
             agent_id,
         } => {
             run_daemon(DaemonOptions {
                 port,
-                enable_mdns,
+                disable_mdns,
                 axon_root: None,
                 agent_id,
                 cancel: None,
@@ -126,8 +117,7 @@ async fn main() -> Result<()> {
             topic,
             data,
         } => {
-            let parsed_data =
-                serde_json::from_str::<Value>(&data).unwrap_or_else(|_| json!(data));
+            let parsed_data = serde_json::from_str::<Value>(&data).unwrap_or_else(|_| json!(data));
             let payload = json!({
                 "topic": topic,
                 "data": parsed_data,
@@ -198,22 +188,23 @@ async fn main() -> Result<()> {
 }
 
 fn print_annotated_examples() {
-    println!(r#"AXON — Complete annotated example interaction
+    println!(
+        r#"AXON — Complete annotated example interaction
 ==============================================
 
 LLMs learn from examples faster than from specifications.
 Below is a full hello → discover → query → delegate → cancel → notify sequence.
 
 Agent IDs used:
-  Alice: a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4  (lower — initiates connection)
-  Bob:   f6e5d4c3b2a1f6e5d4c3b2a1f6e5d4c3
+  Alice: ed25519.a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4  (lower — initiates connection)
+  Bob:   ed25519.f6e5d4c3b2a1f6e5d4c3b2a1f6e5d4c3
 
 ──────────────────────────────────────────────
 Step 0: Start the daemon
 ──────────────────────────────────────────────
 $ axon daemon --port 7100
 
-  INFO starting AXON daemon agent_id=a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4 port=7100
+  INFO starting AXON daemon agent_id=ed25519.a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4 port=7100
 
   (The daemon binds QUIC on 0.0.0.0:7100, creates ~/.axon/axon.sock for IPC,
    and begins connecting to any peers listed in ~/.axon/config.toml.)
@@ -228,7 +219,7 @@ $ axon peers
     "ok": true,
     "peers": [
       {{
-        "id": "f6e5d4c3b2a1f6e5d4c3b2a1f6e5d4c3",
+        "id": "ed25519.f6e5d4c3b2a1f6e5d4c3b2a1f6e5d4c3",
         "addr": "192.168.1.42:7100",
         "status": "connected",
         "rtt_ms": 1.23,
@@ -240,15 +231,15 @@ $ axon peers
 ──────────────────────────────────────────────
 Step 2: Discover peer capabilities
 ──────────────────────────────────────────────
-$ axon discover f6e5d4c3b2a1f6e5d4c3b2a1f6e5d4c3
+$ axon discover ed25519.f6e5d4c3b2a1f6e5d4c3b2a1f6e5d4c3
 
-  IPC sent:     {{"cmd":"send","to":"f6e5d4c3b2a1f6e5d4c3b2a1f6e5d4c3","kind":"discover","payload":{{}}}}
+  IPC sent:     {{"cmd":"send","to":"ed25519.f6e5d4c3b2a1f6e5d4c3b2a1f6e5d4c3","kind":"discover","payload":{{}}}}
   IPC ack:      {{"ok":true,"msg_id":"550e8400-e29b-41d4-a716-446655440000"}}
   Wire message: {{
     "v": 1,
     "id": "550e8400-e29b-41d4-a716-446655440000",
-    "from": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4",
-    "to": "f6e5d4c3b2a1f6e5d4c3b2a1f6e5d4c3",
+    "from": "ed25519.a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4",
+    "to": "ed25519.f6e5d4c3b2a1f6e5d4c3b2a1f6e5d4c3",
     "ts": 1771108000000,
     "kind": "discover",
     "payload": {{}}
@@ -256,8 +247,8 @@ $ axon discover f6e5d4c3b2a1f6e5d4c3b2a1f6e5d4c3
   Wire response: {{
     "v": 1,
     "id": "660e8400-e29b-41d4-a716-446655440001",
-    "from": "f6e5d4c3b2a1f6e5d4c3b2a1f6e5d4c3",
-    "to": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4",
+    "from": "ed25519.f6e5d4c3b2a1f6e5d4c3b2a1f6e5d4c3",
+    "to": "ed25519.a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4",
     "ts": 1771108000050,
     "kind": "capabilities",
     "ref": "550e8400-e29b-41d4-a716-446655440000",
@@ -272,9 +263,9 @@ $ axon discover f6e5d4c3b2a1f6e5d4c3b2a1f6e5d4c3
 ──────────────────────────────────────────────
 Step 3: Send a query
 ──────────────────────────────────────────────
-$ axon send f6e5d4c3b2a1f6e5d4c3b2a1f6e5d4c3 "What is the capital of France?"
+$ axon send ed25519.f6e5d4c3b2a1f6e5d4c3b2a1f6e5d4c3 "What is the capital of France?"
 
-  IPC sent:     {{"cmd":"send","to":"f6e5d4c3b2a1f6e5d4c3b2a1f6e5d4c3","kind":"query","payload":{{"question":"What is the capital of France?","domain":"meta.query","max_tokens":200,"deadline_ms":30000}}}}
+  IPC sent:     {{"cmd":"send","to":"ed25519.f6e5d4c3b2a1f6e5d4c3b2a1f6e5d4c3","kind":"query","payload":{{"question":"What is the capital of France?","domain":"meta.query","max_tokens":200,"deadline_ms":30000}}}}
   Wire response: {{
     "v": 1,
     "kind": "response",
@@ -290,9 +281,9 @@ $ axon send f6e5d4c3b2a1f6e5d4c3b2a1f6e5d4c3 "What is the capital of France?"
 ──────────────────────────────────────────────
 Step 4: Delegate a task
 ──────────────────────────────────────────────
-$ axon delegate f6e5d4c3b2a1f6e5d4c3b2a1f6e5d4c3 "Summarize today's tech news"
+$ axon delegate ed25519.f6e5d4c3b2a1f6e5d4c3b2a1f6e5d4c3 "Summarize today's tech news"
 
-  IPC sent:     {{"cmd":"send","to":"f6e5d4c3b2a1f6e5d4c3b2a1f6e5d4c3","kind":"delegate","payload":{{"task":"Summarize today's tech news","priority":"normal","report_back":true,"deadline_ms":60000}}}}
+  IPC sent:     {{"cmd":"send","to":"ed25519.f6e5d4c3b2a1f6e5d4c3b2a1f6e5d4c3","kind":"delegate","payload":{{"task":"Summarize today's tech news","priority":"normal","report_back":true,"deadline_ms":60000}}}}
   Wire response (immediate ack): {{
     "v": 1,
     "kind": "ack",
@@ -313,9 +304,9 @@ $ axon delegate f6e5d4c3b2a1f6e5d4c3b2a1f6e5d4c3 "Summarize today's tech news"
 ──────────────────────────────────────────────
 Step 5: Cancel a delegated task
 ──────────────────────────────────────────────
-$ axon cancel f6e5d4c3b2a1f6e5d4c3b2a1f6e5d4c3 --ref 550e8400-e29b-41d4-a716-446655440000 --reason "No longer needed"
+$ axon cancel ed25519.f6e5d4c3b2a1f6e5d4c3b2a1f6e5d4c3 --ref 550e8400-e29b-41d4-a716-446655440000 --reason "No longer needed"
 
-  IPC sent:     {{"cmd":"send","to":"f6e5d4c3b2a1f6e5d4c3b2a1f6e5d4c3","kind":"cancel","payload":{{"reason":"No longer needed"}},"ref":"550e8400-e29b-41d4-a716-446655440000"}}
+  IPC sent:     {{"cmd":"send","to":"ed25519.f6e5d4c3b2a1f6e5d4c3b2a1f6e5d4c3","kind":"cancel","payload":{{"reason":"No longer needed"}},"ref":"550e8400-e29b-41d4-a716-446655440000"}}
   Wire response: {{
     "v": 1,
     "kind": "ack",
@@ -326,9 +317,9 @@ $ axon cancel f6e5d4c3b2a1f6e5d4c3b2a1f6e5d4c3 --ref 550e8400-e29b-41d4-a716-446
 ──────────────────────────────────────────────
 Step 6: Send a notification (fire-and-forget)
 ──────────────────────────────────────────────
-$ axon notify f6e5d4c3b2a1f6e5d4c3b2a1f6e5d4c3 meta.status '{{"state":"ready"}}'
+$ axon notify ed25519.f6e5d4c3b2a1f6e5d4c3b2a1f6e5d4c3 meta.status '{{"state":"ready"}}'
 
-  IPC sent:     {{"cmd":"send","to":"f6e5d4c3b2a1f6e5d4c3b2a1f6e5d4c3","kind":"notify","payload":{{"topic":"meta.status","data":{{"state":"ready"}},"importance":"low"}}}}
+  IPC sent:     {{"cmd":"send","to":"ed25519.f6e5d4c3b2a1f6e5d4c3b2a1f6e5d4c3","kind":"notify","payload":{{"topic":"meta.status","data":{{"state":"ready"}},"importance":"low"}}}}
   IPC ack:      {{"ok":true,"msg_id":"..."}}
   (No wire response — notify is unidirectional / fire-and-forget.)
 
@@ -336,11 +327,12 @@ $ axon notify f6e5d4c3b2a1f6e5d4c3b2a1f6e5d4c3 meta.status '{{"state":"ready"}}'
 Notes
 ──────────────────────────────────────────────
 - The lower agent_id always initiates the QUIC connection (initiator rule).
-- All messages use 4-byte big-endian length-prefix framing over QUIC streams.
+- Messages are framed by QUIC stream FIN (no length prefix).
 - Bidirectional streams are used for request-response (hello, ping, query, delegate, cancel, discover).
 - Unidirectional streams are used for fire-and-forget (notify, result).
 - The hello handshake must complete before any other messages on a connection.
-"#);
+"#
+    );
 }
 
 fn init_tracing() {
@@ -350,14 +342,12 @@ fn init_tracing() {
 
 async fn send_ipc(command: Value, wait_for_correlated_inbound: bool) -> Result<String> {
     let paths = AxonPaths::discover()?;
-    let mut stream = UnixStream::connect(&paths.socket)
-        .await
-        .with_context(|| {
-            format!(
-                "failed to connect to daemon socket: {}. Is the daemon running?",
-                paths.socket.display()
-            )
-        })?;
+    let mut stream = UnixStream::connect(&paths.socket).await.with_context(|| {
+        format!(
+            "failed to connect to daemon socket: {}. Is the daemon running?",
+            paths.socket.display()
+        )
+    })?;
 
     let line = serde_json::to_string(&command).context("failed to serialize IPC command")?;
     stream

@@ -33,10 +33,14 @@ fn pick_free_port() -> u16 {
 fn spawn_daemon(
     dir: &std::path::Path,
     port: u16,
-    enable_mdns: bool,
+    disable_mdns: bool,
     peers: Vec<StaticPeerConfig>,
     agent_id_override: Option<String>,
-) -> (CancellationToken, AxonPaths, tokio::task::JoinHandle<anyhow::Result<()>>) {
+) -> (
+    CancellationToken,
+    AxonPaths,
+    tokio::task::JoinHandle<anyhow::Result<()>>,
+) {
     let cancel = CancellationToken::new();
     let paths = AxonPaths::from_root(PathBuf::from(dir));
     paths.ensure_root_exists().unwrap();
@@ -46,6 +50,7 @@ fn spawn_daemon(
         let config = axon::config::Config {
             port: Some(port),
             peers,
+            ..Default::default()
         };
         let toml = toml::to_string_pretty(&config).unwrap();
         std::fs::write(&paths.config, toml).unwrap();
@@ -53,7 +58,7 @@ fn spawn_daemon(
 
     let opts = DaemonOptions {
         port: Some(port),
-        enable_mdns,
+        disable_mdns,
         axon_root: Some(PathBuf::from(dir)),
         agent_id: agent_id_override,
         cancel: Some(cancel.clone()),
@@ -105,7 +110,7 @@ async fn ipc_command(socket_path: &std::path::Path, command: Value) -> anyhow::R
 async fn graceful_shutdown_cleans_up() {
     let dir = tempdir().unwrap();
     let port = pick_free_port();
-    let (cancel, paths, handle) = spawn_daemon(dir.path(), port, false, vec![], None);
+    let (cancel, paths, handle) = spawn_daemon(dir.path(), port, true, vec![], None);
 
     // Wait for daemon to be ready.
     assert!(
@@ -175,9 +180,9 @@ async fn reconnect_after_peer_restart() {
 
     // Start both daemons.
     let (cancel_a, paths_a, handle_a) =
-        spawn_daemon(dir_a.path(), port_a, false, peers_for_a.clone(), None);
+        spawn_daemon(dir_a.path(), port_a, true, peers_for_a.clone(), None);
     let (cancel_b, paths_b, handle_b) =
-        spawn_daemon(dir_b.path(), port_b, false, peers_for_b.clone(), None);
+        spawn_daemon(dir_b.path(), port_b, true, peers_for_b.clone(), None);
 
     assert!(
         wait_for_socket(&paths_a, Duration::from_secs(5)).await,
@@ -211,7 +216,7 @@ async fn reconnect_after_peer_restart() {
 
     // Restart daemon B on the same port.
     let (cancel_b2, paths_b2, handle_b2) =
-        spawn_daemon(dir_b.path(), port_b, false, peers_for_b, None);
+        spawn_daemon(dir_b.path(), port_b, true, peers_for_b, None);
     assert!(
         wait_for_socket(&paths_b2, Duration::from_secs(5)).await,
         "daemon B2 socket did not appear"
@@ -280,9 +285,9 @@ async fn initiator_rule_lower_id_connects() {
     }];
 
     let (cancel_a, paths_a, handle_a) =
-        spawn_daemon(dir_a.path(), port_a, false, peers_for_a, None);
+        spawn_daemon(dir_a.path(), port_a, true, peers_for_a, None);
     let (cancel_b, paths_b, handle_b) =
-        spawn_daemon(dir_b.path(), port_b, false, peers_for_b, None);
+        spawn_daemon(dir_b.path(), port_b, true, peers_for_b, None);
 
     assert!(
         wait_for_socket(&paths_a, Duration::from_secs(5)).await,
@@ -308,12 +313,10 @@ async fn initiator_rule_lower_id_connects() {
     let list_b = peers_b["peers"].as_array().unwrap();
 
     let a_sees_b = list_a.iter().any(|p| {
-        p["id"].as_str() == Some(id_b.agent_id())
-            && p["status"].as_str() == Some("connected")
+        p["id"].as_str() == Some(id_b.agent_id()) && p["status"].as_str() == Some("connected")
     });
     let b_sees_a = list_b.iter().any(|p| {
-        p["id"].as_str() == Some(id_a.agent_id())
-            && p["status"].as_str() == Some("connected")
+        p["id"].as_str() == Some(id_a.agent_id()) && p["status"].as_str() == Some("connected")
     });
 
     assert!(a_sees_b, "daemon A should see daemon B as connected");

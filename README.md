@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="axon/assets/icon.png" alt="AXON" width="128" />
+</p>
+
 # AXON — Agent eXchange Over Network
 
 A hyper-efficient, LLM-first local messaging protocol for agent-to-agent communication.
@@ -21,4 +25,100 @@ We want something purpose-built for two LLM agents on the same local network.
 
 ## Status
 
-Design phase. See `spec/` for the protocol specification and message type definitions.
+Working implementation. The daemon, CLI, IPC, QUIC transport, mDNS discovery, and static peer config are all functional. See `spec/` for the protocol specification.
+
+## Quickstart
+
+### Build
+
+```sh
+cd axon
+cargo build --release
+```
+
+The binary is at `axon/target/release/axon`. Add it to your `PATH` or run it directly.
+
+### Run a single daemon
+
+```sh
+axon daemon
+```
+
+This starts the daemon on the default port (7100), enables mDNS discovery, creates `~/.axon/` with a fresh Ed25519 identity, and listens for IPC commands on `~/.axon/axon.sock`.
+
+### Connect two agents on a LAN
+
+If both machines are on the same local network, mDNS handles everything:
+
+```sh
+# Machine A                          # Machine B
+axon daemon                          axon daemon
+```
+
+Within seconds they discover each other. Verify with:
+
+```sh
+axon peers
+```
+
+### Connect two agents over Tailscale/VPN (static peers)
+
+When mDNS won't work (different subnets, VPN, etc.), configure peers manually:
+
+```sh
+# On each machine, get the identity:
+axon identity
+# Output: { "agent_id": "ed25519.a1b2c3d4...", "public_key": "base64..." }
+```
+
+Then on machine A, create `~/.axon/config.toml`:
+
+```toml
+[[peers]]
+agent_id = "ed25519.<machine-B-agent-id>"
+addr = "<machine-B-ip>:7100"
+pubkey = "<machine-B-public-key>"
+```
+
+Do the same on machine B with A's info. Then start both daemons:
+
+```sh
+axon daemon --disable-mdns    # optional: skip mDNS if not needed
+```
+
+### Send a message
+
+```sh
+# Query another agent
+axon send <agent_id> "What is the capital of France?"
+
+# Delegate a task
+axon delegate <agent_id> "Summarize today's news"
+
+# Fire-and-forget notification
+axon notify <agent_id> meta.status '{"state":"ready"}'
+
+# See all commands
+axon --help
+```
+
+### Discover capabilities
+
+```sh
+axon discover <agent_id>
+```
+
+### Example interaction
+
+```sh
+axon examples    # prints a full annotated hello → discover → query → delegate flow
+```
+
+## Documentation
+
+| Document | Description |
+|----------|-------------|
+| [`spec/spec.md`](./spec/spec.md) | Protocol architecture (QUIC, Ed25519, discovery, lifecycle) |
+| [`spec/message-types.md`](./spec/message-types.md) | All message kinds, payload schemas, stream mapping |
+| [`spec/wire-format.md`](./spec/wire-format.md) | Normative wire format for interoperable implementations |
+| [`CONTRIBUTING.md`](./CONTRIBUTING.md) | Development guide, module map, testing requirements |

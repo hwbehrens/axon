@@ -3,6 +3,7 @@ use std::fs;
 use std::net::SocketAddr;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -58,6 +59,16 @@ pub struct Config {
     #[serde(default)]
     pub port: Option<u16>,
     #[serde(default)]
+    pub max_ipc_clients: Option<usize>,
+    #[serde(default)]
+    pub max_connections: Option<usize>,
+    #[serde(default)]
+    pub keepalive_secs: Option<u64>,
+    #[serde(default)]
+    pub idle_timeout_secs: Option<u64>,
+    #[serde(default)]
+    pub reconnect_max_backoff_secs: Option<u64>,
+    #[serde(default)]
     pub peers: Vec<StaticPeerConfig>,
 }
 
@@ -75,6 +86,26 @@ impl Config {
 
     pub fn effective_port(&self, cli_override: Option<u16>) -> u16 {
         cli_override.or(self.port).unwrap_or(7100)
+    }
+
+    pub fn effective_max_ipc_clients(&self) -> usize {
+        self.max_ipc_clients.unwrap_or(64)
+    }
+
+    pub fn effective_max_connections(&self) -> usize {
+        self.max_connections.unwrap_or(128)
+    }
+
+    pub fn effective_keepalive(&self) -> Duration {
+        Duration::from_secs(self.keepalive_secs.unwrap_or(15))
+    }
+
+    pub fn effective_idle_timeout(&self) -> Duration {
+        Duration::from_secs(self.idle_timeout_secs.unwrap_or(60))
+    }
+
+    pub fn effective_reconnect_max_backoff(&self) -> Duration {
+        Duration::from_secs(self.reconnect_max_backoff_secs.unwrap_or(30))
     }
 }
 
@@ -104,116 +135,22 @@ pub fn load_known_peers(path: &Path) -> Result<Vec<KnownPeer>> {
     Ok(peers)
 }
 
-pub fn save_known_peers(path: &Path, peers: &[KnownPeer]) -> Result<()> {
+pub async fn save_known_peers(path: &Path, peers: &[KnownPeer]) -> Result<()> {
     if let Some(parent) = path.parent()
         && !parent.exists()
     {
-        fs::create_dir_all(parent)
+        tokio::fs::create_dir_all(parent)
+            .await
             .with_context(|| format!("failed to create directory: {}", parent.display()))?;
     }
 
     let data = serde_json::to_vec_pretty(peers).context("failed to encode known peers")?;
-    fs::write(path, data)
+    tokio::fs::write(path, data)
+        .await
         .with_context(|| format!("failed to write known peers: {}", path.display()))?;
     Ok(())
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use tempfile::tempdir;
-
-    #[test]
-    fn config_defaults_when_missing() {
-        let dir = tempdir().expect("temp dir");
-        let cfg = Config::load(&dir.path().join("missing.toml")).expect("load missing config");
-        assert_eq!(cfg.effective_port(None), 7100);
-        assert!(cfg.peers.is_empty());
-    }
-
-    #[test]
-    fn config_parses_static_peers() {
-        let dir = tempdir().expect("temp dir");
-        let path = dir.path().join("config.toml");
-        std::fs::write(
-            &path,
-            r#"
-                port = 8111
-                [[peers]]
-                agent_id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-                addr = "127.0.0.1:7100"
-                pubkey = "Zm9v"
-            "#,
-        )
-        .expect("write config");
-
-        let cfg = Config::load(&path).expect("load config");
-        assert_eq!(cfg.effective_port(None), 8111);
-        assert_eq!(cfg.peers.len(), 1);
-        assert_eq!(cfg.peers[0].addr.to_string(), "127.0.0.1:7100");
-    }
-
-    #[test]
-    fn cli_override_takes_precedence() {
-        let cfg = Config {
-            port: Some(8000),
-            peers: Vec::new(),
-        };
-        assert_eq!(cfg.effective_port(Some(9999)), 9999);
-        assert_eq!(cfg.effective_port(None), 8000);
-    }
-
-    #[test]
-    fn invalid_toml_returns_error() {
-        let dir = tempdir().expect("temp dir");
-        let path = dir.path().join("config.toml");
-        std::fs::write(&path, "{{{{not toml!").expect("write");
-        assert!(Config::load(&path).is_err());
-    }
-
-    #[test]
-    fn known_peers_roundtrip() {
-        let dir = tempdir().expect("temp dir");
-        let path = dir.path().join("known.json");
-        let peers = vec![KnownPeer {
-            agent_id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
-            addr: "127.0.0.1:7100".parse().expect("addr"),
-            pubkey: "Zm9v".to_string(),
-            last_seen_unix_ms: 123,
-        }];
-
-        save_known_peers(&path, &peers).expect("save");
-        let loaded = load_known_peers(&path).expect("load");
-        assert_eq!(loaded, peers);
-    }
-
-    #[test]
-    fn known_peers_empty_when_missing() {
-        let dir = tempdir().expect("temp dir");
-        let loaded = load_known_peers(&dir.path().join("missing.json")).expect("load");
-        assert!(loaded.is_empty());
-    }
-
-    #[test]
-    fn discover_paths_from_root() {
-        let root = PathBuf::from("/tmp/axon-test");
-        let paths = AxonPaths::from_root(root.clone());
-        assert_eq!(paths.identity_key, root.join("identity.key"));
-        assert_eq!(paths.identity_pub, root.join("identity.pub"));
-        assert_eq!(paths.config, root.join("config.toml"));
-        assert_eq!(paths.known_peers, root.join("known_peers.json"));
-        assert_eq!(paths.replay_cache, root.join("replay_cache.json"));
-        assert_eq!(paths.socket, root.join("axon.sock"));
-    }
-
-    #[test]
-    fn ensure_root_creates_and_sets_perms() {
-        let dir = tempdir().expect("temp dir");
-        let root = dir.path().join("axon-subdir");
-        let paths = AxonPaths::from_root(root.clone());
-        paths.ensure_root_exists().expect("ensure root");
-        assert!(root.exists());
-        let mode = fs::metadata(&root).unwrap().permissions().mode();
-        assert_eq!(mode & 0o777, 0o700);
-    }
-}
+#[path = "config_tests.rs"]
+mod tests;

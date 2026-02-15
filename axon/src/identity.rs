@@ -32,9 +32,9 @@ impl Identity {
             let bytes = STANDARD
                 .decode(raw.trim())
                 .context("failed to decode identity.key")?;
-            let seed: [u8; 32] = bytes
-                .try_into()
-                .map_err(|v: Vec<u8>| anyhow!("identity.key must contain 32 bytes, got {}", v.len()))?;
+            let seed: [u8; 32] = bytes.try_into().map_err(|v: Vec<u8>| {
+                anyhow!("identity.key must contain 32 bytes, got {}", v.len())
+            })?;
             SigningKey::from_bytes(&seed)
         } else {
             let mut seed = [0u8; 32];
@@ -42,11 +42,17 @@ impl Identity {
             let key = SigningKey::from_bytes(&seed);
             let key_b64 = STANDARD.encode(seed);
             fs::write(&paths.identity_key, &key_b64).with_context(|| {
-                format!("failed to write private key: {}", paths.identity_key.display())
+                format!(
+                    "failed to write private key: {}",
+                    paths.identity_key.display()
+                )
             })?;
             fs::set_permissions(&paths.identity_key, fs::Permissions::from_mode(0o600))
                 .with_context(|| {
-                    format!("failed to set key permissions: {}", paths.identity_key.display())
+                    format!(
+                        "failed to set key permissions: {}",
+                        paths.identity_key.display()
+                    )
                 })?;
             key
         };
@@ -54,7 +60,10 @@ impl Identity {
         let verifying = signing_key.verifying_key();
         let pubkey_b64 = STANDARD.encode(verifying.to_bytes());
         fs::write(&paths.identity_pub, &pubkey_b64).with_context(|| {
-            format!("failed to write public key: {}", paths.identity_pub.display())
+            format!(
+                "failed to write public key: {}",
+                paths.identity_pub.display()
+            )
         })?;
 
         let agent_id = derive_agent_id(&verifying);
@@ -93,9 +102,11 @@ impl Identity {
             .push(DnType::CommonName, format!("axon-{}", self.agent_id));
         params.key_pair = Some(key_pair);
 
-        let cert = rcgen::Certificate::from_params(params)
-            .context("failed to build certificate")?;
-        let cert_der = cert.serialize_der().context("failed to serialize certificate")?;
+        let cert =
+            rcgen::Certificate::from_params(params).context("failed to build certificate")?;
+        let cert_der = cert
+            .serialize_der()
+            .context("failed to serialize certificate")?;
         let key_der = cert.serialize_private_key_der();
 
         Ok(QuicCertificate { cert_der, key_der })
@@ -125,10 +136,8 @@ fn ed25519_pkcs8_v2(seed: &[u8; 32], public_key: &[u8; 32]) -> Vec<u8> {
 
 pub fn derive_agent_id(verifying_key: &VerifyingKey) -> String {
     let digest = Sha256::digest(verifying_key.to_bytes());
-    digest[..16]
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect::<String>()
+    let hex: String = digest[..16].iter().map(|b| format!("{b:02x}")).collect();
+    format!("ed25519.{hex}")
 }
 
 #[cfg(test)]
@@ -139,12 +148,13 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
-    fn derive_agent_id_is_32_hex_chars() {
+    fn derive_agent_id_is_40_chars_with_prefix() {
         let mut seed = [7u8; 32];
         let key = SigningKey::from_bytes(&seed);
         let id = derive_agent_id(&key.verifying_key());
-        assert_eq!(id.len(), 32);
-        assert!(id.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_eq!(id.len(), 40);
+        assert!(id.starts_with("ed25519."));
+        assert!(id[8..].chars().all(|c| c.is_ascii_hexdigit()));
 
         seed[0] = 8;
         let other = SigningKey::from_bytes(&seed);
@@ -177,7 +187,10 @@ mod tests {
         let paths = AxonPaths::from_root(PathBuf::from(dir.path()));
         Identity::load_or_generate(&paths).expect("generate");
 
-        let mode = fs::metadata(&paths.identity_key).unwrap().permissions().mode();
+        let mode = fs::metadata(&paths.identity_key)
+            .unwrap()
+            .permissions()
+            .mode();
         assert_eq!(mode & 0o777, 0o600);
     }
 

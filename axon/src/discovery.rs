@@ -269,9 +269,7 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(8);
         let cancel = CancellationToken::new();
 
-        let handle = tokio::spawn(async move {
-            discovery.run(tx, cancel).await
-        });
+        let handle = tokio::spawn(async move { discovery.run(tx, cancel).await });
 
         rx.recv().await.expect("should receive event");
         tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
@@ -295,8 +293,8 @@ mod tests {
         )
         .expect("service info");
 
-        let parsed = parse_resolved_service("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", &info)
-            .expect("parse");
+        let parsed =
+            parse_resolved_service("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", &info).expect("parse");
         assert!(parsed.is_none());
     }
 
@@ -316,8 +314,8 @@ mod tests {
         )
         .expect("service info");
 
-        let parsed = parse_resolved_service("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", &info)
-            .expect("parse");
+        let parsed =
+            parse_resolved_service("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", &info).expect("parse");
         let (event, _fullname, agent_id) = parsed.expect("expected discovered peer");
 
         assert_eq!(agent_id, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
@@ -348,8 +346,8 @@ mod tests {
         )
         .expect("service info");
 
-        let parsed = parse_resolved_service("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", &info)
-            .expect("parse");
+        let parsed =
+            parse_resolved_service("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", &info).expect("parse");
         assert!(parsed.is_none());
     }
 
@@ -366,8 +364,8 @@ mod tests {
         )
         .expect("service info");
 
-        let parsed = parse_resolved_service("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", &info)
-            .expect("parse");
+        let parsed =
+            parse_resolved_service("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", &info).expect("parse");
         assert!(parsed.is_none());
     }
 

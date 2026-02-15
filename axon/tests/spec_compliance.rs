@@ -4,7 +4,7 @@
 //! `spec/message-types.md` (v2). Tests are grouped by spec section.
 
 use axon::message::*;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 // =========================================================================
 // Helpers
@@ -203,7 +203,10 @@ fn query_payload_matches_spec() {
         deadline_ms: Some(30000),
     };
     let v = serde_json::to_value(&p).unwrap();
-    assert_eq!(v["question"], "What events are on the family calendar this week?");
+    assert_eq!(
+        v["question"],
+        "What events are on the family calendar this week?"
+    );
     assert_eq!(v["domain"], "family.calendar");
     assert_eq!(v["max_tokens"], 200);
     assert_eq!(v["deadline_ms"], 30000);
@@ -219,7 +222,10 @@ fn response_payload_matches_spec() {
         truncated: Some(false),
     };
     let v = serde_json::to_value(&p).unwrap();
-    assert_eq!(v["summary"], "Three swim practices this week: Mon/Wed/Fri 4-5pm");
+    assert_eq!(
+        v["summary"],
+        "Three swim practices this week: Mon/Wed/Fri 4-5pm"
+    );
     assert_eq!(v["tokens_used"], 47);
     assert_eq!(v["truncated"], false);
 }
@@ -235,7 +241,10 @@ fn delegate_payload_matches_spec() {
         deadline_ms: Some(60000),
     };
     let v = serde_json::to_value(&p).unwrap();
-    assert_eq!(v["task"], "Send a message to the family group chat about dinner plans");
+    assert_eq!(
+        v["task"],
+        "Send a message to the family group chat about dinner plans"
+    );
     assert_eq!(v["priority"], "normal");
     assert_eq!(v["report_back"], true);
     assert_eq!(v["deadline_ms"], 60000);
@@ -542,7 +551,7 @@ fn deserialize_spec_hello_initiating() {
     });
     let env: Envelope = serde_json::from_value(j).unwrap();
     assert_eq!(env.kind, MessageKind::Hello);
-    let h: HelloPayload = serde_json::from_value(env.payload).unwrap();
+    let h: HelloPayload = serde_json::from_str(env.payload.get()).unwrap();
     assert_eq!(h.protocol_versions, vec![1]);
     assert_eq!(h.agent_name, Some("Family Assistant".to_string()));
     assert!(h.selected_version.is_none());
@@ -567,7 +576,7 @@ fn deserialize_spec_hello_response() {
     });
     let env: Envelope = serde_json::from_value(j).unwrap();
     assert_eq!(env.kind, MessageKind::Hello);
-    let h: HelloPayload = serde_json::from_value(env.payload).unwrap();
+    let h: HelloPayload = serde_json::from_str(env.payload.get()).unwrap();
     assert_eq!(h.selected_version, Some(1));
     assert_eq!(h.features, vec!["delegate", "discover", "cancel"]);
     assert!(env.ref_id.is_some());
@@ -594,24 +603,23 @@ fn deserialize_spec_capabilities_response() {
     });
     let env: Envelope = serde_json::from_value(j).unwrap();
     assert_eq!(env.kind, MessageKind::Capabilities);
-    let c: CapabilitiesPayload = serde_json::from_value(env.payload).unwrap();
+    let c: CapabilitiesPayload = serde_json::from_str(env.payload.get()).unwrap();
     assert_eq!(c.domains, vec!["family", "calendar", "groceries", "school"]);
     assert_eq!(c.model, Some("gemini-3-pro".to_string()));
 }
 
 // =========================================================================
-// §4 Wire format — length-prefix framing
+// §4 Wire format — FIN-delimited framing
 // =========================================================================
 
-/// spec.md §3: each message has [u32 length prefix, big-endian] [message bytes].
+/// spec.md §3: wire format is raw JSON bytes (FIN-delimited, no length prefix).
 #[test]
-fn wire_format_length_prefix_is_big_endian_u32() {
+fn wire_format_is_raw_json() {
     let env = Envelope::new(agent_a(), agent_b(), MessageKind::Ping, json!({}));
     let encoded = encode(&env).unwrap();
 
-    let len = u32::from_be_bytes(encoded[..4].try_into().unwrap());
-    assert_eq!(len as usize, encoded.len() - 4);
-    assert!(len > 0);
+    let decoded: Value = serde_json::from_slice(&encoded).unwrap();
+    assert_eq!(decoded["kind"], "ping");
 }
 
 /// spec.md §3: max message size is 64KB.
@@ -624,7 +632,12 @@ fn max_message_size_is_64kb() {
 #[test]
 fn oversized_message_rejected() {
     let big = "x".repeat(MAX_MESSAGE_SIZE as usize);
-    let env = Envelope::new(agent_a(), agent_b(), MessageKind::Query, json!({"question": big}));
+    let env = Envelope::new(
+        agent_a(),
+        agent_b(),
+        MessageKind::Query,
+        json!({"question": big}),
+    );
     let result = encode(&env);
     assert!(result.is_err());
 }
@@ -639,12 +652,12 @@ fn encode_decode_full_roundtrip() {
         json!({"question": "what is 2+2?", "domain": "math"}),
     );
     let encoded = encode(&env).unwrap();
-    let decoded = decode(&encoded[4..]).unwrap();
+    let decoded = decode(&encoded).unwrap();
     assert_eq!(env.id, decoded.id);
     assert_eq!(env.from, decoded.from);
     assert_eq!(env.to, decoded.to);
     assert_eq!(env.kind, decoded.kind);
-    assert_eq!(env.payload, decoded.payload);
+    assert_eq!(env.payload.get(), decoded.payload.get());
     assert_eq!(env.v, decoded.v);
     assert_eq!(env.ts, decoded.ts);
 }
@@ -653,16 +666,18 @@ fn encode_decode_full_roundtrip() {
 // §1 Identity — agent ID derivation
 // =========================================================================
 
-/// spec.md §1: Agent ID = first 16 bytes of SHA-256(public key), hex-encoded
-/// (32 chars).
+/// spec.md §1: Agent ID = "ed25519." + first 16 bytes of SHA-256(public key),
+/// hex-encoded (40 chars total).
 #[test]
-fn agent_id_is_32_hex_chars() {
-    let paths =
-        axon::config::AxonPaths::from_root(std::path::PathBuf::from(tempfile::tempdir().unwrap().path()));
+fn agent_id_is_40_chars_with_prefix() {
+    let paths = axon::config::AxonPaths::from_root(std::path::PathBuf::from(
+        tempfile::tempdir().unwrap().path(),
+    ));
     let identity = axon::identity::Identity::load_or_generate(&paths).unwrap();
     let id = identity.agent_id();
-    assert_eq!(id.len(), 32);
-    assert!(id.chars().all(|c| c.is_ascii_hexdigit()));
+    assert_eq!(id.len(), 40);
+    assert!(id.starts_with("ed25519."));
+    assert!(id[8..].chars().all(|c| c.is_ascii_hexdigit()));
 }
 
 /// spec.md §1: agent ID is deterministic from the same keypair.
@@ -727,7 +742,12 @@ fn ipc_error_response_shape() {
 /// spec.md §5: inbound messages forwarded with envelope.
 #[test]
 fn ipc_inbound_shape() {
-    let envelope = Envelope::new(agent_a(), agent_b(), MessageKind::Notify, json!({"topic":"t","data":{}}));
+    let envelope = Envelope::new(
+        agent_a(),
+        agent_b(),
+        MessageKind::Notify,
+        json!({"topic":"t","data":{}}),
+    );
     let reply = axon::ipc::DaemonReply::Inbound {
         inbound: true,
         envelope,
@@ -763,4 +783,121 @@ pubkey = "cHVia2V5MQ=="
     assert_eq!(config.peers[0].agent_id, "a1b2c3d4e5f6a7b8a1b2c3d4e5f6a7b8");
     assert_eq!(config.peers[0].addr.to_string(), "100.64.0.5:7100");
     assert_eq!(config.peers[0].pubkey, "cHVia2V5MQ==");
+}
+
+// =========================================================================
+// §10 Protocol Violation — Message Kind Classification
+// =========================================================================
+
+/// spec.md §10: Unknown kind deserialized from wire uses #[serde(other)].
+#[test]
+fn unknown_kind_from_wire() {
+    let raw = r#"{
+        "v": 1,
+        "id": "6fc0ec4f-e59f-4bea-9d57-0d9fdd1108f1",
+        "from": "ed25519.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "to": "ed25519.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "ts": 1771108000000,
+        "kind": "future_kind_v99",
+        "payload": {}
+    }"#;
+    let env: Envelope = serde_json::from_str(raw).unwrap();
+    assert_eq!(env.kind, MessageKind::Unknown);
+}
+
+/// spec.md §10: Request kinds (expects_response=true) on uni stream should be dropped.
+/// Verify classification: these kinds are the ones connection.rs will drop on uni.
+#[test]
+fn request_kinds_classified_for_uni_drop() {
+    let request_kinds = [
+        MessageKind::Hello,
+        MessageKind::Ping,
+        MessageKind::Query,
+        MessageKind::Delegate,
+        MessageKind::Cancel,
+        MessageKind::Discover,
+    ];
+    for kind in &request_kinds {
+        assert!(
+            kind.expects_response(),
+            "{kind} should be classified as request (expects_response), would be dropped on uni"
+        );
+    }
+}
+
+/// spec.md §10: Fire-and-forget kinds should NOT expect a response.
+/// On bidi stream, these are forwarded and the send side is finished.
+#[test]
+fn fire_and_forget_kinds_classified() {
+    let faf_kinds = [
+        MessageKind::Notify,
+        MessageKind::Result,
+        MessageKind::Pong,
+        MessageKind::Response,
+        MessageKind::Ack,
+        MessageKind::Capabilities,
+    ];
+    for kind in &faf_kinds {
+        assert!(
+            !kind.expects_response(),
+            "{kind} should NOT expect a response (fire-and-forget)"
+        );
+    }
+}
+
+/// spec.md §10: Envelope validation catches invalid agent IDs.
+/// Invalid envelopes should be dropped/rejected per violation handling.
+#[test]
+fn invalid_envelope_detected_for_violation_handling() {
+    let invalid = Envelope::new(
+        "bad_id".to_string(),
+        "also_bad".to_string(),
+        MessageKind::Notify,
+        json!({"topic": "test", "data": {}}),
+    );
+    assert!(invalid.validate().is_err());
+}
+
+/// spec.md §10: Malformed JSON on any stream should be dropped.
+#[test]
+fn malformed_json_fails_deserialization() {
+    let bad_json = b"this is not json{{{";
+    let result = serde_json::from_slice::<Envelope>(bad_json);
+    assert!(result.is_err());
+}
+
+/// spec.md §10: Oversized messages (>64KB) should be rejected.
+#[test]
+fn oversized_message_rejected_by_encode() {
+    let big = "x".repeat(MAX_MESSAGE_SIZE as usize);
+    let env = Envelope::new(
+        agent_a(),
+        agent_b(),
+        MessageKind::Query,
+        json!({"question": big}),
+    );
+    assert!(encode(&env).is_err());
+}
+
+/// spec.md §10: Duplicate message IDs should be unique (UUID v4 guarantee).
+#[test]
+fn message_ids_are_unique() {
+    let env1 = Envelope::new(agent_a(), agent_b(), MessageKind::Ping, json!({}));
+    let env2 = Envelope::new(agent_a(), agent_b(), MessageKind::Ping, json!({}));
+    assert_ne!(env1.id, env2.id, "UUID v4 should generate unique IDs");
+}
+
+/// spec.md §10: Version mismatch in hello triggers error(incompatible_version).
+#[test]
+fn version_mismatch_produces_incompatible_version_error() {
+    let req = Envelope::new(
+        "ed25519.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+        "ed25519.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string(),
+        MessageKind::Hello,
+        json!({"protocol_versions": [99]}),
+    );
+    let resp = axon::transport::auto_response(&req, "ed25519.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+    assert_eq!(resp.kind, MessageKind::Error);
+    let payload = resp.payload_value();
+    assert_eq!(payload["code"], "incompatible_version");
 }

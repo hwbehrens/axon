@@ -1,0 +1,44 @@
+[package]
+name = "axon-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+axon = { path = ".." }
+serde_json = "1"
+toml = "0.8"
+
+[[bin]]
+name = "fuzz_envelope_decode"
+path = "fuzz_targets/fuzz_envelope_decode.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_wire_decode"
+path = "fuzz_targets/fuzz_wire_decode.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_ipc_command"
+path = "fuzz_targets/fuzz_ipc_command.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_config_toml"
+path = "fuzz_targets/fuzz_config_toml.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_known_peers"
+path = "fuzz_targets/fuzz_known_peers.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_envelope_roundtrip"
+path = "fuzz_targets/fuzz_envelope_roundtrip.rs"
+doc = false

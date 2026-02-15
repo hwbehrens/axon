@@ -82,12 +82,7 @@ impl PeerTable {
         }
     }
 
-    pub async fn upsert_discovered(
-        &self,
-        agent_id: String,
-        addr: SocketAddr,
-        pubkey: String,
-    ) {
+    pub async fn upsert_discovered(&self, agent_id: String, addr: SocketAddr, pubkey: String) {
         let mut table = self.inner.write().await;
         table
             .entry(agent_id.clone())
@@ -181,10 +176,7 @@ impl PeerTable {
         let now = Instant::now();
         let stale: Vec<String> = table
             .values()
-            .filter(|p| {
-                p.source == PeerSource::Discovered
-                    && now.duration_since(p.last_seen) > ttl
-            })
+            .filter(|p| p.source == PeerSource::Discovered && now.duration_since(p.last_seen) > ttl)
             .map(|p| p.agent_id.clone())
             .collect();
         for id in &stale {
@@ -244,7 +236,10 @@ mod tests {
         let cfg = make_static_cfg("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
         table.upsert_static(&cfg).await;
 
-        let peer = table.get("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").await.expect("peer exists");
+        let peer = table
+            .get("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+            .await
+            .expect("peer exists");
         assert_eq!(peer.source, PeerSource::Static);
         assert_eq!(peer.status, ConnectionStatus::Discovered);
     }
@@ -255,13 +250,21 @@ mod tests {
         let id = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
         table
-            .upsert_discovered(id.to_string(), "127.0.0.1:7101".parse().unwrap(), "YmFy".to_string())
+            .upsert_discovered(
+                id.to_string(),
+                "127.0.0.1:7101".parse().unwrap(),
+                "YmFy".to_string(),
+            )
             .await;
 
         tokio::time::sleep(Duration::from_millis(10)).await;
 
         table
-            .upsert_discovered(id.to_string(), "127.0.0.1:7102".parse().unwrap(), "YmF6".to_string())
+            .upsert_discovered(
+                id.to_string(),
+                "127.0.0.1:7102".parse().unwrap(),
+                "YmF6".to_string(),
+            )
             .await;
 
         let peer = table.get(id).await.expect("peer exists");
@@ -277,7 +280,11 @@ mod tests {
         table.upsert_static(&make_static_cfg(id)).await;
 
         table
-            .upsert_discovered(id.to_string(), "10.0.0.1:9999".parse().unwrap(), "different".to_string())
+            .upsert_discovered(
+                id.to_string(),
+                "10.0.0.1:9999".parse().unwrap(),
+                "different".to_string(),
+            )
             .await;
 
         let peer = table.get(id).await.expect("peer exists");
@@ -289,7 +296,9 @@ mod tests {
     async fn stale_cleanup_removes_discovered_only() {
         let table = PeerTable::new();
 
-        table.upsert_static(&make_static_cfg("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")).await;
+        table
+            .upsert_static(&make_static_cfg("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"))
+            .await;
 
         table
             .upsert_discovered(
@@ -308,9 +317,22 @@ mod tests {
         }
 
         let removed = table.remove_stale(Duration::from_secs(60)).await;
-        assert_eq!(removed, vec!["bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string()]);
-        assert!(table.get("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").await.is_some());
-        assert!(table.get("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb").await.is_none());
+        assert_eq!(
+            removed,
+            vec!["bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string()]
+        );
+        assert!(
+            table
+                .get("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+                .await
+                .is_some()
+        );
+        assert!(
+            table
+                .get("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+                .await
+                .is_none()
+        );
     }
 
     #[tokio::test]
@@ -349,11 +371,18 @@ mod tests {
         let id = "dddddddddddddddddddddddddddddddd";
 
         table
-            .upsert_discovered(id.to_string(), "127.0.0.1:7100".parse().unwrap(), "YmFy".to_string())
+            .upsert_discovered(
+                id.to_string(),
+                "127.0.0.1:7100".parse().unwrap(),
+                "YmFy".to_string(),
+            )
             .await;
 
         table.set_status(id, ConnectionStatus::Connecting).await;
-        assert_eq!(table.get(id).await.unwrap().status, ConnectionStatus::Connecting);
+        assert_eq!(
+            table.get(id).await.unwrap().status,
+            ConnectionStatus::Connecting
+        );
 
         table.set_connected(id, Some(0.7)).await;
         let peer = table.get(id).await.unwrap();
@@ -371,7 +400,11 @@ mod tests {
         let table = PeerTable::new();
         let id = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
         table
-            .upsert_discovered(id.to_string(), "127.0.0.1:7100".parse().unwrap(), "Zm9v".to_string())
+            .upsert_discovered(
+                id.to_string(),
+                "127.0.0.1:7100".parse().unwrap(),
+                "Zm9v".to_string(),
+            )
             .await;
 
         table.set_rtt(id, 0.42).await;
@@ -383,7 +416,11 @@ mod tests {
         let table = PeerTable::new();
         let id = "ffffffffffffffffffffffffffffffff";
         table
-            .upsert_discovered(id.to_string(), "127.0.0.1:7100".parse().unwrap(), "Zm9v".to_string())
+            .upsert_discovered(
+                id.to_string(),
+                "127.0.0.1:7100".parse().unwrap(),
+                "Zm9v".to_string(),
+            )
             .await;
 
         {
@@ -402,13 +439,25 @@ mod tests {
     async fn list_returns_sorted() {
         let table = PeerTable::new();
         table
-            .upsert_discovered("cccc".to_string(), "127.0.0.1:7100".parse().unwrap(), "a".to_string())
+            .upsert_discovered(
+                "cccc".to_string(),
+                "127.0.0.1:7100".parse().unwrap(),
+                "a".to_string(),
+            )
             .await;
         table
-            .upsert_discovered("aaaa".to_string(), "127.0.0.1:7101".parse().unwrap(), "b".to_string())
+            .upsert_discovered(
+                "aaaa".to_string(),
+                "127.0.0.1:7101".parse().unwrap(),
+                "b".to_string(),
+            )
             .await;
         table
-            .upsert_discovered("bbbb".to_string(), "127.0.0.1:7102".parse().unwrap(), "c".to_string())
+            .upsert_discovered(
+                "bbbb".to_string(),
+                "127.0.0.1:7102".parse().unwrap(),
+                "c".to_string(),
+            )
             .await;
 
         let peers = table.list().await;
@@ -423,7 +472,11 @@ mod tests {
         let table = PeerTable::new();
         let id = "aaaa";
         table
-            .upsert_discovered(id.to_string(), "127.0.0.1:7100".parse().unwrap(), "Zm9v".to_string())
+            .upsert_discovered(
+                id.to_string(),
+                "127.0.0.1:7100".parse().unwrap(),
+                "Zm9v".to_string(),
+            )
             .await;
 
         let removed = table.remove(id).await;
@@ -436,10 +489,18 @@ mod tests {
     async fn peers_needing_connection() {
         let table = PeerTable::new();
         table
-            .upsert_discovered("peer1".to_string(), "127.0.0.1:7100".parse().unwrap(), "a".to_string())
+            .upsert_discovered(
+                "peer1".to_string(),
+                "127.0.0.1:7100".parse().unwrap(),
+                "a".to_string(),
+            )
             .await;
         table
-            .upsert_discovered("peer2".to_string(), "127.0.0.1:7101".parse().unwrap(), "b".to_string())
+            .upsert_discovered(
+                "peer2".to_string(),
+                "127.0.0.1:7101".parse().unwrap(),
+                "b".to_string(),
+            )
             .await;
 
         table.set_connected("peer2", Some(1.0)).await;
@@ -458,8 +519,12 @@ mod tests {
             let t = table.clone();
             handles.push(tokio::spawn(async move {
                 let id = format!("peer{i:02}");
-                t.upsert_discovered(id.clone(), "127.0.0.1:7100".parse().unwrap(), "Zm9v".to_string())
-                    .await;
+                t.upsert_discovered(
+                    id.clone(),
+                    "127.0.0.1:7100".parse().unwrap(),
+                    "Zm9v".to_string(),
+                )
+                .await;
                 t.set_connected(&id, Some(i as f64)).await;
                 t.touch(&id).await;
             }));

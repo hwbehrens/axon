@@ -1,0 +1,226 @@
+use std::collections::HashMap;
+use std::fs;
+use std::os::unix::fs::PermissionsExt;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use anyhow::{Context, Result};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::net::{UnixListener, UnixStream};
+use tokio::sync::{Mutex, mpsc};
+
+use super::protocol::{CommandEvent, DaemonReply, IpcCommand};
+use crate::message::Envelope;
+
+const MAX_CLIENT_QUEUE: usize = 1024;
+const MAX_IPC_LINE_LENGTH: usize = 256 * 1024; // 256 KB
+
+// ---------------------------------------------------------------------------
+// IPC server
+// ---------------------------------------------------------------------------
+
+#[derive(Clone)]
+pub struct IpcServer {
+    socket_path: PathBuf,
+    max_clients: usize,
+    clients: Arc<Mutex<HashMap<u64, mpsc::Sender<Arc<str>>>>>,
+    next_client_id: Arc<AtomicU64>,
+}
+
+impl IpcServer {
+    pub async fn bind(
+        socket_path: PathBuf,
+        max_clients: usize,
+    ) -> Result<(Self, mpsc::Receiver<CommandEvent>)> {
+        if socket_path.exists() {
+            fs::remove_file(&socket_path).with_context(|| {
+                format!(
+                    "failed to remove stale unix socket: {}",
+                    socket_path.display()
+                )
+            })?;
+        }
+
+        if let Some(parent) = socket_path.parent()
+            && !parent.exists()
+        {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create socket dir: {}", parent.display()))?;
+        }
+
+        let listener = UnixListener::bind(&socket_path)
+            .with_context(|| format!("failed to bind unix socket: {}", socket_path.display()))?;
+        fs::set_permissions(&socket_path, fs::Permissions::from_mode(0o600)).with_context(
+            || {
+                format!(
+                    "failed to set socket permissions: {}",
+                    socket_path.display()
+                )
+            },
+        )?;
+
+        let server = Self {
+            socket_path,
+            max_clients,
+            clients: Arc::new(Mutex::new(HashMap::new())),
+            next_client_id: Arc::new(AtomicU64::new(1)),
+        };
+
+        let (cmd_tx, cmd_rx) = mpsc::channel(256);
+        server.start_accept_loop(listener, cmd_tx);
+
+        Ok((server, cmd_rx))
+    }
+
+    pub async fn send_reply(&self, client_id: u64, reply: &DaemonReply) -> Result<()> {
+        let line: Arc<str> =
+            Arc::from(serde_json::to_string(reply).context("failed to serialize daemon reply")?);
+        if let Some(tx) = self.clients.lock().await.get(&client_id).cloned() {
+            let _ = tx.try_send(line);
+        }
+        Ok(())
+    }
+
+    pub async fn broadcast_inbound(&self, envelope: Envelope) -> Result<()> {
+        let msg = DaemonReply::Inbound {
+            inbound: true,
+            envelope,
+        };
+        let line: Arc<str> =
+            Arc::from(serde_json::to_string(&msg).context("failed to serialize inbound message")?);
+        for tx in self.clients.lock().await.values() {
+            let _ = tx.try_send(line.clone());
+        }
+        Ok(())
+    }
+
+    pub async fn client_count(&self) -> usize {
+        self.clients.lock().await.len()
+    }
+
+    pub fn socket_path(&self) -> &Path {
+        &self.socket_path
+    }
+
+    pub fn cleanup_socket(&self) -> Result<()> {
+        if self.socket_path.exists() {
+            fs::remove_file(&self.socket_path).with_context(|| {
+                format!(
+                    "failed to remove socket file: {}",
+                    self.socket_path.display()
+                )
+            })?;
+        }
+        Ok(())
+    }
+
+    fn start_accept_loop(&self, listener: UnixListener, cmd_tx: mpsc::Sender<CommandEvent>) {
+        let clients = self.clients.clone();
+        let next_client_id = self.next_client_id.clone();
+        let max_clients = self.max_clients;
+
+        tokio::spawn(async move {
+            loop {
+                let (socket, _) = match listener.accept().await {
+                    Ok(v) => v,
+                    Err(err) => {
+                        tracing::warn!(error = %err, "failed to accept IPC connection");
+                        continue;
+                    }
+                };
+
+                let client_id = next_client_id.fetch_add(1, Ordering::Relaxed);
+
+                {
+                    let clients_guard = clients.lock().await;
+                    if clients_guard.len() >= max_clients {
+                        tracing::warn!(
+                            max = max_clients,
+                            "rejecting IPC connection: client limit reached"
+                        );
+                        drop(clients_guard);
+                        drop(socket);
+                        continue;
+                    }
+                }
+
+                let (out_tx, out_rx) = mpsc::channel::<Arc<str>>(MAX_CLIENT_QUEUE);
+                clients.lock().await.insert(client_id, out_tx.clone());
+
+                let clients_for_remove = clients.clone();
+                let cmd_tx_for_client = cmd_tx.clone();
+
+                tokio::spawn(async move {
+                    let _ =
+                        handle_client(socket, client_id, out_tx, out_rx, cmd_tx_for_client).await;
+                    clients_for_remove.lock().await.remove(&client_id);
+                });
+            }
+        });
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Per-client connection handler
+// ---------------------------------------------------------------------------
+
+async fn handle_client(
+    socket: UnixStream,
+    client_id: u64,
+    out_tx: mpsc::Sender<Arc<str>>,
+    mut out_rx: mpsc::Receiver<Arc<str>>,
+    cmd_tx: mpsc::Sender<CommandEvent>,
+) -> Result<()> {
+    let (read_half, mut write_half) = socket.into_split();
+
+    tokio::spawn(async move {
+        while let Some(line) = out_rx.recv().await {
+            if write_half.write_all(line.as_bytes()).await.is_err() {
+                break;
+            }
+            if write_half.write_all(b"\n").await.is_err() {
+                break;
+            }
+        }
+    });
+
+    let mut lines = BufReader::new(read_half).lines();
+    while let Some(line) = lines.next_line().await.context("failed reading IPC line")? {
+        if line.len() > MAX_IPC_LINE_LENGTH {
+            let err_line = serde_json::to_string(&DaemonReply::Error {
+                ok: false,
+                error: format!(
+                    "line too long ({} bytes, max {})",
+                    line.len(),
+                    MAX_IPC_LINE_LENGTH
+                ),
+            })
+            .context("failed to serialize IPC length error")?;
+            let _ = out_tx.try_send(Arc::from(err_line));
+            continue;
+        }
+        match serde_json::from_str::<IpcCommand>(&line) {
+            Ok(command) => {
+                cmd_tx
+                    .send(CommandEvent { client_id, command })
+                    .await
+                    .map_err(|_| anyhow::anyhow!("daemon command channel closed"))?;
+            }
+            Err(err) => {
+                let err_line = serde_json::to_string(&DaemonReply::Error {
+                    ok: false,
+                    error: format!("invalid command: {err}"),
+                })
+                .context("failed to serialize IPC parse error")?;
+                let _ = out_tx.try_send(Arc::from(err_line));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+#[path = "server_tests.rs"]
+mod tests;
