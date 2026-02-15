@@ -2,7 +2,9 @@ use anyhow::Result;
 use base64::Engine;
 use std::net::SocketAddr;
 use tokio::sync::mpsc;
+use crate::config::StaticPeer;
 
+#[derive(Debug)]
 pub enum PeerEvent {
     Discovered {
         agent_id: String,
@@ -15,7 +17,7 @@ pub enum PeerEvent {
 }
 
 pub trait Discovery: Send + Sync {
-    async fn run(self: Box<Self>, tx: mpsc::Sender<PeerEvent>) -> Result<()>;
+    fn run(self: Box<Self>, tx: mpsc::Sender<PeerEvent>) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send>>;
 }
 
 pub struct MdnsDiscovery {
@@ -31,53 +33,81 @@ impl MdnsDiscovery {
 }
 
 impl Discovery for MdnsDiscovery {
-    async fn run(self: Box<Self>, tx: mpsc::Sender<PeerEvent>) -> Result<()> {
-        use mdns_sd::{ServiceDaemon, ServiceInfo};
-        use std::collections::HashMap;
+    fn run(self: Box<Self>, tx: mpsc::Sender<PeerEvent>) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send>> {
+        Box::pin(async move {
+            use mdns_sd::{ServiceDaemon, ServiceInfo};
+            use std::collections::HashMap;
 
-        let mdns = ServiceDaemon::new()?;
-        let service_type = "_axon._udp.local.";
-        
-        let mut properties = HashMap::new();
-        properties.insert("agent_id".to_string(), self.agent_id.clone());
-        properties.insert("pubkey".to_string(), base64::engine::general_purpose::STANDARD.encode(&self.pubkey));
+            let mdns = ServiceDaemon::new()?;
+            let service_type = "_axon._udp.local.";
+            
+            let mut properties = HashMap::new();
+            properties.insert("agent_id".to_string(), self.agent_id.clone());
+            properties.insert("pubkey".to_string(), base64::engine::general_purpose::STANDARD.encode(&self.pubkey));
 
-        let service_info = ServiceInfo::new(
-            service_type,
-            &self.agent_id,
-            &format!("{}.local.", self.agent_id),
-            "",
-            self.port,
-            Some(properties),
-        )?;
+            let service_info = ServiceInfo::new(
+                service_type,
+                &self.agent_id,
+                &format!("{}.local.", self.agent_id),
+                "",
+                self.port,
+                Some(properties),
+            )?;
 
-        mdns.register(service_info)?;
+            mdns.register(service_info)?;
 
-        let receiver = mdns.browse(service_type)?;
-        
-        while let Ok(event) = receiver.recv_async().await {
-            match event {
-                mdns_sd::ServiceEvent::ServiceResolved(info) => {
-                    let agent_id = info.get_property_val_str("agent_id");
-                    let pubkey_base64 = info.get_property_val_str("pubkey");
-                    
-                    if let (Some(id), Some(pk_b64)) = (agent_id, pubkey_base64) {
-                        if let Ok(pk) = base64::engine::general_purpose::STANDARD.decode(pk_b64) {
-                            if let Some(addr) = info.get_addresses().iter().next() {
-                                let socket_addr = SocketAddr::new(*addr, info.get_port());
-                                let _ = tx.send(PeerEvent::Discovered {
-                                    agent_id: id.to_string(),
-                                    addr: socket_addr,
-                                    pubkey: pk,
-                                }).await;
+            let receiver = mdns.browse(service_type)?;
+            
+            while let Ok(event) = receiver.recv_async().await {
+                match event {
+                    mdns_sd::ServiceEvent::ServiceResolved(info) => {
+                        let agent_id = info.get_property_val_str("agent_id");
+                        let pubkey_base64 = info.get_property_val_str("pubkey");
+                        
+                        if let (Some(id), Some(pk_b64)) = (agent_id, pubkey_base64) {
+                            if let Ok(pk) = base64::engine::general_purpose::STANDARD.decode(pk_b64) {
+                                if let Some(addr) = info.get_addresses().iter().next() {
+                                    let socket_addr = SocketAddr::new(*addr, info.get_port());
+                                    let _ = tx.send(PeerEvent::Discovered {
+                                        agent_id: id.to_string(),
+                                        addr: socket_addr,
+                                        pubkey: pk,
+                                    }).await;
+                                }
                             }
                         }
                     }
+                    _ => {}
                 }
-                _ => {}
             }
-        }
+            Ok(())
+        })
+    }
+}
 
-        Ok(())
+pub struct StaticDiscovery {
+    peers: Vec<StaticPeer>,
+}
+
+impl StaticDiscovery {
+    pub fn new(peers: Vec<StaticPeer>) -> Self {
+        Self { peers }
+    }
+}
+
+impl Discovery for StaticDiscovery {
+    fn run(self: Box<Self>, tx: mpsc::Sender<PeerEvent>) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send>> {
+        Box::pin(async move {
+            for peer in self.peers {
+                if let Ok(pk) = base64::engine::general_purpose::STANDARD.decode(&peer.pubkey) {
+                    let _ = tx.send(PeerEvent::Discovered {
+                        agent_id: peer.agent_id,
+                        addr: peer.addr,
+                        pubkey: pk,
+                    }).await;
+                }
+            }
+            Ok(())
+        })
     }
 }

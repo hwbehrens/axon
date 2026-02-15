@@ -1,10 +1,9 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use quinn::{Endpoint, ServerConfig, ClientConfig, Connection, RecvStream, SendStream};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use crate::identity::Identity;
-use crate::message::{Envelope, HelloPayload, HelloResponsePayload};
-use serde_json::json;
+use crate::message::Envelope;
 
 pub struct Transport {
     pub endpoint: Endpoint,
@@ -17,17 +16,19 @@ impl Transport {
         let cert_der = cert.serialize_der()?;
         let priv_key_der = cert.serialize_private_key_der();
 
-        let server_config = ServerConfig::with_single_cert(
+        let mut server_config = ServerConfig::with_single_cert(
             vec![rustls::Certificate(cert_der.clone())],
             rustls::PrivateKey(priv_key_der),
         )?;
+        server_config.alpn_protocols = vec![b"axon-1".to_vec()];
 
         let mut endpoint = Endpoint::server(server_config, SocketAddr::from(([0, 0, 0, 0], port)))?;
         
-        let client_crypto = rustls::ClientConfig::builder()
+        let mut client_crypto = rustls::ClientConfig::builder()
             .with_safe_defaults()
             .with_custom_certificate_verifier(Arc::new(SkipServerVerification {}))
             .with_no_client_auth();
+        client_crypto.alpn_protocols = vec![b"axon-1".to_vec()];
         
         endpoint.set_default_client_config(ClientConfig::new(Arc::new(client_crypto)));
 

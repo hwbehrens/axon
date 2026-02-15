@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use base64::Engine;
 use axon::daemon::Daemon;
 use axon::ipc::{IpcCommand, IpcResponse};
@@ -17,8 +17,8 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     Daemon {
-        #[arg(short, long, default_value = "7100")]
-        port: u16,
+        #[arg(short, long)]
+        port: Option<u16>,
     },
     Send {
         agent_id: String,
@@ -69,7 +69,7 @@ async fn main() -> Result<()> {
 
 async fn send_command(home_dir: PathBuf, cmd: IpcCommand) -> Result<IpcResponse> {
     let socket_path = home_dir.join(".axon/axon.sock");
-    let mut stream = UnixStream::connect(socket_path).await.context("Failed to connect to daemon. Is it running?")?;
+    let mut stream = UnixStream::connect(socket_path).await?;
     
     let cmd_json = serde_json::to_string(&cmd)? + "\n";
     stream.write_all(cmd_json.as_bytes()).await?;
