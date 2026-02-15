@@ -1,13 +1,13 @@
-# ACP v0.2 Specification — QUIC Architecture
+# AXON Specification — QUIC Architecture
 
-_Draft 1 — Feb 14, 2026. Refine before implementing._
+_Draft — Feb 14, 2026. Refine before implementing._
 
 ## Overview
 
-ACP is a lightweight background daemon that enables secure, fast, point-to-point messaging between AI agents on a local network. Each agent's machine runs one daemon.
+AXON is a lightweight background daemon that enables secure, fast, point-to-point messaging between AI agents on a local network. Each agent's machine runs one daemon.
 
 ```
-OpenClaw ←→ [Unix Socket] ←→ ACP Daemon ←→ [QUIC/UDP] ←→ ACP Daemon ←→ [Unix Socket] ←→ OpenClaw
+OpenClaw ←→ [Unix Socket] ←→ AXON Daemon ←→ [QUIC/UDP] ←→ AXON Daemon ←→ [Unix Socket] ←→ OpenClaw
 ```
 
 ## Design Principles
@@ -22,8 +22,8 @@ OpenClaw ←→ [Unix Socket] ←→ ACP Daemon ←→ [QUIC/UDP] ←→ ACP Dae
 
 ### Key Generation
 - On first run, generate an **Ed25519** signing keypair.
-- Store private key at `~/.acp/identity.key` (chmod 600).
-- Store public key at `~/.acp/identity.pub` (base64).
+- Store private key at `~/.axon/identity.key` (chmod 600).
+- Store public key at `~/.axon/identity.pub` (base64).
 - **Agent ID** = first 16 bytes of SHA-256(public key), hex-encoded (32 chars). Human-readable, collision-resistant, cryptographically derived.
 
 ### Self-Signed Certificate
@@ -40,7 +40,7 @@ OpenClaw ←→ [Unix Socket] ←→ ACP Daemon ←→ [QUIC/UDP] ←→ ACP Dae
 ## 2. Discovery
 
 ### Primary: mDNS/DNS-SD (LAN, zero-config)
-- Service type: `_acp._udp.local`
+- Service type: `_axon._udp.local`
 - TXT records: `agent_id=<hex>`, `pubkey=<base64 Ed25519 public key>`
 - Browse continuously for peers; maintain a peer table.
 - Stale peer removal: 60s without mDNS refresh.
@@ -48,7 +48,7 @@ OpenClaw ←→ [Unix Socket] ←→ ACP Daemon ←→ [QUIC/UDP] ←→ ACP Dae
 
 ### Fallback: Static Peers (config file)
 ```toml
-# ~/.acp/config.toml
+# ~/.axon/config.toml
 [[peers]]
 agent_id = "a1b2c3d4..."
 addr = "100.64.0.5:7100"     # Tailscale IP
@@ -182,7 +182,7 @@ Two implementations for v0.2: `MdnsDiscovery` and `StaticDiscovery`. Both feed t
 ## 5. Local IPC: Unix Domain Socket
 
 ### Socket Path
-- `~/.acp/acp.sock`
+- `~/.axon/axon.sock`
 - Removed on startup (clean stale sockets). Created fresh.
 
 ### Protocol
@@ -217,25 +217,25 @@ Line-delimited JSON over Unix socket. Each line is one complete JSON object.
 ## 6. CLI
 
 ```
-acp daemon [--port 7100] [--agent-id <override>]
+axon daemon [--port 7100] [--agent-id <override>]
     Start the daemon. Runs in foreground (use systemd/launchd for background).
 
-acp send <agent_id> <message>
+axon send <agent_id> <message>
     Send a quick query (convenience wrapper).
 
-acp delegate <agent_id> <task>
+axon delegate <agent_id> <task>
     Delegate a task.
 
-acp notify <agent_id> <topic> <data>
+axon notify <agent_id> <topic> <data>
     Send a notification.
 
-acp peers
+axon peers
     List discovered and connected peers with RTT.
 
-acp status
+axon status
     Daemon health: uptime, connections, message counts.
 
-acp identity
+axon identity
     Print this agent's ID and public key.
 ```
 
@@ -244,12 +244,12 @@ All CLI commands (except `daemon`) connect to the Unix socket, send a command, p
 ## 7. File Layout
 
 ```
-~/.acp/
+~/.axon/
 ├── identity.key        # Ed25519 private key (chmod 600)
 ├── identity.pub        # Ed25519 public key (base64)
 ├── config.toml         # Optional: port, static peers
 ├── known_peers.json    # Cache of last-seen peer addresses (auto-managed)
-└── acp.sock            # Unix domain socket (runtime only)
+└── axon.sock           # Unix domain socket (runtime only)
 ```
 
 ## 8. Daemon Lifecycle
@@ -281,8 +281,7 @@ All CLI commands (except `daemon`) connect to the Unix socket, send a command, p
 
 ## 9. Error Handling
 
-- **Peer unreachable:** Queue message for retry? Or fail immediately? 
-  → **Decision needed.** Proposal: fail immediately, return error to IPC client. The calling agent can retry if it wants. ACP is a transport, not a queue.
+- **Peer unreachable:** Fail immediately, return error to IPC client. The calling agent can retry if it wants. AXON is a transport, not a queue.
 - **Invalid peer cert:** Reject connection, log warning.
 - **Malformed message:** Drop, log warning. Don't crash.
 - **IPC client disconnects:** Clean up, no effect on other clients or QUIC connections.
@@ -324,19 +323,9 @@ anyhow = "1"
 4. Clean reconnect after daemon restart (0-RTT when possible).
 5. Daemon uses <5MB RSS memory.
 6. Static peer config works for Tailscale/VPN without code changes.
-7. `acp send` CLI delivers a message end-to-end.
+7. `axon send` CLI delivers a message end-to-end.
 8. Graceful shutdown: no data loss, clean QUIC close.
 
-## Open Questions
+## Future Considerations
 
-1. **Should ACP queue messages for offline peers?** Current proposal: no, fail fast. But this means the sender must handle retries. Is that the right boundary?
-
-2. **Bidirectional streams for request/response:** Is the complexity worth it? Alternative: use two unidirectional streams (one for request, one for response) correlated by message ID. Simpler but slightly more overhead.
-
-3. **Config file format:** TOML? Or just JSON to stay consistent with OpenClaw? TOML is more human-friendly for manual editing.
-
-4. **Peer trust model:** TOFU (trust on first use) is pragmatic but has known weaknesses. For our use case (controlled home network), it's fine. But should we support explicit trust pinning for higher-security deployments?
-
-5. **Message acknowledgment:** Should the daemon ACK messages at the transport level (separate from application-level responses)? QUIC stream completion provides implicit ACK, but an explicit app-level ACK could confirm the receiving agent actually processed the message.
-
-6. **Compatibility with OpenClaw sessions_send:** Could/should ACP register as an OpenClaw transport so agents use `sessions_send` natively, with ACP as the backend? Or is the Unix socket API the permanent interface?
+- **OpenClaw transport integration:** AXON could register as an OpenClaw transport so agents use `sessions_send` natively, with AXON as the backend. For now, the Unix socket API is the interface.

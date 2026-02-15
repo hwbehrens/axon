@@ -1,4 +1,4 @@
-# ACP Message Types — v2 (Revised)
+# AXON Message Types — v2 (Revised)
 
 _Feb 14, 2026. Incorporates feedback. Personal details scrubbed for eventual public release._
 
@@ -297,18 +297,20 @@ meta.*            — about the agents themselves
 
 ## Learnability Design (Non-Normative)
 
-ACP must be usable by any LLM agent with NO pre-existing training on the protocol. Design for learnability:
+AXON must be usable by any LLM agent with NO pre-existing training on the protocol. Design for learnability:
 
-1. **Self-describing CLI.** `acp --help` and `acp <command> --help` must be clear enough that an LLM reading the output can use the tool correctly. Use full English words, not abbreviations.
+1. **Self-describing CLI.** `axon --help` and `axon <command> --help` must be clear enough that an LLM reading the output can use the tool correctly. Use full English words, not abbreviations.
 
-2. **`acp discover` is the bootstrap.** A new agent's first action should be "discover who else is here and what they do." The response gives the agent a complete map of available capabilities.
+2. **Connection bootstrap is automatic.** When two daemons connect over QUIC, they exchange `hello` messages automatically — the agent does not need to initiate this. The `hello` handshake negotiates protocol version and advertises supported features. No other messages can be sent until `hello` completes.
 
-3. **Instructive errors.** Error messages should explain what went wrong AND suggest what to do instead. "Unknown domain 'work.calendar'. This agent handles: family, calendar, groceries. Try querying agent b3c4... for work domains."
+3. **`axon discover` is the first agent action.** After the daemon has connected and completed `hello`, the agent's first action should be `axon discover <agent>` to learn what a peer can do. The `capabilities` response gives the agent a complete map of that peer's domains, tools, and capacity.
 
-4. **`acp examples` command.** Prints a complete annotated example interaction (discover → query → response). LLMs learn from examples faster than from specifications.
+4. **Instructive errors.** Error messages should explain what went wrong AND suggest what to do instead. "Unknown domain 'work.calendar'. This agent handles: family, calendar, groceries. Try querying agent b3c4... for work domains."
 
-5. **Semantic field names.** `question` not `q`. `report_back` not `rb`. `max_tokens` not `mt`. LLMs infer meaning from names.
+5. **`axon examples` command.** Prints a complete annotated example interaction (hello → discover → query → response). LLMs learn from examples faster than from specifications.
 
-6. **OpenClaw SKILL.md.** When installed as a skill, the description and SKILL.md teach the agent the patterns: "You can talk to other agents using ACP. Start with `acp peers` to see who's available, then `acp discover <agent>` to learn what they can do."
+6. **Semantic field names.** `question` not `q`. `report_back` not `rb`. `max_tokens` not `mt`. LLMs infer meaning from names.
 
-7. **Consistent patterns.** Every request that expects a response uses the same pattern: send on bidir stream, read response. Every fire-and-forget uses unidir. No exceptions, no special cases.
+7. **OpenClaw SKILL.md.** When installed as a skill, the description and SKILL.md teach the agent the patterns: "You can talk to other agents using AXON. Start with `axon peers` to see who's available, then `axon discover <agent>` to learn what they can do."
+
+8. **Consistent patterns.** Every request that expects a response uses the same pattern: send on bidir stream, read response. Every fire-and-forget uses unidir. No exceptions, no special cases.

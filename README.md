@@ -1,4 +1,4 @@
-# Agent Comms Protocol (ACP)
+# AXON — Agent eXchange Over Network
 
 A hyper-efficient, LLM-first local messaging protocol for agent-to-agent communication.
 
@@ -21,4 +21,4 @@ We want something purpose-built for two LLM agents on the same local network.
 
 ## Status
 
-Design phase. See `docs/` for architecture exploration.
+Design phase. See `spec/` for the protocol specification and message type definitions.
