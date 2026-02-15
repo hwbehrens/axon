@@ -288,7 +288,9 @@ fn message_ids_are_unique() {
 fn invalid_envelope_error_code_in_spec() {
     let error_payload = axon::message::ErrorPayload {
         code: axon::message::ErrorCode::InvalidEnvelope,
-        message: "envelope validation failed: agent IDs must be in the format ed25519.<32 hex chars>".to_string(),
+        message:
+            "envelope validation failed: agent IDs must be in the format ed25519.<32 hex chars>"
+                .to_string(),
         retryable: false,
     };
     let json = serde_json::to_value(&error_payload).unwrap();
@@ -320,7 +322,11 @@ fn all_spec_error_codes_serialize_correctly() {
     ];
     for (code, expected_str) in expected {
         let json = serde_json::to_value(&code).unwrap();
-        assert_eq!(json.as_str().unwrap(), expected_str, "ErrorCode::{code:?} serializes wrong");
+        assert_eq!(
+            json.as_str().unwrap(),
+            expected_str,
+            "ErrorCode::{code:?} serializes wrong"
+        );
     }
 }
 

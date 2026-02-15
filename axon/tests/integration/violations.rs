@@ -393,7 +393,7 @@ async fn connection_bidi_unknown_kind_returns_error() {
 }
 
 /// Invariant: after hello completes, all bidi request types get their
-/// expected response kinds. Exercises the full handle_bidi_stream → 
+/// expected response kinds. Exercises the full handle_bidi_stream →
 /// handle_authenticated_bidi → auto_response pipeline through the wire.
 #[tokio::test]
 async fn connection_all_bidi_kinds_get_correct_response() {
@@ -455,7 +455,11 @@ async fn connection_all_bidi_kinds_get_correct_response() {
             "{req_kind} should get {expected_resp_kind}, got {}",
             resp.kind
         );
-        assert_eq!(resp.ref_id, Some(env_id), "{req_kind} response must ref the request");
+        assert_eq!(
+            resp.ref_id,
+            Some(env_id),
+            "{req_kind} response must ref the request"
+        );
     }
 }
 
