@@ -152,6 +152,40 @@ fn config_resource_limits_from_toml() {
     assert_eq!(cfg.effective_max_connections(), 256);
 }
 
+#[test]
+fn allow_v1_defaults_to_true() {
+    let cfg = Config::default();
+    assert!(cfg.effective_allow_v1());
+}
+
+#[test]
+fn allow_v1_false_parses() {
+    let dir = tempdir().expect("temp dir");
+    let path = dir.path().join("config.toml");
+    std::fs::write(&path, "[ipc]\nallow_v1 = false\n").expect("write");
+    let cfg = Config::load(&path).expect("load");
+    assert!(!cfg.effective_allow_v1());
+}
+
+#[test]
+fn token_path_default() {
+    let cfg = Config::default();
+    let root = PathBuf::from("/tmp/axon-test");
+    assert_eq!(cfg.effective_token_path(&root), root.join("ipc-token"));
+}
+
+#[test]
+fn token_path_custom() {
+    let dir = tempdir().expect("temp dir");
+    let path = dir.path().join("config.toml");
+    std::fs::write(&path, "[ipc]\ntoken_path = \"/custom/path\"\n").expect("write");
+    let cfg = Config::load(&path).expect("load");
+    assert_eq!(
+        cfg.effective_token_path(&PathBuf::from("/ignored")),
+        PathBuf::from("/custom/path")
+    );
+}
+
 // =========================================================================
 // Property-based tests
 // =========================================================================

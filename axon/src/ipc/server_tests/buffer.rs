@@ -43,7 +43,7 @@ async fn inbox_and_ack_round_trip() {
 
     // Fetch inbox
     write_half
-        .write_all(b"{\"cmd\":\"inbox\",\"limit\":10}\n")
+        .write_all(b"{\"cmd\":\"inbox\",\"limit\":10,\"req_id\":\"r1\"}\n")
         .await
         .expect("write");
 
@@ -58,18 +58,19 @@ async fn inbox_and_ack_round_trip() {
     assert_eq!(v["ok"], true);
     assert_eq!(v["messages"].as_array().unwrap().len(), 3);
 
-    // Extract message IDs
-    let ids: Vec<String> = v["messages"]
+    // Extract highest seq from messages
+    let max_seq = v["messages"]
         .as_array()
         .unwrap()
         .iter()
-        .map(|m| m["envelope"]["id"].as_str().unwrap().to_string())
-        .collect();
+        .map(|m| m["seq"].as_u64().unwrap())
+        .max()
+        .unwrap();
 
-    // Ack messages
+    // Ack messages using seq-based cursor
     let ack_cmd = format!(
-        "{{\"cmd\":\"ack\",\"ids\":{}}}\n",
-        serde_json::to_string(&ids).unwrap()
+        "{{\"cmd\":\"ack\",\"up_to_seq\":{},\"req_id\":\"r2\"}}\n",
+        max_seq
     );
     write_half
         .write_all(ack_cmd.as_bytes())
@@ -85,11 +86,11 @@ async fn inbox_and_ack_round_trip() {
 
     let v: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
     assert_eq!(v["ok"], true);
-    assert_eq!(v["acked"], 3);
+    assert_eq!(v["acked_seq"], max_seq);
 
     // Verify buffer is now empty
     write_half
-        .write_all(b"{\"cmd\":\"inbox\",\"limit\":10}\n")
+        .write_all(b"{\"cmd\":\"inbox\",\"limit\":10,\"req_id\":\"r3\"}\n")
         .await
         .expect("write");
 
@@ -149,7 +150,7 @@ async fn buffer_ttl_eviction() {
 
     // Fetch - should be empty due to TTL eviction
     write_half
-        .write_all(b"{\"cmd\":\"inbox\",\"limit\":10}\n")
+        .write_all(b"{\"cmd\":\"inbox\",\"limit\":10,\"req_id\":\"r1\"}\n")
         .await
         .expect("write");
     let cmd = cmd_rx.recv().await.expect("recv");
@@ -207,7 +208,7 @@ async fn buffer_capacity_eviction() {
 
     // Fetch - should have only 3 messages (oldest dropped)
     write_half
-        .write_all(b"{\"cmd\":\"inbox\",\"limit\":10}\n")
+        .write_all(b"{\"cmd\":\"inbox\",\"limit\":10,\"req_id\":\"r1\"}\n")
         .await
         .expect("write");
     let cmd = cmd_rx.recv().await.expect("recv");
@@ -228,7 +229,8 @@ async fn buffer_capacity_eviction() {
 }
 
 #[tokio::test]
-async fn inbox_since_parameter_uuid() {
+async fn inbox_seq_cursor_semantics() {
+    // Verifies seq-based cursor: push messages, fetch, ack some, fetch again gets remaining
     let dir = tempdir().expect("tempdir");
     let socket_path = dir.path().join("axon.sock");
     let config = IpcServerConfig::default();
@@ -265,9 +267,9 @@ async fn inbox_since_parameter_uuid() {
             .expect("broadcast");
     }
 
-    // Fetch all to get IDs
+    // Fetch all messages
     write_half
-        .write_all(b"{\"cmd\":\"inbox\",\"limit\":10}\n")
+        .write_all(b"{\"cmd\":\"inbox\",\"limit\":10,\"req_id\":\"r1\"}\n")
         .await
         .expect("write");
     let cmd = cmd_rx.recv().await.expect("recv");
@@ -277,17 +279,27 @@ async fn inbox_since_parameter_uuid() {
     line.clear();
     reader.read_line(&mut line).await.expect("read");
     let v: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
+    assert_eq!(v["messages"].as_array().unwrap().len(), 3);
 
-    // Get second message UUID
-    let second_id = v["messages"][1]["envelope"]["id"].as_str().unwrap();
-
-    // Fetch with since=second_id, should get only third message
-    let inbox_cmd = format!(
-        "{{\"cmd\":\"inbox\",\"limit\":10,\"since\":\"{}\"}}\n",
-        second_id
+    // Ack only the first message (seq 1)
+    let first_seq = v["messages"][0]["seq"].as_u64().unwrap();
+    let ack_cmd = format!(
+        "{{\"cmd\":\"ack\",\"up_to_seq\":{},\"req_id\":\"r2\"}}\n",
+        first_seq
     );
     write_half
-        .write_all(inbox_cmd.as_bytes())
+        .write_all(ack_cmd.as_bytes())
+        .await
+        .expect("write");
+    let cmd = cmd_rx.recv().await.expect("recv");
+    let reply = server.handle_command(cmd).await.expect("handle");
+    server.send_reply(1, &reply).await.expect("send reply");
+    line.clear();
+    reader.read_line(&mut line).await.expect("read");
+
+    // Fetch again — should get remaining 2 messages
+    write_half
+        .write_all(b"{\"cmd\":\"inbox\",\"limit\":10,\"req_id\":\"r3\"}\n")
         .await
         .expect("write");
     let cmd = cmd_rx.recv().await.expect("recv");
@@ -298,13 +310,14 @@ async fn inbox_since_parameter_uuid() {
     reader.read_line(&mut line).await.expect("read");
     let v: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
     assert_eq!(v["ok"], true);
-    assert_eq!(v["messages"].as_array().unwrap().len(), 1);
-    assert_eq!(v["messages"][0]["envelope"]["to"], "ed25519.receiver3");
+    assert_eq!(v["messages"].as_array().unwrap().len(), 2);
+    assert_eq!(v["messages"][0]["envelope"]["to"], "ed25519.receiver2");
+    assert_eq!(v["messages"][1]["envelope"]["to"], "ed25519.receiver3");
 }
 
 #[tokio::test]
-async fn inbox_since_iso_timestamp() {
-    // Test: inbox with since parameter as ISO timestamp
+async fn multi_consumer_inbox_independence() {
+    // Test: two consumers with different names have independent ack cursors
     let dir = tempdir().expect("tempdir");
     let socket_path = dir.path().join("axon.sock");
     let config = IpcServerConfig::default();
@@ -312,95 +325,97 @@ async fn inbox_since_iso_timestamp() {
         .await
         .expect("bind IPC server");
 
-    let mut client = UnixStream::connect(&socket_path).await.expect("connect");
-    let (mut read_half, mut write_half) = client.split();
-    let mut reader = BufReader::new(&mut read_half);
+    // Push 3 messages before clients connect
+    for i in 1..=3 {
+        let envelope = Envelope::new(
+            "ed25519.sender".to_string(),
+            format!("ed25519.receiver{}", i),
+            MessageKind::Notify,
+            json!({"msg": i}),
+        );
+        server
+            .broadcast_inbound(&envelope)
+            .await
+            .expect("broadcast");
+    }
 
-    // Authenticate
-    write_half
-        .write_all(b"{\"cmd\":\"hello\",\"version\":2}\n")
+    // Connect consumer A
+    let client_a = UnixStream::connect(&socket_path).await.expect("connect A");
+    let (read_a, mut write_a) = client_a.into_split();
+    let mut reader_a = BufReader::new(read_a);
+
+    write_a
+        .write_all(b"{\"cmd\":\"hello\",\"version\":2,\"consumer\":\"consumer_a\"}\n")
         .await
         .expect("write");
     let cmd = cmd_rx.recv().await.expect("recv");
     let reply = server.handle_command(cmd).await.expect("handle");
     server.send_reply(1, &reply).await.expect("send reply");
-    let mut line = String::new();
-    reader.read_line(&mut line).await.expect("read");
+    let mut line_a = String::new();
+    reader_a.read_line(&mut line_a).await.expect("read");
 
-    // Push message 1
-    let envelope1 = Envelope::new(
-        "ed25519.sender1".to_string(),
-        "ed25519.receiver".to_string(),
-        MessageKind::Notify,
-        json!({"msg": 1}),
-    );
-    server
-        .broadcast_inbound(&envelope1)
-        .await
-        .expect("broadcast 1");
+    // Connect consumer B
+    let client_b = UnixStream::connect(&socket_path).await.expect("connect B");
+    let (read_b, mut write_b) = client_b.into_split();
+    let mut reader_b = BufReader::new(read_b);
 
-    // Small delay to ensure different timestamps
-    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-
-    // Capture timestamp between message 2 and 3
-    let middle_timestamp = chrono::Utc::now().to_rfc3339();
-
-    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-
-    // Push message 2
-    let envelope2 = Envelope::new(
-        "ed25519.sender2".to_string(),
-        "ed25519.receiver".to_string(),
-        MessageKind::Notify,
-        json!({"msg": 2}),
-    );
-    server
-        .broadcast_inbound(&envelope2)
-        .await
-        .expect("broadcast 2");
-
-    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-
-    // Push message 3
-    let envelope3 = Envelope::new(
-        "ed25519.sender3".to_string(),
-        "ed25519.receiver".to_string(),
-        MessageKind::Notify,
-        json!({"msg": 3}),
-    );
-    server
-        .broadcast_inbound(&envelope3)
-        .await
-        .expect("broadcast 3");
-
-    // Request inbox with since = middle_timestamp
-    let inbox_cmd = format!(
-        "{{\"cmd\":\"inbox\",\"limit\":10,\"since\":\"{}\"}}\n",
-        middle_timestamp
-    );
-    write_half
-        .write_all(inbox_cmd.as_bytes())
+    write_b
+        .write_all(b"{\"cmd\":\"hello\",\"version\":2,\"consumer\":\"consumer_b\"}\n")
         .await
         .expect("write");
     let cmd = cmd_rx.recv().await.expect("recv");
     let reply = server.handle_command(cmd).await.expect("handle");
+    server.send_reply(2, &reply).await.expect("send reply");
+    let mut line_b = String::new();
+    reader_b.read_line(&mut line_b).await.expect("read");
 
-    match reply {
-        DaemonReply::Inbox { messages, .. } => {
-            // Should get messages 2 and 3 (after the timestamp)
-            assert_eq!(
-                messages.len(),
-                2,
-                "should only get messages after timestamp"
-            );
-            // Verify it's message 2 and 3
-            let payload1: serde_json::Value =
-                serde_json::from_str(messages[0].envelope.payload.get()).expect("parse payload1");
-            let payload2: serde_json::Value =
-                serde_json::from_str(messages[1].envelope.payload.get()).expect("parse payload2");
-            assert_eq!(payload1["msg"], 2);
-            assert_eq!(payload2["msg"], 3);
-        }
-        _ => panic!("Expected Inbox reply, got {:?}", reply),
-    }
+    // Consumer A: fetch inbox (should see all 3)
+    write_a
+        .write_all(b"{\"cmd\":\"inbox\",\"limit\":10,\"req_id\":\"a1\"}\n")
+        .await
+        .expect("write");
+    let cmd = cmd_rx.recv().await.expect("recv");
+    let reply = server.handle_command(cmd).await.expect("handle");
+    server.send_reply(1, &reply).await.expect("send reply");
+    line_a.clear();
+    reader_a.read_line(&mut line_a).await.expect("read");
+    let va: serde_json::Value = serde_json::from_str(line_a.trim()).unwrap();
+    assert_eq!(va["messages"].as_array().unwrap().len(), 3);
+
+    // Consumer A: ack all 3
+    let max_seq = va["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["seq"].as_u64().unwrap())
+        .max()
+        .unwrap();
+    let ack_cmd = format!(
+        "{{\"cmd\":\"ack\",\"up_to_seq\":{},\"req_id\":\"a2\"}}\n",
+        max_seq
+    );
+    write_a.write_all(ack_cmd.as_bytes()).await.expect("write");
+    let cmd = cmd_rx.recv().await.expect("recv");
+    let reply = server.handle_command(cmd).await.expect("handle");
+    server.send_reply(1, &reply).await.expect("send reply");
+    line_a.clear();
+    reader_a.read_line(&mut line_a).await.expect("read");
+
+    // Consumer B: fetch inbox (should still see all 3 — independent cursor)
+    write_b
+        .write_all(b"{\"cmd\":\"inbox\",\"limit\":10,\"req_id\":\"b1\"}\n")
+        .await
+        .expect("write");
+    let cmd = cmd_rx.recv().await.expect("recv");
+    let reply = server.handle_command(cmd).await.expect("handle");
+    server.send_reply(2, &reply).await.expect("send reply");
+    line_b.clear();
+    reader_b.read_line(&mut line_b).await.expect("read");
+    let vb: serde_json::Value = serde_json::from_str(line_b.trim()).unwrap();
+    assert_eq!(vb["ok"], true);
+    assert_eq!(
+        vb["messages"].as_array().unwrap().len(),
+        3,
+        "consumer B should still see all 3 messages (independent cursor)"
+    );
 }

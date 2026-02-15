@@ -63,12 +63,19 @@ async fn reconnect_after_peer_restart() {
         "daemon A should have at least one peer"
     );
 
-    // Shut down daemon B.
+    // Shut down daemon B and assert it actually stopped.
     cancel_b.cancel();
-    let _ = timeout(Duration::from_secs(10), handle_b).await;
+    timeout(Duration::from_secs(10), handle_b)
+        .await
+        .expect("daemon B did not stop in time")
+        .expect("daemon B task panicked")
+        .expect("daemon B exited with error");
 
-    // Wait for A to notice B is disconnected.
-    tokio::time::sleep(Duration::from_secs(2)).await;
+    // Wait for A to observe B as disconnected (event-driven, not a fixed sleep).
+    assert!(
+        wait_for_peer_disconnected(&paths_a.socket, id_b.agent_id(), Duration::from_secs(10)).await,
+        "daemon A did not notice B disconnected"
+    );
 
     // Restart daemon B on the same port.
     let (cancel_b2, paths_b2, handle_b2) =
@@ -78,9 +85,9 @@ async fn reconnect_after_peer_restart() {
         "daemon B2 socket did not appear"
     );
 
-    // Wait for reconnection.
+    // Wait for reconnection (generous timeout to accommodate exponential backoff).
     assert!(
-        wait_for_peer_connected(&paths_a.socket, id_b.agent_id(), Duration::from_secs(10)).await,
+        wait_for_peer_connected(&paths_a.socket, id_b.agent_id(), Duration::from_secs(30)).await,
         "daemon A did not reconnect to B"
     );
 

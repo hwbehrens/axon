@@ -167,8 +167,11 @@ Located at `~/.axon/config.toml` (or `<axon_root>/config.toml`).
 | `reconnect_max_backoff_secs` | `u64` | `30` | Maximum backoff between reconnection attempts to unreachable peers. Backoff starts at 1s and doubles. |
 | `handshake_timeout_secs` | `u64` | `5` | Maximum time to wait for a hello handshake on a new inbound connection before closing it. |
 | `inbound_read_timeout_secs` | `u64` | `10` | Maximum time to wait for data on an inbound QUIC stream before timing out. |
+| `ipc.allow_v1` | `bool` | `true` | When `false`, reject IPC v1 (no-hello) connections and require v2+ handshake. |
 | `ipc.buffer_size` | `usize` | `1000` | Maximum number of messages in the IPC receive buffer. Set to `0` to disable buffering. |
 | `ipc.buffer_ttl_secs` | `u64` | `86400` | Time-to-live for buffered messages in seconds (default: 24 hours). Expired messages are evicted lazily. |
+| `ipc.buffer_byte_cap` | `usize` | `4194304` | Hard byte cap on receive buffer memory (default: 4 MB). Oldest messages are evicted when exceeded. |
+| `ipc.token_path` | `String` | `~/.axon/ipc-token` | Path to the IPC auth token file (used when peer credentials are unavailable). |
 
 #### Static peers
 

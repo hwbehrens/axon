@@ -22,7 +22,7 @@ async fn ipc_send_command_roundtrip() {
         .await
         .unwrap()
         .unwrap();
-    assert!(matches!(cmd.command, IpcCommand::Peers));
+    assert!(matches!(cmd.command, IpcCommand::Peers { .. }));
 
     // Reply.
     server
@@ -31,6 +31,7 @@ async fn ipc_send_command_roundtrip() {
             &DaemonReply::Peers {
                 ok: true,
                 peers: vec![],
+                req_id: None,
             },
         )
         .await
@@ -60,7 +61,7 @@ async fn ipc_status_roundtrip() {
         .await
         .unwrap()
         .unwrap();
-    assert!(matches!(cmd.command, IpcCommand::Status));
+    assert!(matches!(cmd.command, IpcCommand::Status { .. }));
 
     server
         .send_reply(
@@ -71,6 +72,7 @@ async fn ipc_status_roundtrip() {
                 peers_connected: 2,
                 messages_sent: 10,
                 messages_received: 5,
+                req_id: None,
             },
         )
         .await
@@ -117,6 +119,7 @@ async fn ipc_multiple_commands_sequential() {
                     peers_connected: 0,
                     messages_sent: 0,
                     messages_received: 0,
+                    req_id: None,
                 },
             )
             .await
@@ -149,7 +152,7 @@ async fn ipc_invalid_command_returns_error() {
     let mut reader = BufReader::new(client);
     reader.read_line(&mut line).await.unwrap();
     assert!(line.contains("\"ok\":false"));
-    assert!(line.contains("invalid command"));
+    assert!(line.contains("invalid_command"));
 }
 
 /// IPC send command with ref field deserializes correctly.

@@ -1,154 +1,253 @@
-use std::collections::VecDeque;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::collections::{HashMap, VecDeque};
 
-use anyhow::{Context, Result};
-use uuid::Uuid;
-
-use super::protocol::BufferedMessage;
 use crate::message::{Envelope, MessageKind};
 
+use super::protocol::BufferedMessage;
+
+// ---------------------------------------------------------------------------
+// Receive buffer (IPC.md §4)
+// ---------------------------------------------------------------------------
+
+const DEFAULT_BYTE_CAP: usize = 4 * 1024 * 1024; // 4 MB
+
+fn now_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64
+}
+
+fn envelope_byte_size(envelope: &Envelope) -> usize {
+    // Estimate without full serialization: fixed overhead + variable-length fields.
+    // This is intentionally an approximation — the byte cap is a soft safety limit,
+    // not a precise accounting.
+    let base = 128; // JSON envelope boilerplate (braces, field names, punctuation)
+    let id_len = 36; // UUID string length
+    let from_len = envelope.from.as_ref().len();
+    let to_len = envelope.to.as_ref().len();
+    let kind_len = 12; // max kind string length
+    let payload_len = envelope.payload.get().len();
+    let ref_len = if envelope.ref_id.is_some() { 36 } else { 0 };
+    base + id_len + from_len + to_len + kind_len + payload_len + ref_len
+}
+
+#[derive(Debug, Clone)]
+struct BufferedEntry {
+    seq: u64,
+    buffered_at_ms: u64,
+    envelope: Envelope,
+    byte_size: usize,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ConsumerState {
+    pub acked_seq: u64,
+    pub highest_delivered_seq: u64,
+}
+
 pub struct ReceiveBuffer {
-    messages: VecDeque<BufferedMessage>,
+    entries: VecDeque<BufferedEntry>,
     capacity: usize,
     ttl_secs: u64,
+    byte_cap: usize,
+    total_bytes: usize,
+    next_seq: u64,
+    consumers: HashMap<String, ConsumerState>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum AckError {
+    OutOfRange,
 }
 
 impl ReceiveBuffer {
     pub fn new(capacity: usize, ttl_secs: u64) -> Self {
         Self {
-            messages: VecDeque::with_capacity(capacity),
+            entries: VecDeque::with_capacity(capacity.min(1024)),
             capacity,
             ttl_secs,
+            byte_cap: DEFAULT_BYTE_CAP,
+            total_bytes: 0,
+            next_seq: 1,
+            consumers: HashMap::new(),
         }
     }
 
-    pub fn push(&mut self, envelope: Envelope) {
+    pub fn with_byte_cap(mut self, byte_cap: usize) -> Self {
+        self.byte_cap = byte_cap;
+        self
+    }
+
+    pub fn push(&mut self, envelope: Envelope) -> (u64, u64) {
         self.evict_expired();
 
-        let buffered_at = now_iso8601();
-        let msg = BufferedMessage {
-            envelope,
-            buffered_at,
-        };
+        let buffered_at_ms = now_millis();
+        let seq = self.next_seq;
+        self.next_seq += 1;
 
-        if self.messages.len() >= self.capacity {
-            // Buffer full, evict oldest
-            if let Some(evicted) = self.messages.pop_front() {
-                tracing::debug!(evicted_id = %evicted.envelope.id, "receive buffer full, evicting oldest");
+        // If capacity is 0, buffering is disabled — don't store
+        if self.capacity == 0 {
+            return (seq, buffered_at_ms);
+        }
+
+        let byte_size = envelope_byte_size(&envelope);
+
+        // Evict oldest if capacity exceeded
+        while self.entries.len() >= self.capacity && !self.entries.is_empty() {
+            if let Some(evicted) = self.entries.pop_front() {
+                self.total_bytes = self.total_bytes.saturating_sub(evicted.byte_size);
+                tracing::debug!(
+                    evicted_seq = evicted.seq,
+                    evicted_id = %evicted.envelope.id,
+                    "receive buffer full, evicting oldest"
+                );
             }
         }
 
-        self.messages.push_back(msg);
+        // Evict oldest if byte cap exceeded
+        while self.total_bytes + byte_size > self.byte_cap && !self.entries.is_empty() {
+            if let Some(evicted) = self.entries.pop_front() {
+                self.total_bytes = self.total_bytes.saturating_sub(evicted.byte_size);
+                tracing::debug!(
+                    evicted_seq = evicted.seq,
+                    "receive buffer byte cap, evicting oldest"
+                );
+            }
+        }
+
+        self.total_bytes += byte_size;
+        self.entries.push_back(BufferedEntry {
+            seq,
+            buffered_at_ms,
+            envelope,
+            byte_size,
+        });
+
+        (seq, buffered_at_ms)
     }
 
     pub fn fetch(
         &mut self,
+        consumer: &str,
         limit: usize,
-        since: Option<&str>,
         kinds: Option<&[MessageKind]>,
-    ) -> (Vec<BufferedMessage>, bool) {
+    ) -> (Vec<BufferedMessage>, Option<u64>, bool) {
         self.evict_expired();
+
+        let limit = limit.clamp(1, 1000);
+        let consumer_state = self.consumers.entry(consumer.to_string()).or_default();
+        let acked_seq = consumer_state.acked_seq;
 
         let mut results = Vec::new();
         let mut has_more = false;
-        let limit = limit.clamp(1, 1000);
+        let mut highest_seq = None;
 
-        // Determine skip position
-        let mut skip_count = 0;
-        if let Some(since_val) = since {
-            // Try parsing as UUID first (message ID)
-            if let Ok(uuid) = Uuid::parse_str(since_val) {
-                for (i, msg) in self.messages.iter().enumerate() {
-                    if msg.envelope.id == uuid {
-                        skip_count = i + 1;
-                        break;
-                    }
-                }
-            } else if let Ok(since_millis) = parse_iso8601_millis(since_val) {
-                // Parse as ISO timestamp and compare milliseconds
-                for (i, msg) in self.messages.iter().enumerate() {
-                    if let Ok(msg_millis) = parse_iso8601_millis(&msg.buffered_at)
-                        && msg_millis > since_millis
-                    {
-                        skip_count = i;
-                        break;
-                    }
-                }
+        for entry in &self.entries {
+            if entry.seq <= acked_seq {
+                continue;
             }
-        }
 
-        for msg in self.messages.iter().skip(skip_count) {
             if let Some(filter_kinds) = kinds
-                && !filter_kinds.contains(&msg.envelope.kind)
+                && !filter_kinds.contains(&entry.envelope.kind)
             {
                 continue;
             }
 
             if results.len() < limit {
-                results.push(msg.clone());
+                highest_seq = Some(entry.seq);
+                results.push(BufferedMessage {
+                    seq: entry.seq,
+                    buffered_at_ms: entry.buffered_at_ms,
+                    envelope: entry.envelope.clone(),
+                });
             } else {
                 has_more = true;
                 break;
             }
         }
 
-        (results, has_more)
+        (results, highest_seq, has_more)
     }
 
-    pub fn ack(&mut self, ids: &[Uuid]) -> usize {
-        let mut acked = 0;
-        self.messages.retain(|msg| {
-            if ids.contains(&msg.envelope.id) {
-                acked += 1;
-                false
-            } else {
-                true
+    pub fn ack(&mut self, consumer: &str, up_to_seq: u64) -> Result<u64, AckError> {
+        let consumer_state = self.consumers.entry(consumer.to_string()).or_default();
+
+        if up_to_seq > consumer_state.highest_delivered_seq {
+            return Err(AckError::OutOfRange);
+        }
+
+        consumer_state.acked_seq = up_to_seq;
+        Ok(up_to_seq)
+    }
+
+    pub fn highest_seq(&self) -> u64 {
+        self.entries.back().map(|e| e.seq).unwrap_or(0)
+    }
+
+    pub fn replay_messages(
+        &mut self,
+        consumer: &str,
+        replay_to_seq: u64,
+        kinds: Option<&[MessageKind]>,
+    ) -> Vec<BufferedMessage> {
+        let consumer_state = self.consumers.entry(consumer.to_string()).or_default();
+        let acked_seq = consumer_state.acked_seq;
+        let mut results = Vec::new();
+
+        for entry in &self.entries {
+            if entry.seq <= acked_seq {
+                continue;
             }
-        });
-        acked
+            if entry.seq > replay_to_seq {
+                break;
+            }
+            if let Some(filter_kinds) = kinds
+                && !filter_kinds.contains(&entry.envelope.kind)
+            {
+                continue;
+            }
+            results.push(BufferedMessage {
+                seq: entry.seq,
+                buffered_at_ms: entry.buffered_at_ms,
+                envelope: entry.envelope.clone(),
+            });
+        }
+
+        results
+    }
+
+    pub fn update_delivered_seq(&mut self, consumer: &str, seq: u64) {
+        let cs = self.consumers.entry(consumer.to_string()).or_default();
+        if seq > cs.highest_delivered_seq {
+            cs.highest_delivered_seq = seq;
+        }
     }
 
     fn evict_expired(&mut self) {
-        let now_millis = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as i64;
-        let ttl_millis = (self.ttl_secs as i64) * 1000;
+        if self.ttl_secs == 0 {
+            return;
+        }
 
-        let initial_len = self.messages.len();
-        self.messages.retain(|msg| {
-            // Parse the ISO timestamp and check TTL
-            if let Ok(buffered_millis) = parse_iso8601_millis(&msg.buffered_at) {
-                let age = now_millis.saturating_sub(buffered_millis);
-                age < ttl_millis
+        let now_ms = now_millis();
+        let ttl_ms = self.ttl_secs * 1000;
+
+        let initial_len = self.entries.len();
+        while let Some(front) = self.entries.front() {
+            let age = now_ms.saturating_sub(front.buffered_at_ms);
+            if age >= ttl_ms {
+                if let Some(evicted) = self.entries.pop_front() {
+                    self.total_bytes = self.total_bytes.saturating_sub(evicted.byte_size);
+                }
             } else {
-                true // Keep if we can't parse timestamp
+                break;
             }
-        });
+        }
 
-        let expired_count = initial_len - self.messages.len();
+        let expired_count = initial_len - self.entries.len();
         if expired_count > 0 {
             tracing::debug!(expired_count, "evicted expired messages from buffer");
         }
     }
-}
-
-fn now_iso8601() -> String {
-    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
-    let secs = now.as_secs();
-    let millis = now.subsec_millis();
-
-    // Simple ISO 8601 UTC format: YYYY-MM-DDTHH:MM:SS.sssZ
-    let dt = chrono::DateTime::from_timestamp(secs as i64, millis * 1_000_000)
-        .unwrap_or_else(chrono::Utc::now);
-    dt.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string()
-}
-
-fn parse_iso8601_millis(s: &str) -> Result<i64> {
-    use chrono::DateTime;
-    let dt =
-        DateTime::parse_from_rfc3339(s).with_context(|| format!("invalid ISO timestamp: {}", s))?;
-    Ok(dt.timestamp_millis())
 }
 
 #[cfg(test)]

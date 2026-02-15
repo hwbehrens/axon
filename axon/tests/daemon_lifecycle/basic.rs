@@ -148,13 +148,10 @@ async fn send_to_unknown_peer_returns_error() {
         .await
         .expect("send command should not fail at IPC level");
     assert_eq!(reply["ok"], json!(false), "send to unknown peer must fail");
-    assert!(
-        reply["error"]
-            .as_str()
-            .unwrap()
-            .to_lowercase()
-            .contains("not found"),
-        "error should mention peer not found"
+    assert_eq!(
+        reply["error"].as_str().unwrap(),
+        "peer_not_found",
+        "error should be peer_not_found"
     );
 
     cancel.cancel();

@@ -61,9 +61,15 @@ impl AxonPaths {
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct IpcConfig {
     #[serde(default)]
+    pub allow_v1: Option<bool>,
+    #[serde(default)]
     pub buffer_size: Option<usize>,
     #[serde(default)]
     pub buffer_ttl_secs: Option<u64>,
+    #[serde(default)]
+    pub buffer_byte_cap: Option<usize>,
+    #[serde(default)]
+    pub token_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
@@ -134,6 +140,28 @@ impl Config {
 
     pub fn effective_inbound_read_timeout(&self) -> Duration {
         Duration::from_secs(self.inbound_read_timeout_secs.unwrap_or(10))
+    }
+
+    pub fn effective_allow_v1(&self) -> bool {
+        self.ipc.as_ref().and_then(|c| c.allow_v1).unwrap_or(true)
+    }
+
+    pub fn effective_token_path(&self, root: &Path) -> PathBuf {
+        self.ipc
+            .as_ref()
+            .and_then(|c| c.token_path.as_ref())
+            .map(|p| {
+                if let Some(rest) = p.strip_prefix("~/") {
+                    if let Ok(home) = std::env::var("HOME") {
+                        PathBuf::from(home).join(rest)
+                    } else {
+                        PathBuf::from(p)
+                    }
+                } else {
+                    PathBuf::from(p)
+                }
+            })
+            .unwrap_or_else(|| root.join("ipc-token"))
     }
 }
 

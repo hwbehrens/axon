@@ -11,7 +11,8 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{Mutex, mpsc};
 
 use super::auth;
-use super::handlers::{ClientState, IpcHandlers};
+use super::backend::IpcBackend;
+use super::handlers::{ClientState, DispatchResult, IpcHandlers};
 use super::protocol::{CommandEvent, DaemonReply, IpcCommand};
 use super::receive_buffer::ReceiveBuffer;
 use crate::message::Envelope;
@@ -86,10 +87,11 @@ impl IpcServer {
 
         let clients = Arc::new(Mutex::new(HashMap::new()));
         let client_states = Arc::new(Mutex::new(HashMap::new()));
-        let receive_buffer = Arc::new(Mutex::new(ReceiveBuffer::new(
-            config.buffer_size,
-            config.buffer_ttl_secs,
-        )));
+        let mut buffer = ReceiveBuffer::new(config.buffer_size, config.buffer_ttl_secs);
+        if let Some(byte_cap) = config.buffer_byte_cap {
+            buffer = buffer.with_byte_cap(byte_cap);
+        }
+        let receive_buffer = Arc::new(Mutex::new(buffer));
 
         let handlers = Arc::new(IpcHandlers::new(
             Arc::new(config),
@@ -131,6 +133,26 @@ impl IpcServer {
         self.handlers
             .handle_command(event.client_id, event.command)
             .await
+    }
+
+    /// Dispatch a command through unified IPC policy enforcement, delegating
+    /// Send/Peers/Status effects to the provided backend.
+    pub async fn dispatch_command(
+        &self,
+        client_id: u64,
+        command: IpcCommand,
+        backend: &(impl IpcBackend + ?Sized),
+    ) -> Result<DispatchResult> {
+        self.handlers
+            .dispatch_command(client_id, command, backend)
+            .await
+    }
+
+    /// Close a client connection by removing it from the client map.
+    /// The client's write loop will end when the sender is dropped.
+    pub async fn close_client(&self, client_id: u64) {
+        self.clients.lock().await.remove(&client_id);
+        self.client_states.lock().await.remove(&client_id);
     }
 
     pub async fn client_count(&self) -> usize {
@@ -245,11 +267,8 @@ async fn handle_client(
         if line.len() > MAX_IPC_LINE_LENGTH {
             let err_line = serde_json::to_string(&DaemonReply::Error {
                 ok: false,
-                error: format!(
-                    "line too long ({} bytes, max {})",
-                    line.len(),
-                    MAX_IPC_LINE_LENGTH
-                ),
+                error: super::protocol::IpcErrorCode::InvalidCommand,
+                req_id: None,
             })
             .context("failed to serialize IPC length error")?;
             let _ = out_tx.try_send(Arc::from(err_line));
@@ -262,10 +281,11 @@ async fn handle_client(
                     .await
                     .map_err(|_| anyhow::anyhow!("daemon command channel closed"))?;
             }
-            Err(err) => {
+            Err(_err) => {
                 let err_line = serde_json::to_string(&DaemonReply::Error {
                     ok: false,
-                    error: format!("invalid command: {err}"),
+                    error: super::protocol::IpcErrorCode::InvalidCommand,
+                    req_id: None,
                 })
                 .context("failed to serialize IPC parse error")?;
                 let _ = out_tx.try_send(Arc::from(err_line));

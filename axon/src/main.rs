@@ -57,7 +57,7 @@ enum Commands {
         #[arg(long, name = "ref")]
         ref_id: String,
         #[arg(long)]
-        reason: Option<String>,
+        reason: String,
     },
     /// List discovered and connected peers.
     Peers,

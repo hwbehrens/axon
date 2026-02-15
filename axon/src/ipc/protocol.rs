@@ -5,6 +5,23 @@ use uuid::Uuid;
 use crate::message::{Envelope, MessageKind};
 
 // ---------------------------------------------------------------------------
+// Known message kinds validation
+// ---------------------------------------------------------------------------
+
+pub fn validate_raw_kinds(raw: &[String]) -> Result<Vec<MessageKind>, String> {
+    let mut result = Vec::with_capacity(raw.len());
+    for s in raw {
+        let kind: MessageKind = serde_json::from_value(serde_json::Value::String(s.clone()))
+            .map_err(|e| e.to_string())?;
+        if kind == MessageKind::Unknown {
+            return Err(format!("unknown message kind: {s}"));
+        }
+        result.push(kind);
+    }
+    Ok(result)
+}
+
+// ---------------------------------------------------------------------------
 // IPC protocol types
 // ---------------------------------------------------------------------------
 
@@ -18,38 +35,83 @@ pub enum IpcCommand {
         payload: Value,
         #[serde(default, rename = "ref")]
         ref_id: Option<Uuid>,
+        #[serde(default)]
+        req_id: Option<String>,
     },
-    Peers,
-    Status,
+    Peers {
+        #[serde(default)]
+        req_id: Option<String>,
+    },
+    Status {
+        #[serde(default)]
+        req_id: Option<String>,
+    },
     // v2 commands
     Hello {
         version: u32,
+        #[serde(default)]
+        req_id: Option<String>,
+        #[serde(default = "default_consumer")]
+        consumer: String,
     },
     Auth {
         token: String,
+        #[serde(default)]
+        req_id: Option<String>,
     },
-    Whoami,
+    Whoami {
+        #[serde(default)]
+        req_id: Option<String>,
+    },
     Inbox {
         #[serde(default = "default_inbox_limit")]
         limit: usize,
         #[serde(default)]
-        since: Option<String>,
+        kinds: Option<Vec<String>>,
         #[serde(default)]
-        kinds: Option<Vec<MessageKind>>,
+        req_id: Option<String>,
     },
     Ack {
-        ids: Vec<Uuid>,
+        up_to_seq: u64,
+        #[serde(default)]
+        req_id: Option<String>,
     },
     Subscribe {
+        #[serde(default = "default_replay")]
+        replay: bool,
         #[serde(default)]
-        since: Option<String>,
+        kinds: Option<Vec<String>>,
         #[serde(default)]
-        kinds: Option<Vec<MessageKind>>,
+        req_id: Option<String>,
     },
+}
+
+impl IpcCommand {
+    pub fn req_id(&self) -> Option<&str> {
+        match self {
+            IpcCommand::Send { req_id, .. }
+            | IpcCommand::Peers { req_id, .. }
+            | IpcCommand::Status { req_id, .. }
+            | IpcCommand::Hello { req_id, .. }
+            | IpcCommand::Auth { req_id, .. }
+            | IpcCommand::Whoami { req_id, .. }
+            | IpcCommand::Inbox { req_id, .. }
+            | IpcCommand::Ack { req_id, .. }
+            | IpcCommand::Subscribe { req_id, .. } => req_id.as_deref(),
+        }
+    }
 }
 
 fn default_inbox_limit() -> usize {
     50
+}
+
+fn default_consumer() -> String {
+    "default".to_string()
+}
+
+fn default_replay() -> bool {
+    true
 }
 
 #[derive(Debug, Clone)]
@@ -70,8 +132,9 @@ pub struct PeerSummary {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct BufferedMessage {
+    pub seq: u64,
+    pub buffered_at_ms: u64,
     pub envelope: Envelope,
-    pub buffered_at: String, // ISO 8601 timestamp
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -85,6 +148,44 @@ pub struct WhoamiInfo {
     pub uptime_secs: u64,
 }
 
+// ---------------------------------------------------------------------------
+// Error codes (IPC.md §5)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum IpcErrorCode {
+    HelloRequired,
+    UnsupportedVersion,
+    AuthRequired,
+    AuthFailed,
+    InvalidCommand,
+    AckOutOfRange,
+    PeerNotFound,
+    PeerUnreachable,
+    InternalError,
+}
+
+impl std::fmt::Display for IpcErrorCode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            IpcErrorCode::HelloRequired => write!(f, "hello_required"),
+            IpcErrorCode::UnsupportedVersion => write!(f, "unsupported_version"),
+            IpcErrorCode::AuthRequired => write!(f, "auth_required"),
+            IpcErrorCode::AuthFailed => write!(f, "auth_failed"),
+            IpcErrorCode::InvalidCommand => write!(f, "invalid_command"),
+            IpcErrorCode::AckOutOfRange => write!(f, "ack_out_of_range"),
+            IpcErrorCode::PeerNotFound => write!(f, "peer_not_found"),
+            IpcErrorCode::PeerUnreachable => write!(f, "peer_unreachable"),
+            IpcErrorCode::InternalError => write!(f, "internal_error"),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Daemon replies
+// ---------------------------------------------------------------------------
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(untagged)]
 pub enum DaemonReply {
@@ -92,10 +193,14 @@ pub enum DaemonReply {
     SendAck {
         ok: bool,
         msg_id: Uuid,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        req_id: Option<String>,
     },
     Peers {
         ok: bool,
         peers: Vec<PeerSummary>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        req_id: Option<String>,
     },
     Status {
         ok: bool,
@@ -103,44 +208,72 @@ pub enum DaemonReply {
         peers_connected: usize,
         messages_sent: u64,
         messages_received: u64,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        req_id: Option<String>,
     },
     Error {
         ok: bool,
-        error: String,
+        error: IpcErrorCode,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        req_id: Option<String>,
     },
+    // Legacy v1 inbound push (for v1 clients)
     Inbound {
         inbound: bool,
+        envelope: Envelope,
+    },
+    // v2 pushed inbound event (§3.5, §3.6) — no ok, no req_id
+    InboundEvent {
+        event: &'static str, // always "inbound"
+        replay: bool,
+        seq: u64,
+        buffered_at_ms: u64,
         envelope: Envelope,
     },
     // v2 replies
     Hello {
         ok: bool,
         version: u32,
+        daemon_max_version: u32,
         agent_id: String,
         features: Vec<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        req_id: Option<String>,
     },
     Auth {
         ok: bool,
-        auth: String, // "accepted" or error message
+        auth: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        req_id: Option<String>,
     },
     Whoami {
         ok: bool,
         #[serde(flatten)]
         info: WhoamiInfo,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        req_id: Option<String>,
     },
     Inbox {
         ok: bool,
         messages: Vec<BufferedMessage>,
+        next_seq: Option<u64>,
         has_more: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        req_id: Option<String>,
     },
     Ack {
         ok: bool,
-        acked: usize,
+        acked_seq: u64,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        req_id: Option<String>,
     },
     Subscribe {
         ok: bool,
         subscribed: bool,
         replayed: usize,
+        replay_to_seq: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        req_id: Option<String>,
     },
 }
 
