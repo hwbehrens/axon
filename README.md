@@ -9,6 +9,11 @@
 </p>
 
 <p align="center">
+  <a href="https://github.com/hwbehrens/axon/actions/workflows/ci.yml"><img src="https://github.com/hwbehrens/axon/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="./LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT"></a>
+</p>
+
+<p align="center">
   <a href="./spec/SPEC.md">Spec</a> · <a href="./spec/MESSAGE_TYPES.md">Messages</a> · <a href="./spec/WIRE_FORMAT.md">Wire Format</a> · <a href="./CONTRIBUTING.md">Contributing</a>
 </p>
 
