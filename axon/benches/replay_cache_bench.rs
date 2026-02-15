@@ -1,7 +1,6 @@
 use std::time::{Duration, Instant};
 
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
-use tokio::runtime::Runtime;
 use uuid::Uuid;
 
 // ReplayCache is pub(crate), so we reimplement a minimal version here
