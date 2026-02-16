@@ -15,7 +15,7 @@ use crate::message::{AgentId, Envelope};
 use crate::peer_table::PeerRecord;
 
 use super::connection::run_connection;
-use super::framing::{send_request, send_unidirectional};
+use super::connection::{send_request, send_unidirectional};
 use super::tls::build_endpoint;
 
 /// Optional callback to produce a response for a bidirectional request.

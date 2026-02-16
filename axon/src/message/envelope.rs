@@ -1,10 +1,51 @@
+use std::fmt;
+use std::time::{SystemTime, UNIX_EPOCH};
+
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use serde_json::value::RawValue;
 use uuid::Uuid;
 
-use super::kind::MessageKind;
+/// AXON message kind — determines stream mapping.
+///
+/// - `Request` → bidirectional stream (expects a `Response` or `Error`)
+/// - `Response` → bidirectional stream (reply to a `Request`)
+/// - `Message` → unidirectional stream (fire-and-forget)
+/// - `Error` → bidirectional stream (error reply to a `Request`)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MessageKind {
+    Request,
+    Response,
+    Message,
+    Error,
+    #[serde(other)]
+    Unknown,
+}
+
+impl MessageKind {
+    pub fn expects_response(self) -> bool {
+        matches!(self, MessageKind::Request)
+    }
+
+    pub fn is_response(self) -> bool {
+        matches!(self, MessageKind::Response | MessageKind::Error)
+    }
+}
+
+impl fmt::Display for MessageKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let s = match self {
+            MessageKind::Request => "request",
+            MessageKind::Response => "response",
+            MessageKind::Message => "message",
+            MessageKind::Error => "error",
+            MessageKind::Unknown => "unknown",
+        };
+        f.write_str(s)
+    }
+}
 
 /// Typed agent identity string (e.g. `ed25519.<32 hex chars>`).
 ///
@@ -178,6 +219,37 @@ impl Envelope {
         }
         Ok(())
     }
+}
+
+pub const MAX_MESSAGE_SIZE: u32 = 65536;
+
+pub fn encode(envelope: &Envelope) -> Result<Vec<u8>> {
+    let json = serde_json::to_vec(envelope)?;
+    if json.len() > MAX_MESSAGE_SIZE as usize {
+        bail!(
+            "message size {} exceeds maximum {MAX_MESSAGE_SIZE}",
+            json.len()
+        );
+    }
+    Ok(json)
+}
+
+pub fn decode(data: &[u8]) -> Result<Envelope> {
+    if data.len() > MAX_MESSAGE_SIZE as usize {
+        bail!(
+            "message size {} exceeds maximum {MAX_MESSAGE_SIZE}",
+            data.len()
+        );
+    }
+    let envelope: Envelope = serde_json::from_slice(data)?;
+    Ok(envelope)
+}
+
+pub fn now_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
 }
 
 #[cfg(test)]

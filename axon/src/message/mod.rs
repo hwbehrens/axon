@@ -1,7 +1,3 @@
 mod envelope;
-mod kind;
-mod wire;
 
-pub use envelope::{AgentId, Envelope};
-pub use kind::MessageKind;
-pub use wire::{MAX_MESSAGE_SIZE, decode, encode, now_millis};
+pub use envelope::{AgentId, Envelope, MAX_MESSAGE_SIZE, MessageKind, decode, encode, now_millis};
