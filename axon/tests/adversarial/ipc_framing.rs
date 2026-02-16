@@ -21,7 +21,10 @@ async fn ipc_overlong_line_rejects_and_closes() {
         let mut reader = BufReader::new(read_half);
 
         // Send a line that exceeds 64 KiB (MAX_IPC_LINE_LENGTH)
-        let overlong = format!("{{\"cmd\":\"status\",\"data\":\"{}\"}}\n", "x".repeat(70_000));
+        let overlong = format!(
+            "{{\"cmd\":\"status\",\"data\":\"{}\"}}\n",
+            "x".repeat(70_000)
+        );
         let _ = write_half.write_all(overlong.as_bytes()).await;
 
         // Should get an error reply
@@ -146,10 +149,7 @@ async fn ipc_invalid_utf8_closes_cleanly() {
         // Send invalid UTF-8 bytes followed by newline
         {
             let mut stream = UnixStream::connect(&socket_path).await.unwrap();
-            stream
-                .write_all(b"\x80\x81\x82\xff\xfe\n")
-                .await
-                .unwrap();
+            stream.write_all(b"\x80\x81\x82\xff\xfe\n").await.unwrap();
             // Read response — should be error or connection close
             let mut buf = vec![0u8; 4096];
             let _ = tokio::time::timeout(

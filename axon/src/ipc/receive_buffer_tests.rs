@@ -336,7 +336,11 @@ fn replay_messages_evicts_expired() {
     let msgs = buf.replay_messages("c1", replay_to_seq, None);
 
     // Only the fresh message (seq=3) should remain
-    assert_eq!(msgs.len(), 1, "expired messages should be evicted during replay");
+    assert_eq!(
+        msgs.len(),
+        1,
+        "expired messages should be evicted during replay"
+    );
     assert_eq!(msgs[0].seq, 3);
 }
 
@@ -363,8 +367,15 @@ fn byte_cap_eviction_with_large_payloads() {
     let (msgs, _, _) = buf.fetch("c1", 100, None);
     // With ~500-byte payloads + ~128-byte overhead, each envelope is ~680+ bytes.
     // A 2 KB cap should hold at most ~3 messages.
-    assert!(msgs.len() < 20, "byte cap should have evicted some messages");
-    assert!(msgs.len() <= 5, "byte cap heuristic should keep buffer small (got {})", msgs.len());
+    assert!(
+        msgs.len() < 20,
+        "byte cap should have evicted some messages"
+    );
+    assert!(
+        msgs.len() <= 5,
+        "byte cap heuristic should keep buffer small (got {})",
+        msgs.len()
+    );
     assert!(!msgs.is_empty(), "buffer should not be empty");
 
     // Verify total_bytes tracking stays bounded relative to byte_cap.

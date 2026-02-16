@@ -344,5 +344,3 @@ async fn ipc_client_disconnect_under_load() {
         "ipc_client_disconnect_under_load timed out (15s)"
     );
 }
-
-

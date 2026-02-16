@@ -31,21 +31,20 @@ async fn generate_token_file(token_path: &Path) -> Result<String> {
     // Atomic write: write to temp file then rename (IPC.md §2.2)
     // Use randomized temp name to prevent symlink attacks on predictable paths
     let mut tmp_name_bytes = [0u8; 8];
-    getrandom::getrandom(&mut tmp_name_bytes)
-        .context("failed to generate random temp filename")?;
+    getrandom::getrandom(&mut tmp_name_bytes).context("failed to generate random temp filename")?;
     let tmp_name = format!(".ipc-token.{}.tmp", hex::encode(tmp_name_bytes));
-    let tmp_path = token_path
-        .parent()
-        .unwrap_or(Path::new("."))
-        .join(tmp_name);
+    let tmp_path = token_path.parent().unwrap_or(Path::new(".")).join(tmp_name);
 
     // Ensure parent directory exists (supports custom token paths like ~/.axon/agentA/ipc-token)
     if let Some(parent) = token_path.parent()
         && !parent.exists()
     {
-        tokio::fs::create_dir_all(parent)
-            .await
-            .with_context(|| format!("failed to create token parent directory: {}", parent.display()))?;
+        tokio::fs::create_dir_all(parent).await.with_context(|| {
+            format!(
+                "failed to create token parent directory: {}",
+                parent.display()
+            )
+        })?;
     }
 
     // Check for existing symlink at temp path (security: prevent symlink attacks)
@@ -66,9 +65,9 @@ async fn generate_token_file(token_path: &Path) -> Result<String> {
             );
         }
         // Remove stale non-symlink temp file
-        tokio::fs::remove_file(&tmp_path).await.with_context(|| {
-            format!("failed to remove stale temp file: {}", tmp_path.display())
-        })?;
+        tokio::fs::remove_file(&tmp_path)
+            .await
+            .with_context(|| format!("failed to remove stale temp file: {}", tmp_path.display()))?;
     }
 
     // Create with O_CREAT|O_EXCL semantics (create_new) and restrictive permissions
@@ -190,10 +189,7 @@ async fn read_with_nofollow(token_path: &Path) -> Result<String> {
             );
         }
         if !meta.file_type().is_file() {
-            anyhow::bail!(
-                "IPC token path is not a regular file: {}",
-                path.display()
-            );
+            anyhow::bail!("IPC token path is not a regular file: {}", path.display());
         }
 
         let mut file = std::fs::OpenOptions::new()

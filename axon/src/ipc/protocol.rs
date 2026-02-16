@@ -212,7 +212,9 @@ impl IpcErrorCode {
             IpcErrorCode::UnsupportedVersion => "hello negotiated an unsupported protocol version",
             IpcErrorCode::AuthRequired => "command requires authentication",
             IpcErrorCode::AuthFailed => "invalid token or unauthorized",
-            IpcErrorCode::InvalidCommand => "malformed command, unknown cmd, or invalid field value",
+            IpcErrorCode::InvalidCommand => {
+                "malformed command, unknown cmd, or invalid field value"
+            }
             IpcErrorCode::AckOutOfRange => "up_to_seq exceeds highest delivered sequence",
             IpcErrorCode::PeerNotFound => "target agent_id not in peer table",
             IpcErrorCode::PeerUnreachable => "peer known but connection failed or timed out",
