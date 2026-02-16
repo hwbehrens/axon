@@ -203,6 +203,7 @@ dependencies = [
  "libfuzzer-sys",
  "quinn-proto 0.10.6",
  "serde_json",
+ "tokio",
  "toml",
 ]
 

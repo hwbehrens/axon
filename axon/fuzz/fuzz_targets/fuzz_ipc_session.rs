@@ -1,66 +1,82 @@
-//! Fuzz target: feed arbitrary line sequences through IPC command deserialization
-//! and stateful session validation. Must not panic regardless of input.
+//! Fuzz target: drive IPC command sequences through the real IpcHandlers
+//! state machine. Exercises hello/auth/req_id gating, subscribe, inbox,
+//! ack, and broadcast interactions. Must not panic regardless of input.
 
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
 
-use axon::ipc::{DaemonReply, IpcCommand, IpcErrorCode};
+use axon::ipc::{CommandEvent, IpcCommand, IpcServer, IpcServerConfig};
+use axon::message::{Envelope, MessageKind};
+
+const TOKEN: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
 fuzz_target!(|data: &[u8]| {
     let text = String::from_utf8_lossy(data);
+    let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
+    if lines.is_empty() || lines.len() > 50 {
+        return;
+    }
 
-    // Phase 1: Deserialization must never panic
+    // Parse commands first (no runtime needed)
     let mut commands = Vec::new();
-    for line in text.lines() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        if let Ok(cmd) = serde_json::from_str::<IpcCommand>(line) {
+    for line in &lines {
+        if let Ok(cmd) = serde_json::from_str::<IpcCommand>(line.trim()) {
             commands.push(cmd);
         }
     }
-
-    // Phase 2: Validate reply serialization never panics
-    // Construct representative replies and ensure round-trip works
-    for cmd in &commands {
-        let reply = match cmd {
-            IpcCommand::Hello {
-                version, req_id, ..
-            } => DaemonReply::Hello {
-                ok: true,
-                version: (*version).min(2),
-                daemon_max_version: 2,
-                agent_id: "ed25519.fuzz".to_string(),
-                features: vec![],
-                req_id: req_id.clone(),
-            },
-            IpcCommand::Auth { req_id, .. } => DaemonReply::Error {
-                ok: false,
-                error: IpcErrorCode::AuthFailed,
-                req_id: req_id.clone(),
-            },
-            IpcCommand::Peers { req_id, .. } => DaemonReply::Peers {
-                ok: true,
-                peers: vec![],
-                req_id: req_id.clone(),
-            },
-            IpcCommand::Status { req_id, .. } => DaemonReply::Status {
-                ok: true,
-                uptime_secs: 0,
-                peers_connected: 0,
-                messages_sent: 0,
-                messages_received: 0,
-                req_id: req_id.clone(),
-            },
-            _ => DaemonReply::Error {
-                ok: false,
-                error: IpcErrorCode::HelloRequired,
-                req_id: cmd.req_id().map(|s| s.to_string()),
-            },
-        };
-        // Serialization must not panic
-        let _ = serde_json::to_string(&reply);
+    if commands.is_empty() {
+        return;
     }
+
+    // Build a tokio runtime for async operations
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+
+    rt.block_on(async {
+        let dir = std::env::temp_dir().join(format!("axon-fuzz-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let socket_path = dir.join("fuzz.sock");
+        let _ = std::fs::remove_file(&socket_path);
+
+        let config = IpcServerConfig {
+            token: Some(TOKEN.to_string()),
+            allow_v1: true,
+            buffer_size: 100,
+            buffer_ttl_secs: 60,
+            ..Default::default()
+        };
+
+        let Ok((server, _rx)) = IpcServer::bind(socket_path.clone(), 8, config).await else {
+            return;
+        };
+
+        let client_id = 1u64;
+
+        // Optionally broadcast a message into the buffer for inbox/subscribe to find
+        let envelope = Envelope::new(
+            "ed25519.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "ed25519.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            MessageKind::Notify,
+            serde_json::json!({"topic": "fuzz", "data": {}, "importance": "low"}),
+        );
+        let _ = server.broadcast_inbound(&envelope).await;
+
+        // Drive each command through the real state machine
+        for command in commands {
+            let event = CommandEvent {
+                client_id,
+                command,
+            };
+            // handle_command applies full policy: hello gating, auth gating,
+            // req_id enforcement, subscribe replay, inbox/ack semantics
+            let _ = server.handle_command(event).await;
+        }
+
+        // Cleanup
+        let _ = server.cleanup_socket();
+        let _ = std::fs::remove_dir_all(&dir);
+    });
 });

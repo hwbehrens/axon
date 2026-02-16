@@ -204,7 +204,7 @@ fn notify_importance_defaults_to_low() {
 #[test]
 fn cancel_payload_matches_spec() {
     let p = CancelPayload {
-        reason: "Plans changed, no longer needed".to_string(),
+        reason: Some("Plans changed, no longer needed".to_string()),
     };
     let v = serde_json::to_value(&p).unwrap();
     assert_eq!(v["reason"], "Plans changed, no longer needed");

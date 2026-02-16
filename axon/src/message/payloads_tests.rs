@@ -121,7 +121,7 @@ fn notify_payload_defaults() {
 #[test]
 fn cancel_payload_serde() {
     let c = CancelPayload {
-        reason: "Plans changed".to_string(),
+        reason: Some("Plans changed".to_string()),
     };
     let v = serde_json::to_value(&c).unwrap();
     let back: CancelPayload = serde_json::from_value(v).unwrap();
@@ -129,13 +129,17 @@ fn cancel_payload_serde() {
 }
 
 #[test]
-fn cancel_reason_required() {
+fn cancel_missing_reason_tolerant() {
     let result = serde_json::from_value::<CancelPayload>(json!({}));
-    assert!(result.is_err());
+    assert!(
+        result.is_ok(),
+        "must tolerate missing reason for backward compat"
+    );
+    assert_eq!(result.unwrap().reason, None);
 }
 
 #[test]
-fn result_error_serializes_as_null() {
+fn result_error_omitted_when_none() {
     let res = ResultPayload {
         status: TaskStatus::Completed,
         outcome: "Done".to_string(),
@@ -143,8 +147,10 @@ fn result_error_serializes_as_null() {
         error: None,
     };
     let v = serde_json::to_value(&res).unwrap();
-    assert!(v.get("error").is_some(), "error field must be present");
-    assert!(v["error"].is_null(), "error field must be null");
+    assert!(
+        v.get("error").is_none(),
+        "error field must be omitted when None"
+    );
 }
 
 #[test]

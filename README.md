@@ -193,7 +193,7 @@ These are compile-time constants and cannot be changed via configuration.
 | `REQUEST_TIMEOUT` | `30s` | `transport/mod.rs` | Timeout for bidirectional request/response exchanges (query, delegate, etc.). |
 | `STALE_TIMEOUT` | `60s` | `peer_table.rs` | Discovered (non-static, non-cached) peers with no activity for this duration are removed. |
 | `MAX_CLIENT_QUEUE` | `1024` | `ipc/server.rs` | Per-IPC-client outbound message queue depth. Messages are dropped if a client falls behind. |
-| `MAX_IPC_LINE_LENGTH` | `256 KB` | `ipc/server.rs` | Maximum length of a single IPC command line. |
+| `MAX_IPC_LINE_LENGTH` | `64 KB` | `ipc/server.rs` | Maximum length of a single IPC command line. Overlong lines are rejected with `invalid_command`. |
 | Replay cache TTL | `300s` (5 min) | `daemon/mod.rs` | Duration for which message UUIDs are remembered to detect replays. |
 | Replay cache max entries | `100,000` | `daemon/mod.rs` | Maximum replay cache size. Oldest entries are evicted when exceeded. |
 | Save interval | `60s` | `daemon/mod.rs` | How often the daemon persists `known_peers.json` to disk. |

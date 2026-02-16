@@ -270,9 +270,13 @@ async fn hardened_mode_v1_hello_returns_unsupported_version() {
 // =========================================================================
 
 #[test]
-fn cancel_reason_is_required() {
+fn cancel_missing_reason_tolerant() {
     let result = serde_json::from_value::<axon::message::CancelPayload>(json!({}));
-    assert!(result.is_err());
+    assert!(
+        result.is_ok(),
+        "must tolerate missing reason for backward compat"
+    );
+    assert_eq!(result.unwrap().reason, None);
 }
 
 // =========================================================================
@@ -280,7 +284,7 @@ fn cancel_reason_is_required() {
 // =========================================================================
 
 #[test]
-fn result_error_serializes_as_null() {
+fn result_error_omitted_when_none() {
     let result = axon::message::ResultPayload {
         status: axon::message::TaskStatus::Completed,
         outcome: "Done".to_string(),
@@ -288,6 +292,8 @@ fn result_error_serializes_as_null() {
         error: None,
     };
     let json = serde_json::to_value(&result).unwrap();
-    assert!(json.get("error").is_some(), "error field must be present");
-    assert!(json["error"].is_null(), "error must be null, not omitted");
+    assert!(
+        json.get("error").is_none(),
+        "error field must be omitted when None"
+    );
 }
