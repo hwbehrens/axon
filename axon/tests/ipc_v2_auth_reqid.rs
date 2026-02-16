@@ -266,7 +266,65 @@ async fn hardened_mode_v1_hello_returns_unsupported_version() {
 }
 
 // =========================================================================
-// Test 6: cancel.reason required (Issue #7)
+// Test 6: Re-hello rejection (single-shot hello)
+// =========================================================================
+
+/// A second `hello` on the same connection must be rejected as `invalid_command`.
+#[tokio::test]
+async fn re_hello_rejected_as_invalid_command() {
+    let token = "a".repeat(64);
+    let (server, _rx) = setup_server_with_token(&token).await;
+
+    // First hello succeeds (v2)
+    let hello1 = CommandEvent {
+        client_id: 700,
+        command: IpcCommand::Hello {
+            version: 2,
+            req_id: Some("h1".to_string()),
+            consumer: "a".to_string(),
+        },
+    };
+    let reply = server.handle_command(hello1).await.unwrap();
+    assert!(matches!(reply, DaemonReply::Hello { ok: true, .. }));
+
+    // Second hello must be rejected
+    let hello2 = CommandEvent {
+        client_id: 700,
+        command: IpcCommand::Hello {
+            version: 1,
+            req_id: Some("h2".to_string()),
+            consumer: "b".to_string(),
+        },
+    };
+    let reply = server.handle_command(hello2).await.unwrap();
+    match reply {
+        DaemonReply::Error { error, .. } => assert_eq!(error, IpcErrorCode::InvalidCommand),
+        _ => panic!("expected invalid_command, got {:?}", reply),
+    }
+
+    // Verify original v2 state is intact: auth + whoami should work
+    let auth = CommandEvent {
+        client_id: 700,
+        command: IpcCommand::Auth {
+            token: token.clone(),
+            req_id: Some("a1".to_string()),
+        },
+    };
+    let reply = server.handle_command(auth).await.unwrap();
+    assert!(matches!(reply, DaemonReply::Auth { ok: true, .. }));
+
+    let whoami = CommandEvent {
+        client_id: 700,
+        command: IpcCommand::Whoami {
+            req_id: Some("w1".to_string()),
+        },
+    };
+    let reply = server.handle_command(whoami).await.unwrap();
+    assert!(matches!(reply, DaemonReply::Whoami { ok: true, .. }));
+}
+
+// =========================================================================
+// Test 7: cancel.reason required (Issue #7)
 // =========================================================================
 
 #[test]
@@ -280,7 +338,7 @@ fn cancel_missing_reason_tolerant() {
 }
 
 // =========================================================================
-// Test 7: result.error serializes as null (Issue #8)
+// Test 8: result.error serializes as null (Issue #8)
 // =========================================================================
 
 #[test]

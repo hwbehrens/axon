@@ -51,10 +51,8 @@ async fn reconnect_after_peer_restart() {
     }
 
     // Start both daemons (empty peers vec so spawn_daemon doesn't overwrite our config).
-    let (cancel_a, paths_a, handle_a) =
-        spawn_daemon(dir_a.path(), port_a, true, vec![], None);
-    let (cancel_b, paths_b, handle_b) =
-        spawn_daemon(dir_b.path(), port_b, true, vec![], None);
+    let (cancel_a, paths_a, handle_a) = spawn_daemon(dir_a.path(), port_a, true, vec![], None);
+    let (cancel_b, paths_b, handle_b) = spawn_daemon(dir_b.path(), port_b, true, vec![], None);
 
     assert!(
         wait_for_socket(&paths_a, Duration::from_secs(5)).await,
@@ -97,8 +95,7 @@ async fn reconnect_after_peer_restart() {
     );
 
     // Restart daemon B on the same port (config already on disk with fast timeouts).
-    let (cancel_b2, paths_b2, handle_b2) =
-        spawn_daemon(dir_b.path(), port_b, true, vec![], None);
+    let (cancel_b2, paths_b2, handle_b2) = spawn_daemon(dir_b.path(), port_b, true, vec![], None);
     assert!(
         wait_for_socket(&paths_b2, Duration::from_secs(5)).await,
         "daemon B2 socket did not appear"

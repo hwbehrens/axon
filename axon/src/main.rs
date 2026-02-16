@@ -243,7 +243,7 @@ fn generate_docs(out_dir: &std::path::Path) -> Result<()> {
 
 fn print_annotated_examples() {
     println!(
-        r#"AXON — Complete annotated example interaction
+        r#"AXON — Complete annotated example interactions
 ==============================================
 
 LLMs learn from examples faster than from specifications.
@@ -252,6 +252,10 @@ Below is a full hello → discover → query → delegate → cancel → notify 
 Agent IDs used:
   Alice: ed25519.a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4  (lower — initiates connection)
   Bob:   ed25519.f6e5d4c3b2a1f6e5d4c3b2a1f6e5d4c3
+
+Network Protocol (QUIC)
+──────────────────────────────────────────────
+The following steps show the network-level QUIC protocol interaction.
 
 ──────────────────────────────────────────────
 Step 0: Start the daemon
@@ -376,6 +380,38 @@ $ axon notify ed25519.f6e5d4c3b2a1f6e5d4c3b2a1f6e5d4c3 meta.status '{{"state":"r
   IPC sent:     {{"cmd":"send","to":"ed25519.f6e5d4c3b2a1f6e5d4c3b2a1f6e5d4c3","kind":"notify","payload":{{"topic":"meta.status","data":{{"state":"ready"}},"importance":"low"}}}}
   IPC ack:      {{"ok":true,"msg_id":"..."}}
   (No wire response — notify is unidirectional / fire-and-forget.)
+
+──────────────────────────────────────────────
+IPC v2 — Raw JSON (Unix socket)
+──────────────────────────────────────────────
+
+IPC v2 adds hello handshake, auth, req_id correlation, and subscribe.
+All examples below are newline-delimited JSON sent over ~/.axon/axon.sock.
+
+# 1. Hello handshake (required before v2 commands)
+→ {{"cmd":"hello","version":2,"consumer":"my-agent","req_id":"h1"}}
+← {{"ok":true,"version":2,"daemon_max_version":2,"agent_id":"ed25519.a1b2...","features":["auth","buffer","subscribe"],"req_id":"h1"}}
+
+# 2. Auth (required if peer credentials unavailable)
+→ {{"cmd":"auth","token":"<64-hex-chars-from-~/.axon/ipc-token>","req_id":"a1"}}
+← {{"ok":true,"auth":"accepted","req_id":"a1"}}
+
+# 3. Subscribe (live push, no replay)
+→ {{"cmd":"subscribe","replay":false,"kinds":["query","delegate"],"req_id":"s1"}}
+← {{"ok":true,"subscribed":true,"replayed":0,"replay_to_seq":42,"req_id":"s1"}}
+← {{"event":"inbound","replay":false,"seq":43,"buffered_at_ms":1771108300123,"envelope":{{...}}}}
+
+# 4. Inbox (pull-based retrieval)
+→ {{"cmd":"inbox","limit":10,"req_id":"i1"}}
+← {{"ok":true,"messages":[{{"seq":43,"buffered_at_ms":1771108300123,"envelope":{{...}}}}],"next_seq":43,"has_more":false,"req_id":"i1"}}
+
+# 5. Ack (advance cursor)
+→ {{"cmd":"ack","up_to_seq":43,"req_id":"k1"}}
+← {{"ok":true,"acked_seq":43,"req_id":"k1"}}
+
+# 6. Whoami (identity query)
+→ {{"cmd":"whoami","req_id":"w1"}}
+← {{"ok":true,"agent_id":"ed25519.a1b2...","public_key":"<base64>","version":"0.1.0","ipc_version":2,"uptime_secs":3600,"req_id":"w1"}}
 
 ──────────────────────────────────────────────
 Notes

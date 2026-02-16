@@ -18,6 +18,9 @@ fn system_now_millis() -> u64 {
         .as_millis() as u64
 }
 
+/// Approximate byte-size estimate for receive-buffer byte-cap enforcement.
+/// Intentionally not exact serialization accounting — the `buffer_byte_cap`
+/// eviction logic uses this as a soft safety limit.
 fn envelope_byte_size(envelope: &Envelope) -> usize {
     // Estimate without full serialization: fixed overhead + variable-length fields.
     // This is intentionally an approximation — the byte cap is a soft safety limit,

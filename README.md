@@ -202,6 +202,10 @@ These are compile-time constants and cannot be changed via configuration.
 | Reconnect interval | `1s` | `daemon/mod.rs` | How often the daemon checks for peers needing reconnection. |
 | Initial reconnect backoff | `1s` | `daemon/reconnect.rs` | First reconnect attempt delay after a connection failure. Doubles up to `reconnect_max_backoff_secs`. |
 | Initiator-rule wait | `2s` | `daemon/command_handler.rs` | When the higher-ID daemon sends a message, it waits this long for the lower-ID peer to initiate a connection. |
+| `IPC_VERSION` | `2` | `ipc/handlers/mod.rs` | Maximum IPC protocol version supported by the daemon. |
+| `MAX_CONSUMER_LEN` | `64` bytes | `ipc/handlers/mod.rs` | Maximum length of a consumer name in `hello`. |
+| `DEFAULT_BYTE_CAP` | `4194304` (4 MB) | `ipc/receive_buffer.rs` | Default hard byte cap on receive buffer memory. |
+| Max consumers | `1024` | `ipc/receive_buffer.rs` | Maximum number of tracked consumer states before LRU eviction. |
 
 ## Documentation
 
@@ -212,7 +216,8 @@ These are compile-time constants and cannot be changed via configuration.
 | [`spec/WIRE_FORMAT.md`](./spec/WIRE_FORMAT.md) | Normative wire format for interoperable implementations |
 | [`spec/IPC.md`](./spec/IPC.md) | IPC protocol — Unix socket commands, auth, receive buffer |
 | [`CONTRIBUTING.md`](./CONTRIBUTING.md) | Development guide, module map, testing requirements |
-| [`RUBRIC.md`](./RUBRIC.md) | Contribution scoring rubric — 100 points across 8 categories |
+| [`docs/IPC_V2.md`](./docs/IPC_V2.md) | IPC v2 change summary — what's new, backward compatibility, wire changes |
+| [`rubrics/`](./rubrics/) | Evaluation rubrics — quality, documentation, alignment |
 | [`SECURITY.md`](./SECURITY.md) | Security policy and vulnerability reporting |
 
 ## License

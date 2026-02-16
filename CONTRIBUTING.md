@@ -27,6 +27,13 @@ Know where to make changes before you start editing:
 | Hello handshake / version negotiation | `axon/src/transport/handshake.rs` |
 | IPC command/reply schema | `axon/src/ipc/protocol.rs` |
 | IPC server behavior | `axon/src/ipc/server.rs` |
+| IPC dispatch + hello/auth/req_id gating | `axon/src/ipc/handlers/mod.rs` |
+| IPC hello + auth handlers | `axon/src/ipc/handlers/hello_auth.rs` |
+| IPC v2 commands (whoami/inbox/ack/subscribe) | `axon/src/ipc/handlers/commands.rs` |
+| IPC inbound broadcast fanout | `axon/src/ipc/handlers/broadcast.rs` |
+| IPC receive buffer | `axon/src/ipc/receive_buffer.rs` |
+| IPC peer credential auth | `axon/src/ipc/auth.rs` |
+| IPC backend trait | `axon/src/ipc/backend.rs` |
 | Peer table operations | `axon/src/peer_table.rs` |
 | mDNS / static discovery | `axon/src/discovery.rs` |
 | Daemon orchestration | `axon/src/daemon/mod.rs` |
@@ -68,6 +75,7 @@ All source files must stay **under 500 lines**. If a file approaches this limit,
 - Use existing libraries and utilities. Do not add new dependencies without justification.
 - Semantic field names: `question` not `q`, `report_back` not `rb`. LLMs infer meaning from names.
 - No comments unless the code is genuinely complex. The code should be self-documenting.
+- Prefer separating mechanical refactors (file splits, renames) from functional changes into distinct commits when possible.
 
 ### Security
 

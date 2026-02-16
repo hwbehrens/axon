@@ -34,6 +34,16 @@ impl IpcHandlers {
 
         let mut states = self.client_states.lock().await;
         let state = states.entry(client_id).or_insert_with(ClientState::default);
+
+        // Hello is single-shot per connection (no renegotiation/downgrade)
+        if state.version.is_some() {
+            return Ok(DaemonReply::Error {
+                ok: false,
+                error: IpcErrorCode::InvalidCommand,
+                req_id,
+            });
+        }
+
         state.version = Some(negotiated);
         state.consumer = consumer;
         drop(states);

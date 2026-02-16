@@ -220,6 +220,7 @@ Advance the consumer's acknowledgement cursor. This marks messages as processed 
 **Rules:**
 - The daemon MUST only accept `up_to_seq` values that were previously delivered to this consumer via `inbox` or `subscribe`.
 - If `up_to_seq` is greater than the highest delivered sequence for this consumer, the daemon MUST respond with `ack_out_of_range`.
+- Delivery tracking is independent of buffer retention: the daemon MAY accept `ack` for messages that were previously delivered but have since been evicted from the receive buffer due to capacity or TTL limits.
 
 **Response:**
 ```json
@@ -252,6 +253,8 @@ Opens a streaming subscription on the current connection for the connection's `c
 ```
 
 **Replay snapshot rule (normative):** When `subscribe` is received, the daemon defines a snapshot `replay_to_seq` equal to the current highest buffered `seq`. If `replay = true`, it MUST emit replay events (with `"replay": true`) in increasing `seq` order up to `replay_to_seq`, then begin emitting live events (with `"replay": false`) for newly buffered messages (`seq > replay_to_seq`). No message may be emitted twice on the same subscription.
+
+**Operational note:** The replay burst is bounded by the receive buffer capacity (`ipc.buffer_size`, default 1000). Clients concerned about context budget consumption MAY set `replay = false` and use `inbox` with explicit `limit` for controlled retrieval, or configure a smaller `ipc.buffer_size`.
 
 A connection MAY have at most one active subscription. Sending `subscribe` again MUST replace the previous filter.
 
