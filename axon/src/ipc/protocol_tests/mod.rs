@@ -162,6 +162,7 @@ fn error_reply_serialization() {
     let reply = DaemonReply::Error {
         ok: false,
         error: IpcErrorCode::PeerNotFound,
+        message: IpcErrorCode::PeerNotFound.message(),
         req_id: None,
     };
     let json = serde_json::to_string(&reply).unwrap();
@@ -239,6 +240,7 @@ fn error_reply_with_req_id() {
     let reply = DaemonReply::Error {
         ok: false,
         error: IpcErrorCode::HelloRequired,
+        message: IpcErrorCode::HelloRequired.message(),
         req_id: Some("e-1".to_string()),
     };
     let json = serde_json::to_string(&reply).unwrap();

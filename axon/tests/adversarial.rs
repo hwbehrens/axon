@@ -16,6 +16,7 @@ use tokio::net::UnixStream;
 
 mod adversarial {
     pub(crate) mod ipc;
+    pub(crate) mod ipc_framing;
     pub(crate) mod peer_table;
     pub(crate) mod validation;
 }

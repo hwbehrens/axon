@@ -14,7 +14,7 @@ const DEFAULT_BYTE_CAP: usize = 4 * 1024 * 1024; // 4 MB
 fn system_now_millis() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
+        .unwrap_or_default()
         .as_millis() as u64
 }
 

@@ -231,6 +231,81 @@ fn bench_inbox_reply_serialize(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_receive_buffer_push(c: &mut Criterion) {
+    let mut group = c.benchmark_group("receive_buffer");
+
+    group.bench_function("push", |b| {
+        let mut buf = axon::ipc::ReceiveBuffer::new(1000, 86400);
+        b.iter(|| {
+            buf.push(black_box(make_envelope()));
+        })
+    });
+
+    group.bench_function("push_at_capacity", |b| {
+        let mut buf = axon::ipc::ReceiveBuffer::new(100, 86400);
+        // Fill to capacity first
+        for _ in 0..100 {
+            buf.push(make_envelope());
+        }
+        b.iter(|| {
+            buf.push(black_box(make_envelope()));
+        })
+    });
+
+    group.finish();
+}
+
+fn bench_receive_buffer_fetch(c: &mut Criterion) {
+    let mut group = c.benchmark_group("receive_buffer_fetch");
+
+    // Fetch from a buffer with 100 messages
+    group.bench_function("fetch_50_from_100", |b| {
+        b.iter_batched(
+            || {
+                let mut buf = axon::ipc::ReceiveBuffer::new(1000, 86400);
+                for _ in 0..100 {
+                    buf.push(make_envelope());
+                }
+                buf
+            },
+            |mut buf| {
+                black_box(buf.fetch("consumer", 50, None));
+            },
+            criterion::BatchSize::SmallInput,
+        )
+    });
+
+    // Fetch with kind filter
+    group.bench_function("fetch_with_kind_filter", |b| {
+        b.iter_batched(
+            || {
+                let mut buf = axon::ipc::ReceiveBuffer::new(1000, 86400);
+                for i in 0..100 {
+                    let kind = if i % 2 == 0 {
+                        MessageKind::Query
+                    } else {
+                        MessageKind::Notify
+                    };
+                    buf.push(Envelope::new(
+                        "ed25519.sender".to_string(),
+                        "ed25519.receiver".to_string(),
+                        kind,
+                        json!({"i": i}),
+                    ));
+                }
+                buf
+            },
+            |mut buf| {
+                let kinds = [MessageKind::Query];
+                black_box(buf.fetch("consumer", 50, Some(&kinds)));
+            },
+            criterion::BatchSize::SmallInput,
+        )
+    });
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_ipc_serialize_inbound,
@@ -240,5 +315,7 @@ criterion_group!(
     bench_daemon_reply_serialize,
     bench_ipc_inbound_event_serialize,
     bench_inbox_reply_serialize,
+    bench_receive_buffer_push,
+    bench_receive_buffer_fetch,
 );
 criterion_main!(benches);

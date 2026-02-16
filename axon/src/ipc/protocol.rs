@@ -204,6 +204,23 @@ impl std::fmt::Display for IpcErrorCode {
     }
 }
 
+impl IpcErrorCode {
+    /// Human-readable explanation of the error code.
+    pub fn message(&self) -> &'static str {
+        match self {
+            IpcErrorCode::HelloRequired => "v2 command sent without prior hello handshake",
+            IpcErrorCode::UnsupportedVersion => "hello negotiated an unsupported protocol version",
+            IpcErrorCode::AuthRequired => "command requires authentication",
+            IpcErrorCode::AuthFailed => "invalid token or unauthorized",
+            IpcErrorCode::InvalidCommand => "malformed command, unknown cmd, or invalid field value",
+            IpcErrorCode::AckOutOfRange => "up_to_seq exceeds highest delivered sequence",
+            IpcErrorCode::PeerNotFound => "target agent_id not in peer table",
+            IpcErrorCode::PeerUnreachable => "peer known but connection failed or timed out",
+            IpcErrorCode::InternalError => "unexpected daemon error",
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Daemon replies
 // ---------------------------------------------------------------------------
@@ -238,6 +255,7 @@ pub enum DaemonReply {
     Error {
         ok: bool,
         error: IpcErrorCode,
+        message: &'static str,
         #[serde(skip_serializing_if = "Option::is_none")]
         req_id: Option<String>,
     },
@@ -295,7 +313,7 @@ pub enum DaemonReply {
         ok: bool,
         subscribed: bool,
         replayed: usize,
-        replay_to_seq: Option<u64>,
+        replay_to_seq: u64,
         #[serde(skip_serializing_if = "Option::is_none")]
         req_id: Option<String>,
     },

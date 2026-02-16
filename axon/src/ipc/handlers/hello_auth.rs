@@ -17,6 +17,7 @@ impl IpcHandlers {
             return Ok(DaemonReply::Error {
                 ok: false,
                 error: IpcErrorCode::InvalidCommand,
+                message: IpcErrorCode::InvalidCommand.message(),
                 req_id,
             });
         }
@@ -28,6 +29,7 @@ impl IpcHandlers {
             return Ok(DaemonReply::Error {
                 ok: false,
                 error: IpcErrorCode::UnsupportedVersion,
+                message: IpcErrorCode::UnsupportedVersion.message(),
                 req_id,
             });
         }
@@ -40,6 +42,7 @@ impl IpcHandlers {
             return Ok(DaemonReply::Error {
                 ok: false,
                 error: IpcErrorCode::InvalidCommand,
+                message: IpcErrorCode::InvalidCommand.message(),
                 req_id,
             });
         }
@@ -96,6 +99,7 @@ impl IpcHandlers {
                 return Ok(DaemonReply::Error {
                     ok: false,
                     error: IpcErrorCode::AuthFailed,
+                    message: IpcErrorCode::AuthFailed.message(),
                     req_id,
                 });
             }
@@ -120,6 +124,7 @@ impl IpcHandlers {
                 Ok(DaemonReply::Error {
                     ok: false,
                     error: IpcErrorCode::AuthFailed,
+                    message: IpcErrorCode::AuthFailed.message(),
                     req_id,
                 })
             }
@@ -131,6 +136,7 @@ impl IpcHandlers {
             Ok(DaemonReply::Error {
                 ok: false,
                 error: IpcErrorCode::AuthFailed,
+                message: IpcErrorCode::AuthFailed.message(),
                 req_id,
             })
         }

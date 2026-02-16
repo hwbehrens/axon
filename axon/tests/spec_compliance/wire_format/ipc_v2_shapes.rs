@@ -45,7 +45,7 @@ fn ipc_v2_inbox_command_shape() {
     }
 }
 
-/// IPC.md §3.3: inbox command with since and kinds parameters.
+/// IPC.md §3.3: inbox command with limit and kinds parameters.
 #[test]
 fn ipc_v2_inbox_command_with_filters() {
     let cmd: axon::ipc::IpcCommand = serde_json::from_value(json!({
@@ -136,7 +136,7 @@ fn ipc_v2_subscribe_response_shape() {
         ok: true,
         subscribed: true,
         replayed: 3,
-        replay_to_seq: Some(5),
+        replay_to_seq: 5,
         req_id: None,
     };
     let j: Value = serde_json::to_value(&reply).unwrap();

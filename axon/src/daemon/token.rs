@@ -39,6 +39,15 @@ async fn generate_token_file(token_path: &Path) -> Result<String> {
         .unwrap_or(Path::new("."))
         .join(tmp_name);
 
+    // Ensure parent directory exists (supports custom token paths like ~/.axon/agentA/ipc-token)
+    if let Some(parent) = token_path.parent()
+        && !parent.exists()
+    {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .with_context(|| format!("failed to create token parent directory: {}", parent.display()))?;
+    }
+
     // Check for existing symlink at temp path (security: prevent symlink attacks)
     if tmp_path.exists() {
         let tmp_meta = tokio::fs::symlink_metadata(&tmp_path)

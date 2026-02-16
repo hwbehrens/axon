@@ -302,7 +302,7 @@ fn subscribe_reply_serialization() {
         ok: true,
         subscribed: true,
         replayed: 5,
-        replay_to_seq: Some(10),
+        replay_to_seq: 10,
         req_id: None,
     };
     let json = serde_json::to_string(&reply).unwrap();

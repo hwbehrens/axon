@@ -20,10 +20,12 @@ use crate::message::Envelope;
 const MAX_IPC_LINE_LENGTH: usize = 64 * 1024; // 64 KB, aligned with MAX_MESSAGE_SIZE
 
 static INVALID_COMMAND_LINE: LazyLock<Arc<str>> = LazyLock::new(|| {
+    let error = super::protocol::IpcErrorCode::InvalidCommand;
     Arc::from(
         serde_json::to_string(&DaemonReply::Error {
             ok: false,
-            error: super::protocol::IpcErrorCode::InvalidCommand,
+            message: error.message(),
+            error,
             req_id: None,
         })
         .expect("static error serialization"),

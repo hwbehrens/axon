@@ -39,6 +39,7 @@ impl IpcHandlers {
                     return Ok(DaemonReply::Error {
                         ok: false,
                         error: IpcErrorCode::InvalidCommand,
+                        message: IpcErrorCode::InvalidCommand.message(),
                         req_id,
                     });
                 }
@@ -51,6 +52,7 @@ impl IpcHandlers {
             return Ok(DaemonReply::Error {
                 ok: false,
                 error: IpcErrorCode::InvalidCommand,
+                message: IpcErrorCode::InvalidCommand.message(),
                 req_id,
             });
         }
@@ -86,6 +88,7 @@ impl IpcHandlers {
             Err(_) => Ok(DaemonReply::Error {
                 ok: false,
                 error: IpcErrorCode::AckOutOfRange,
+                message: IpcErrorCode::AckOutOfRange.message(),
                 req_id,
             }),
         }
@@ -119,6 +122,7 @@ impl IpcHandlers {
                     return Ok(DaemonReply::Error {
                         ok: false,
                         error: IpcErrorCode::InvalidCommand,
+                        message: IpcErrorCode::InvalidCommand.message(),
                         req_id,
                     });
                 }
@@ -187,7 +191,7 @@ impl IpcHandlers {
             ok: true,
             subscribed: true,
             replayed,
-            replay_to_seq: Some(replay_to_seq),
+            replay_to_seq,
             req_id,
         })
     }

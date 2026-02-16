@@ -128,6 +128,7 @@ fn ipc_error_response_shape() {
     let reply = axon::ipc::DaemonReply::Error {
         ok: false,
         error: axon::ipc::IpcErrorCode::PeerNotFound,
+        message: axon::ipc::IpcErrorCode::PeerNotFound.message(),
         req_id: None,
     };
     let j: Value = serde_json::to_value(&reply).unwrap();
@@ -226,6 +227,7 @@ fn ipc_v2_auth_failure_response_shape() {
     let reply = axon::ipc::DaemonReply::Error {
         ok: false,
         error: axon::ipc::IpcErrorCode::AuthFailed,
+        message: axon::ipc::IpcErrorCode::AuthFailed.message(),
         req_id: None,
     };
     let j: Value = serde_json::to_value(&reply).unwrap();

@@ -9,4 +9,5 @@ pub use backend::{IpcBackend, SendResult, StatusResult};
 pub use protocol::{
     BufferedMessage, CommandEvent, DaemonReply, IpcCommand, IpcErrorCode, PeerSummary, WhoamiInfo,
 };
+pub use receive_buffer::ReceiveBuffer;
 pub use server::{IpcServer, IpcServerConfig};

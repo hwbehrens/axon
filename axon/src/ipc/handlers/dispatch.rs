@@ -83,6 +83,7 @@ impl IpcHandlers {
                 reply: DaemonReply::Error {
                     ok: false,
                     error: IpcErrorCode::HelloRequired,
+                    message: IpcErrorCode::HelloRequired.message(),
                     req_id,
                 },
                 response_envelope: None,
@@ -107,6 +108,7 @@ impl IpcHandlers {
             return Ok(DispatchResult {
                 reply: DaemonReply::Error {
                     ok: false,
+                    message: error.message(),
                     error,
                     req_id,
                 },
@@ -124,6 +126,7 @@ impl IpcHandlers {
                 reply: DaemonReply::Error {
                     ok: false,
                     error: IpcErrorCode::InvalidCommand,
+                    message: IpcErrorCode::InvalidCommand.message(),
                     req_id: None,
                 },
                 response_envelope: None,
@@ -144,6 +147,7 @@ impl IpcHandlers {
                     reply: DaemonReply::Error {
                         ok: false,
                         error: IpcErrorCode::AuthRequired,
+                        message: IpcErrorCode::AuthRequired.message(),
                         req_id,
                     },
                     response_envelope: None,
@@ -245,6 +249,7 @@ impl IpcHandlers {
                         reply: DaemonReply::Error {
                             ok: false,
                             error: IpcErrorCode::InternalError,
+                            message: IpcErrorCode::InternalError.message(),
                             req_id,
                         },
                         response_envelope: None,
@@ -285,6 +290,7 @@ impl IpcHandlers {
                         Ok(DispatchResult {
                             reply: DaemonReply::Error {
                                 ok: false,
+                                message: error_code.message(),
                                 error: error_code,
                                 req_id,
                             },
@@ -301,6 +307,7 @@ impl IpcHandlers {
                         reply: DaemonReply::Error {
                             ok: false,
                             error: IpcErrorCode::InternalError,
+                            message: IpcErrorCode::InternalError.message(),
                             req_id,
                         },
                         response_envelope: None,
@@ -321,6 +328,7 @@ impl IpcHandlers {
                         reply: DaemonReply::Error {
                             ok: false,
                             error: IpcErrorCode::InternalError,
+                            message: IpcErrorCode::InternalError.message(),
                             req_id,
                         },
                         response_envelope: None,
@@ -335,6 +343,7 @@ impl IpcHandlers {
                         reply: DaemonReply::Error {
                             ok: false,
                             error: IpcErrorCode::InternalError,
+                            message: IpcErrorCode::InternalError.message(),
                             req_id,
                         },
                         response_envelope: None,
@@ -358,6 +367,7 @@ impl IpcHandlers {
                         reply: DaemonReply::Error {
                             ok: false,
                             error: IpcErrorCode::InternalError,
+                            message: IpcErrorCode::InternalError.message(),
                             req_id,
                         },
                         response_envelope: None,

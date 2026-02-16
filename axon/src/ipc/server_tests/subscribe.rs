@@ -109,7 +109,7 @@ async fn subscribe_with_replay() {
             assert!(ok);
             assert!(subscribed);
             assert!(*replayed >= 1, "Expected at least 1 replayed message");
-            assert!(replay_to_seq.is_some());
+            assert!(*replay_to_seq > 0 || *replayed == 0);
         }
         _ => panic!("Expected Subscribe reply, got {:?}", reply),
     }
