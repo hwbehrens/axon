@@ -91,7 +91,6 @@ fn discover_paths_from_root() {
     assert_eq!(paths.identity_pub, root.join("identity.pub"));
     assert_eq!(paths.config, root.join("config.toml"));
     assert_eq!(paths.known_peers, root.join("known_peers.json"));
-    assert_eq!(paths.replay_cache, root.join("replay_cache.json"));
     assert_eq!(paths.socket, root.join("axon.sock"));
 }
 

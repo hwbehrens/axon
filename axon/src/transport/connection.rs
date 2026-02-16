@@ -14,7 +14,7 @@ use crate::message::{Envelope, ErrorCode, ErrorPayload, MessageKind};
 
 use super::framing::{read_framed, write_framed};
 use super::handshake::{auto_response, validate_hello_identity};
-use super::quic_transport::{ReplayCheckFn, ResponseHandlerFn};
+use super::quic_transport::ResponseHandlerFn;
 use super::tls::extract_ed25519_pubkey_from_cert_der;
 
 pub(crate) fn extract_peer_pubkey_base64_from_connection(
@@ -46,7 +46,6 @@ struct ConnectionContext {
     inbound_tx: broadcast::Sender<Arc<Envelope>>,
     connections: Arc<RwLock<HashMap<String, quinn::Connection>>>,
     expected_pubkeys: Arc<StdRwLock<HashMap<String, String>>>,
-    replay_check: Option<ReplayCheckFn>,
     response_handler: Option<ResponseHandlerFn>,
     inbound_read_timeout: Duration,
 }
@@ -72,12 +71,6 @@ async fn handle_uni_stream(
                 } else if let Err(err) = envelope.validate() {
                     debug!(error = %err, "dropping invalid uni envelope");
                 } else {
-                    if let Some(ref check) = ctx.replay_check
-                        && check(envelope.id).await
-                    {
-                        debug!(msg_id = %envelope.id, "dropping replayed uni envelope");
-                        return;
-                    }
                     let _ = ctx.inbound_tx.send(Arc::new(envelope));
                 }
             }
@@ -122,13 +115,6 @@ async fn handle_authenticated_bidi(
         if let Err(err) = request.validate() {
             debug!(error = %err, "dropping invalid bidi fire-and-forget envelope");
         } else {
-            if let Some(ref check) = ctx.replay_check
-                && check(request.id).await
-            {
-                debug!(msg_id = %request.id, "dropping replayed bidi fire-and-forget envelope");
-                let _ = send.finish();
-                return;
-            }
             let _ = ctx.inbound_tx.send(Arc::new(request));
         }
         let _ = send.finish();
@@ -146,12 +132,6 @@ async fn handle_authenticated_bidi(
         );
         send_response(&mut send, &response).await;
     } else {
-        if let Some(ref check) = ctx.replay_check
-            && check(request.id).await
-        {
-            debug!(msg_id = %request.id, "dropping replayed bidi request");
-            return;
-        }
         let request_arc = Arc::new(request.clone());
         let _ = ctx.inbound_tx.send(request_arc.clone());
         let response = if let Some(ref handler) = ctx.response_handler {
@@ -300,7 +280,6 @@ pub(crate) async fn run_connection(
     connections: Arc<RwLock<HashMap<String, quinn::Connection>>>,
     expected_pubkeys: Arc<StdRwLock<HashMap<String, String>>>,
     cancel: CancellationToken,
-    replay_check: Option<ReplayCheckFn>,
     response_handler: Option<ResponseHandlerFn>,
     handshake_timeout: Duration,
     inbound_read_timeout: Duration,
@@ -320,7 +299,6 @@ pub(crate) async fn run_connection(
         inbound_tx,
         connections,
         expected_pubkeys,
-        replay_check,
         response_handler,
         inbound_read_timeout,
     };

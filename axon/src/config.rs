@@ -17,7 +17,6 @@ pub struct AxonPaths {
     pub identity_pub: PathBuf,
     pub config: PathBuf,
     pub known_peers: PathBuf,
-    pub replay_cache: PathBuf,
     pub socket: PathBuf,
     pub ipc_token: PathBuf,
 }
@@ -35,7 +34,6 @@ impl AxonPaths {
             identity_pub: root.join("identity.pub"),
             config: root.join("config.toml"),
             known_peers: root.join("known_peers.json"),
-            replay_cache: root.join("replay_cache.json"),
             socket: root.join("axon.sock"),
             ipc_token: root.join("ipc-token"),
             root,

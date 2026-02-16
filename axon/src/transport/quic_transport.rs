@@ -18,10 +18,6 @@ use super::connection::run_connection;
 use super::framing::{send_request, send_unidirectional};
 use super::tls::build_endpoint;
 
-/// Optional callback to check if a message is a replay. Returns true if replay (should drop).
-pub type ReplayCheckFn =
-    Arc<dyn Fn(uuid::Uuid) -> Pin<Box<dyn Future<Output = bool> + Send>> + Send + Sync>;
-
 /// Optional callback to produce a response for a bidirectional request.
 /// If `None` is returned, the default `auto_response` is used.
 pub type ResponseHandlerFn = Arc<
@@ -47,7 +43,6 @@ pub struct QuicTransport {
     inbound_tx: broadcast::Sender<Arc<Envelope>>,
     inbound_semaphore: Arc<Semaphore>,
     cancel: CancellationToken,
-    replay_check: Option<ReplayCheckFn>,
     response_handler: Option<ResponseHandlerFn>,
     handshake_timeout: Duration,
     inbound_read_timeout: Duration,
@@ -67,7 +62,6 @@ impl QuicTransport {
             Duration::from_secs(15),
             Duration::from_secs(60),
             None,
-            None,
             Duration::from_secs(5),
             Duration::from_secs(10),
         )
@@ -82,7 +76,6 @@ impl QuicTransport {
         max_connections: usize,
         keepalive: Duration,
         idle_timeout: Duration,
-        replay_check: Option<ReplayCheckFn>,
         response_handler: Option<ResponseHandlerFn>,
         handshake_timeout: Duration,
         inbound_read_timeout: Duration,
@@ -107,7 +100,6 @@ impl QuicTransport {
             inbound_tx,
             inbound_semaphore: Arc::new(Semaphore::new(max_connections)),
             cancel,
-            replay_check,
             response_handler,
             handshake_timeout,
             inbound_read_timeout,
@@ -296,7 +288,6 @@ impl QuicTransport {
         let cancel = self.cancel.clone();
         let max_connections = self.max_connections;
         let inbound_semaphore = self.inbound_semaphore.clone();
-        let replay_check = self.replay_check.clone();
         let response_handler = self.response_handler.clone();
         let handshake_timeout = self.handshake_timeout;
         let inbound_read_timeout = self.inbound_read_timeout;
@@ -329,7 +320,6 @@ impl QuicTransport {
                                 let connections = connections.clone();
                                 let expected_pubkeys = expected_pubkeys.clone();
                                 let cancel = cancel.clone();
-                                let replay_check = replay_check.clone();
                                 let response_handler = response_handler.clone();
                                 tokio::spawn(async move {
                                     run_connection(
@@ -340,7 +330,6 @@ impl QuicTransport {
                                         connections,
                                         expected_pubkeys,
                                         cancel,
-                                        replay_check,
                                         response_handler,
                                         handshake_timeout,
                                         inbound_read_timeout,
@@ -367,7 +356,6 @@ impl QuicTransport {
         let connections = self.connections.clone();
         let expected_pubkeys = self.expected_pubkeys.clone();
         let cancel = self.cancel.clone();
-        let replay_check = self.replay_check.clone();
         let response_handler = self.response_handler.clone();
         let handshake_timeout = self.handshake_timeout;
         let inbound_read_timeout = self.inbound_read_timeout;
@@ -381,7 +369,6 @@ impl QuicTransport {
                 connections,
                 expected_pubkeys,
                 cancel,
-                replay_check,
                 response_handler,
                 handshake_timeout,
                 inbound_read_timeout,

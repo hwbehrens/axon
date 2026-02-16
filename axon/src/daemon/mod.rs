@@ -1,13 +1,11 @@
 pub(crate) mod command_handler;
 mod peer_events;
 mod reconnect;
-mod replay_cache;
 mod token;
 
 use command_handler::{Counters, DaemonContext, handle_command};
 use peer_events::handle_peer_event;
 use reconnect::{ReconnectState, attempt_reconnects};
-use replay_cache::ReplayCache;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -85,24 +83,13 @@ pub async fn run_daemon(opts: DaemonOptions) -> Result<()> {
         peer_table.upsert_cached(&peer).await;
     }
 
-    // --- Counters & replay cache ---
+    // --- Counters ---
     let counters = Arc::new(Counters::default());
-    let replay_cache = Arc::new(ReplayCache::load(
-        &paths.replay_cache,
-        Duration::from_secs(300),
-        100_000,
-    ));
 
     // --- Transport ---
     let bind_addr = format!("0.0.0.0:{port}")
         .parse()
         .context("invalid bind address")?;
-    let replay_cache_for_transport = replay_cache.clone();
-    let replay_check: Option<crate::transport::ReplayCheckFn> =
-        Some(Arc::new(move |id: uuid::Uuid| {
-            let cache = replay_cache_for_transport.clone();
-            Box::pin(async move { cache.is_replay(id, Instant::now()).await })
-        }));
     let transport = QuicTransport::bind_cancellable(
         bind_addr,
         &identity,
@@ -110,7 +97,6 @@ pub async fn run_daemon(opts: DaemonOptions) -> Result<()> {
         config.effective_max_connections(),
         config.effective_keepalive(),
         config.effective_idle_timeout(),
-        replay_check,
         None,
         config.effective_handshake_timeout(),
         config.effective_inbound_read_timeout(),
@@ -164,10 +150,6 @@ pub async fn run_daemon(opts: DaemonOptions) -> Result<()> {
     .await?;
 
     // --- Inbound message forwarder (transport → IPC clients) ---
-    // Replay protection is already performed by the transport layer (connection.rs)
-    // before messages are broadcast to inbound_tx. No second check here — the
-    // transport and forwarder share the same ReplayCache, so a redundant call to
-    // is_replay() would always return true and drop every legitimate message.
     let mut inbound_rx = transport.subscribe_inbound();
     let ipc_for_inbound = ipc.clone();
     let counters_for_inbound = counters.clone();
@@ -250,7 +232,6 @@ pub async fn run_daemon(opts: DaemonOptions) -> Result<()> {
         transport: &transport,
         local_agent_id: &local_agent_id,
         counters: &counters,
-        replay_cache: &replay_cache,
         start,
     };
 
@@ -340,9 +321,6 @@ pub async fn run_daemon(opts: DaemonOptions) -> Result<()> {
     if let Err(err) = save_known_peers(&paths.known_peers, &peer_table.to_known_peers().await).await
     {
         warn!(error = %err, "failed to save known peers during shutdown");
-    }
-    if let Err(err) = replay_cache.save(&paths.replay_cache).await {
-        warn!(error = %err, "failed to save replay cache during shutdown");
     }
     ipc.cleanup_socket()?;
     info!("shutdown complete");

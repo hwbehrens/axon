@@ -2,9 +2,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use tracing::warn;
 
-use super::replay_cache::ReplayCache;
 use crate::ipc::{CommandEvent, IpcBackend, IpcServer, PeerSummary, SendResult, StatusResult};
 use crate::message::{AgentId, Envelope};
 use crate::peer_table::{ConnectionStatus, PeerSource, PeerTable};
@@ -41,7 +39,6 @@ pub(crate) struct DaemonContext<'a> {
     pub(crate) transport: &'a QuicTransport,
     pub(crate) local_agent_id: &'a AgentId,
     pub(crate) counters: &'a Counters,
-    pub(crate) replay_cache: &'a ReplayCache,
     pub(crate) start: Instant,
 }
 
@@ -71,7 +68,6 @@ pub(crate) struct DaemonIpcBackend<'a> {
     pub(crate) transport: &'a QuicTransport,
     pub(crate) local_agent_id: &'a AgentId,
     pub(crate) counters: &'a Counters,
-    pub(crate) replay_cache: &'a ReplayCache,
     pub(crate) start: Instant,
 }
 
@@ -112,21 +108,9 @@ impl IpcBackend for DaemonIpcBackend<'_> {
                 self.counters.sent.fetch_add(1, Ordering::Relaxed);
                 self.peer_table.set_connected(&to, None).await;
 
-                let response = if let Some(response_envelope) = response {
-                    if self
-                        .replay_cache
-                        .is_replay(response_envelope.id, Instant::now())
-                        .await
-                    {
-                        warn!(msg_id = %response_envelope.id, "dropping replayed response");
-                        None
-                    } else {
-                        self.counters.received.fetch_add(1, Ordering::Relaxed);
-                        Some(response_envelope)
-                    }
-                } else {
-                    None
-                };
+                if response.is_some() {
+                    self.counters.received.fetch_add(1, Ordering::Relaxed);
+                }
 
                 Ok(SendResult { msg_id, response })
             }
@@ -181,7 +165,6 @@ pub(crate) async fn handle_command(cmd: CommandEvent, ctx: &DaemonContext<'_>) -
         transport: ctx.transport,
         local_agent_id: ctx.local_agent_id,
         counters: ctx.counters,
-        replay_cache: ctx.replay_cache,
         start: ctx.start,
     };
 

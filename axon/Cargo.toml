@@ -47,10 +47,6 @@ tokio = { version = "1", features = ["test-util"] }
 criterion = { version = "0.5", features = ["html_reports"] }
 
 [[bench]]
-name = "replay_cache_bench"
-harness = false
-
-[[bench]]
 name = "message_bench"
 harness = false
 
