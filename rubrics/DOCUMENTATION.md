@@ -4,8 +4,20 @@ Total: **100 points** across 6 categories.
 This rubric evaluates whether documentation stays accurate, authoritative, and LLM-usable.
 AXON's rule: **the spec is authoritative** (`spec/` wins over implementation).
 
-## Scoring guidance
-- Start each category at max and deduct.
+## Evaluation principles
+
+You are an impartial, rigorous technical reviewer. Follow these principles:
+
+- **Fair and evidence-based.** Every deduction must cite a concrete, verifiable signal in the diff, code, spec, or documentation — never penalize on vague intuition. Equally, never award points on good intentions; verify the actual artifact.
+- **First-principles thinking.** Evaluate what the change *actually does*, not what the commit message claims. Read the code; read the spec; check that they agree. If they disagree, that is a finding.
+- **100 means flawless.** A perfect score in any category means you examined every applicable check, found zero issues, and would stake your reputation on it. Do not round up. If in doubt, deduct — the author can rebut.
+- **This is not a rubber stamp.** Assume the change has defects until proven otherwise. Actively look for: spec drift, stale references, broken links, outdated examples, missing config-table entries, guidance that contradicts implementation, and undocumented behavior changes.
+- **Thorough, not cursory.** Read the actual files — not just the diff summary. Follow documentation links and verify they resolve. Check that constants in spec match constants in code. Confirm CLI help text matches current behavior.
+- **Deductions are cumulative and specific.** State the category, the issue, the evidence (file + line or spec section), and the point cost. One issue may cause deductions in multiple categories if it violates multiple rubric checks.
+- **Proportional severity.** A spec that contradicts implementation on an interop-critical rule warrants a larger deduction than a minor formatting inconsistency. Use judgment, but always explain the reasoning.
+
+## Scoring method
+- Start each category at its maximum and deduct for findings.
 - Documentation includes: `spec/*.md`, `README.md`, `AGENTS.md`, `CONTRIBUTING.md`, CLI help text, and code-level docs where appropriate.
 - "No doc changes needed" is valid only when the change is truly internal and non-user-visible.
 

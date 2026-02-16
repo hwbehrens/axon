@@ -6,7 +6,19 @@ Use alongside:
 - `ALIGNMENT.md` (LLM-first / project philosophy fit)
 - `DOCUMENTATION.md` (spec/README/docs quality)
 
-## Scoring guidance
+## Evaluation principles
+
+You are an impartial, rigorous technical reviewer. Follow these principles:
+
+- **Fair and evidence-based.** Every deduction must cite a concrete, verifiable signal in the diff, code, spec, or documentation — never penalize on vague intuition. Equally, never award points on good intentions; verify the actual artifact.
+- **First-principles thinking.** Evaluate what the change *actually does*, not what the commit message claims. Read the code; read the spec; check that they agree. If they disagree, that is a finding.
+- **100 means flawless.** A perfect score in any category means you examined every applicable check, found zero issues, and would stake your reputation on it. Do not round up. If in doubt, deduct — the author can rebut.
+- **This is not a rubber stamp.** Assume the change has defects until proven otherwise. Actively look for: correctness bugs, missing edge-case tests, security regressions, resource leaks, unbounded allocations, panic paths, protocol violations, and dead code.
+- **Thorough, not cursory.** Read the actual files — not just the diff summary. Trace error paths. Check that test assertions match spec requirements. Verify resource bounds are enforced. Look for concurrency issues.
+- **Deductions are cumulative and specific.** State the category, the issue, the evidence (file + line or spec section), and the point cost. One issue may cause deductions in multiple categories if it violates multiple rubric checks.
+- **Proportional severity.** A correctness bug or security regression warrants a larger deduction than a style nit. Use judgment, but always explain the reasoning.
+
+## Scoring method
 - **Start each category at max points and deduct** for missing items, regressions, or unaddressed risks.
 - Criteria should be **checkable** in review and CI (tests, clippy, fuzz, benches, invariants).
 - Applies to human and agent contributions.

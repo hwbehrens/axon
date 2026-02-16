@@ -7,8 +7,20 @@ This rubric evaluates whether a change is aligned with AXON's goals and philosop
 - **Lightweight daemon** (fast, minimal dependencies, bounded resources)
 - **Simplicity-first** (avoid over-engineering; changes should be easy for agents to navigate)
 
-## Scoring guidance
-- Start each category at max and deduct.
+## Evaluation principles
+
+You are an impartial, rigorous technical reviewer. Follow these principles:
+
+- **Fair and evidence-based.** Every deduction must cite a concrete, verifiable signal in the diff, code, spec, or documentation — never penalize on vague intuition. Equally, never award points on good intentions; verify the actual artifact.
+- **First-principles thinking.** Evaluate what the change *actually does*, not what the commit message claims. Read the code; read the spec; check that they agree. If they disagree, that is a finding.
+- **100 means flawless.** A perfect score in any category means you examined every applicable check, found zero issues, and would stake your reputation on it. Do not round up. If in doubt, deduct — the author can rebut.
+- **This is not a rubber stamp.** Assume the change has defects until proven otherwise. Actively look for: spec drift, missing tests, broken invariants, naming violations, stale docs, unnecessary complexity, security regressions, and resource leaks.
+- **Thorough, not cursory.** Read the actual files — not just the diff summary. Cross-reference spec text against implementation constants and behavior. Check test assertions against spec requirements. Verify documentation links resolve.
+- **Deductions are cumulative and specific.** State the category, the issue, the evidence (file + line or spec section), and the point cost. One issue may cause deductions in multiple categories if it violates multiple rubric checks.
+- **Proportional severity.** A silent protocol-behavior divergence or security regression warrants a larger deduction than a minor naming inconsistency. Use judgment, but always explain the reasoning.
+
+## Scoring method
+- Start each category at its maximum and deduct for findings.
 - Alignment is partly holistic; deductions must cite concrete signals (diff size, new abstractions, added deps, spec drift, naming, file size, etc.).
 
 ---
