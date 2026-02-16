@@ -40,7 +40,7 @@ OpenClaw ←→ [Unix Socket] ←→ AXON Daemon ←→ [QUIC/UDP] ←→ AXON D
 ## 2. Discovery
 
 ### Primary: mDNS/DNS-SD (LAN, zero-config)
-- Service type: `_axon._udp.local`
+- Service type: `_axon._udp.local.`
 - TXT records: `agent_id=<hex>`, `pubkey=<base64 Ed25519 public key>`
 - Browse continuously for peers; maintain a peer table.
 - Stale peer removal: 60s without mDNS refresh.
