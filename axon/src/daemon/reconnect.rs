@@ -43,10 +43,15 @@ pub(crate) async fn attempt_reconnects(
 
     for peer in peer_table.list().await {
         let mut status = peer.status;
-        if status == ConnectionStatus::Connected && !transport.has_connection(&peer.agent_id).await
-        {
+        let has_conn = transport.has_connection(&peer.agent_id).await;
+
+        if status == ConnectionStatus::Connected && !has_conn {
             peer_table.set_disconnected(&peer.agent_id).await;
             status = ConnectionStatus::Disconnected;
+        } else if status != ConnectionStatus::Connected && has_conn {
+            peer_table.set_connected(&peer.agent_id, None).await;
+            reconnect_state.remove(&peer.agent_id);
+            continue;
         }
 
         if local_agent_id < &peer.agent_id && status != ConnectionStatus::Connected {

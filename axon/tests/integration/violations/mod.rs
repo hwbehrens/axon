@@ -50,20 +50,20 @@ async fn violation_hello_first_invariant() {
     assert_eq!(result.unwrap().kind, MessageKind::Response);
 }
 
-/// spec.md §10: Version mismatch in hello returns error(incompatible_version).
-/// Tested via auto_response since the public transport API always sends v1.
+/// Hello is no longer a transport-level concept; auto_response returns
+/// error(unknown_kind) for hello messages since the handshake was removed.
 #[tokio::test]
-async fn violation_version_mismatch_error() {
+async fn violation_hello_returns_unknown_kind() {
     let req = Envelope::new(
         "ed25519.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
         "ed25519.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string(),
         MessageKind::Hello,
-        json!({"protocol_versions": [99, 100]}),
+        json!({"protocol_versions": [1]}),
     );
     let resp = axon::transport::auto_response(&req, "ed25519.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
     assert_eq!(resp.kind, MessageKind::Error);
     let payload: Value = serde_json::from_str(resp.payload.get()).unwrap();
-    assert_eq!(payload["code"], "incompatible_version");
+    assert_eq!(payload["code"], "unknown_kind");
     assert_eq!(payload["retryable"], false);
 }
 
@@ -131,15 +131,10 @@ async fn violation_fire_and_forget_no_response() {
     );
 
     // Verify the message was delivered.
-    let received = loop {
-        let msg = tokio::time::timeout(Duration::from_secs(5), rx_b.recv())
-            .await
-            .expect("timeout")
-            .expect("recv");
-        if msg.kind != MessageKind::Hello {
-            break msg;
-        }
-    };
+    let received = tokio::time::timeout(Duration::from_secs(5), rx_b.recv())
+        .await
+        .expect("timeout")
+        .expect("recv");
     assert_eq!(received.kind, MessageKind::Notify);
 }
 

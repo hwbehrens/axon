@@ -22,7 +22,7 @@ use crate::config::{AxonPaths, Config, load_known_peers, save_known_peers};
 use crate::discovery::{Discovery, MdnsDiscovery, StaticDiscovery};
 use crate::identity::Identity;
 use crate::ipc::IpcServer;
-use crate::message::{AgentId, MessageKind};
+use crate::message::AgentId;
 use crate::peer_table::PeerTable;
 use crate::transport::QuicTransport;
 
@@ -98,7 +98,6 @@ pub async fn run_daemon(opts: DaemonOptions) -> Result<()> {
         config.effective_keepalive(),
         config.effective_idle_timeout(),
         None,
-        config.effective_handshake_timeout(),
         config.effective_inbound_read_timeout(),
     )
     .await?;
@@ -163,11 +162,9 @@ pub async fn run_daemon(opts: DaemonOptions) -> Result<()> {
                     match msg {
                         Ok(envelope) => {
                             counters_for_inbound.received.fetch_add(1, Ordering::Relaxed);
-                            if envelope.kind == MessageKind::Hello {
-                                peer_table_for_inbound
-                                    .set_connected(&envelope.from, None)
-                                    .await;
-                            }
+                            peer_table_for_inbound
+                                .set_connected(&envelope.from, None)
+                                .await;
                             if let Err(err) = ipc_for_inbound.broadcast_inbound(&envelope).await {
                                 warn!(error = %err, "failed broadcasting inbound to IPC clients");
                             }

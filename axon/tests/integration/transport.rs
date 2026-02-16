@@ -42,9 +42,9 @@ fn envelope_roundtrip_all_kinds() {
 // Transport integration — QUIC peer-to-peer
 // =========================================================================
 
-/// Two transports connect and complete hello exchange.
+/// Two transports connect via QUIC (TLS handshake authenticates).
 #[tokio::test]
-async fn transport_hello_exchange() {
+async fn transport_connect() {
     let (id_a, _dir_a) = make_identity();
     let (id_b, _dir_b) = make_identity();
 
@@ -265,16 +265,10 @@ async fn transport_notify_fire_and_forget() {
     let result = transport_a.send(&peer_b, notify).await.unwrap();
     assert!(result.is_none(), "notify should not return a response");
 
-    // Drain until we find the notify (hello is also broadcast).
-    let received = loop {
-        let msg = tokio::time::timeout(Duration::from_secs(5), rx_b.recv())
-            .await
-            .expect("timeout")
-            .expect("recv");
-        if msg.kind != MessageKind::Hello {
-            break msg;
-        }
-    };
+    let received = tokio::time::timeout(Duration::from_secs(5), rx_b.recv())
+        .await
+        .expect("timeout")
+        .expect("recv");
     assert_eq!(received.kind, MessageKind::Notify);
     assert_eq!(received.from, id_a.agent_id());
 }

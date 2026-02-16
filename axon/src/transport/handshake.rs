@@ -1,54 +1,12 @@
-use std::collections::HashMap;
-use std::sync::{Arc, RwLock as StdRwLock};
-
-use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde_json::json;
 
 use crate::message::{
-    AckPayload, CapabilitiesPayload, Envelope, ErrorCode, ErrorPayload, HelloPayload, MessageKind,
-    PeerStatus, PongPayload, ResponsePayload, hello_features,
+    AckPayload, CapabilitiesPayload, Envelope, ErrorCode, ErrorPayload, MessageKind, PeerStatus,
+    PongPayload, ResponsePayload,
 };
-
-use super::tls::derive_agent_id_from_pubkey_bytes;
 
 pub fn auto_response(request: &Envelope, local_agent_id: &str) -> Envelope {
     match request.kind {
-        MessageKind::Hello => {
-            if !hello_request_supports_protocol_v1(request) {
-                return Envelope::response_to(
-                    request,
-                    local_agent_id.to_string(),
-                    MessageKind::Error,
-                    serde_json::to_value(ErrorPayload {
-                        code: ErrorCode::IncompatibleVersion,
-                        message: format!(
-                            "no mutually supported protocol version. This agent supports: [1]. \
-                             Received: {:?}",
-                            request
-                                .payload_value()
-                                .unwrap_or_default()
-                                .get("protocol_versions")
-                        ),
-                        retryable: false,
-                    })
-                    .unwrap(),
-                );
-            }
-
-            let payload = serde_json::to_value(HelloPayload {
-                protocol_versions: vec![1],
-                selected_version: Some(1),
-                agent_name: None,
-                features: hello_features(),
-            })
-            .unwrap();
-            Envelope::response_to(
-                request,
-                local_agent_id.to_string(),
-                MessageKind::Hello,
-                payload,
-            )
-        }
         MessageKind::Ping => Envelope::response_to(
             request,
             local_agent_id.to_string(),
@@ -116,40 +74,6 @@ pub fn auto_response(request: &Envelope, local_agent_id: &str) -> Envelope {
             .unwrap(),
         ),
     }
-}
-
-pub(crate) fn validate_hello_identity(
-    hello: &Envelope,
-    cert_pubkey_b64: &str,
-    expected_pubkeys: &Arc<StdRwLock<HashMap<String, String>>>,
-) -> std::result::Result<(), String> {
-    let cert_pubkey_bytes = STANDARD
-        .decode(cert_pubkey_b64)
-        .map_err(|_| "peer certificate key was not valid base64".to_string())?;
-    let derived_agent_id = derive_agent_id_from_pubkey_bytes(&cert_pubkey_bytes);
-    if hello.from != derived_agent_id {
-        return Err("peer hello 'from' does not match certificate public key identity".to_string());
-    }
-
-    let expected = expected_pubkeys
-        .read()
-        .map_err(|_| "expected peer table lock poisoned".to_string())?;
-    if let Some(expected_pubkey) = expected.get(hello.from.as_str())
-        && expected_pubkey != cert_pubkey_b64
-    {
-        return Err("peer certificate public key does not match discovered key".to_string());
-    }
-
-    Ok(())
-}
-
-pub(crate) fn hello_request_supports_protocol_v1(hello: &Envelope) -> bool {
-    let payload = hello.payload_value().unwrap_or_default();
-    payload
-        .get("protocol_versions")
-        .and_then(|v| v.as_array())
-        .map(|versions| versions.iter().any(|v| v.as_u64() == Some(1)))
-        .unwrap_or(false)
 }
 
 #[cfg(test)]

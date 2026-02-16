@@ -154,17 +154,17 @@ fn all_spec_error_codes_serialize_correctly() {
     }
 }
 
-/// spec.md §10: Version mismatch in hello triggers error(incompatible_version).
+/// Hello is no longer handled at transport level; auto_response returns unknown_kind.
 #[test]
-fn version_mismatch_produces_incompatible_version_error() {
+fn hello_kind_returns_unknown_kind_error() {
     let req = Envelope::new(
         "ed25519.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
         "ed25519.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string(),
         MessageKind::Hello,
-        json!({"protocol_versions": [99]}),
+        json!({"protocol_versions": [1]}),
     );
     let resp = axon::transport::auto_response(&req, "ed25519.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
     assert_eq!(resp.kind, MessageKind::Error);
     let payload = resp.payload_value().unwrap();
-    assert_eq!(payload["code"], "incompatible_version");
+    assert_eq!(payload["code"], "unknown_kind");
 }

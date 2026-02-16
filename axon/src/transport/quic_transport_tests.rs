@@ -1,6 +1,7 @@
 use super::*;
 use crate::config::AxonPaths;
 use crate::identity::Identity;
+use crate::message::MessageKind;
 use serde_json::json;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -22,7 +23,7 @@ async fn endpoint_binds_and_reports_addr() {
 }
 
 #[tokio::test]
-async fn two_peers_hello_exchange() {
+async fn two_peers_connect() {
     let dir_a = tempdir().expect("tempdir a");
     let paths_a = AxonPaths::from_root(PathBuf::from(dir_a.path()));
     let id_a = Identity::load_or_generate(&paths_a).expect("identity a");
@@ -119,16 +120,10 @@ async fn send_notify_unidirectional() {
         .expect("send");
     assert!(result.is_none());
 
-    // Drain until we find the notify (hello is also broadcast)
-    let received = loop {
-        let msg = tokio::time::timeout(Duration::from_secs(5), rx_b.recv())
-            .await
-            .expect("timeout waiting for inbound")
-            .expect("recv");
-        if msg.kind != MessageKind::Hello {
-            break msg;
-        }
-    };
+    let received = tokio::time::timeout(Duration::from_secs(5), rx_b.recv())
+        .await
+        .expect("timeout waiting for inbound")
+        .expect("recv");
     assert_eq!(received.kind, MessageKind::Notify);
     assert_eq!(received.from, id_a.agent_id());
 }
