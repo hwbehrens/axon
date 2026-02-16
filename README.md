@@ -216,7 +216,6 @@ These are compile-time constants and cannot be changed via configuration.
 | [`spec/WIRE_FORMAT.md`](./spec/WIRE_FORMAT.md) | Normative wire format for interoperable implementations |
 | [`spec/IPC.md`](./spec/IPC.md) | IPC protocol — Unix socket commands, auth, receive buffer |
 | [`CONTRIBUTING.md`](./CONTRIBUTING.md) | Development guide, module map, testing requirements |
-| [`docs/IPC_V2.md`](./docs/IPC_V2.md) | IPC v2 change summary — what's new, backward compatibility, wire changes |
 | [`rubrics/`](./rubrics/) | Evaluation rubrics — quality, documentation, alignment |
 | [`SECURITY.md`](./SECURITY.md) | Security policy and vulnerability reporting |
 
