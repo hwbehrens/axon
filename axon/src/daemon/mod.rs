@@ -1,4 +1,4 @@
-mod command_handler;
+pub(crate) mod command_handler;
 mod peer_events;
 mod reconnect;
 mod replay_cache;
@@ -292,6 +292,12 @@ pub async fn run_daemon(opts: DaemonOptions) -> Result<()> {
             .unwrap_or(86400),
         buffer_byte_cap: config.ipc.as_ref().and_then(|c| c.buffer_byte_cap),
         uptime_secs: Arc::new(move || start.elapsed().as_secs()),
+        clock: Arc::new(|| {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as u64
+        }),
     };
 
     let (ipc, mut cmd_rx) = IpcServer::bind(

@@ -235,6 +235,54 @@ fn ack_beyond_delivered_rejected_under_backpressure() {
     assert!(result.is_ok());
 }
 
+#[test]
+fn consumer_state_is_bounded() {
+    let mut buf = ReceiveBuffer::new(100, 86400).with_max_consumers(3);
+    buf.push(make_envelope(MessageKind::Notify));
+
+    for i in 0..5 {
+        buf.fetch(&format!("consumer_{}", i), 10, None);
+    }
+
+    assert!(buf.consumers.len() <= 3);
+}
+
+#[test]
+fn consumer_gc_resets_cursor() {
+    let mut buf = ReceiveBuffer::new(100, 86400).with_max_consumers(2);
+    for _ in 0..3 {
+        buf.push(make_envelope(MessageKind::Notify));
+    }
+
+    // Consumer A fetches and acks
+    let (msgs, _, _) = buf.fetch("a", 10, None);
+    assert_eq!(msgs.len(), 3);
+    buf.update_delivered_seq("a", 3);
+    buf.ack("a", 2).unwrap();
+
+    // Sleep to ensure consumer B and C get a later timestamp than A
+    std::thread::sleep(std::time::Duration::from_millis(2));
+
+    // Consumer B fetches (2 consumers <= max)
+    buf.fetch("b", 10, None);
+
+    // Consumer C should trigger GC, evicting the LRU (consumer A)
+    buf.fetch("c", 10, None);
+    assert!(buf.consumers.len() <= 2);
+    assert!(
+        !buf.consumers.contains_key("a"),
+        "consumer A should be evicted as LRU"
+    );
+
+    // Re-create consumer A (evicted, so acked_seq resets to 0)
+    let (msgs, _, _) = buf.fetch("a", 10, None);
+    assert_eq!(
+        msgs.len(),
+        3,
+        "evicted consumer should see all messages from acked_seq=0"
+    );
+}
+
 proptest! {
     #[test]
     fn fetch_limit_clamps(limit in 0usize..10000) {

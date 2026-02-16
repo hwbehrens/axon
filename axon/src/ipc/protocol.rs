@@ -100,6 +100,20 @@ impl IpcCommand {
             | IpcCommand::Subscribe { req_id, .. } => req_id.as_deref(),
         }
     }
+
+    pub fn cmd_name(&self) -> &'static str {
+        match self {
+            IpcCommand::Send { .. } => "send",
+            IpcCommand::Peers { .. } => "peers",
+            IpcCommand::Status { .. } => "status",
+            IpcCommand::Hello { .. } => "hello",
+            IpcCommand::Auth { .. } => "auth",
+            IpcCommand::Whoami { .. } => "whoami",
+            IpcCommand::Inbox { .. } => "inbox",
+            IpcCommand::Ack { .. } => "ack",
+            IpcCommand::Subscribe { .. } => "subscribe",
+        }
+    }
 }
 
 fn default_inbox_limit() -> usize {
@@ -278,5 +292,5 @@ pub enum DaemonReply {
 }
 
 #[cfg(test)]
-#[path = "protocol_tests.rs"]
+#[path = "protocol_tests/mod.rs"]
 mod tests;

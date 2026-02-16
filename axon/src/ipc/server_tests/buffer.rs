@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use super::*;
 
 #[tokio::test]
@@ -107,11 +109,19 @@ async fn inbox_and_ack_round_trip() {
 
 #[tokio::test]
 async fn buffer_ttl_eviction() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    let fake_time = Arc::new(AtomicU64::new(1_000_000));
+    let clock = {
+        let t = fake_time.clone();
+        Arc::new(move || t.load(Ordering::Relaxed)) as Arc<dyn Fn() -> u64 + Send + Sync>
+    };
+
     let dir = tempdir().expect("tempdir");
     let socket_path = dir.path().join("axon.sock");
-    // Set very short TTL (1 second)
     let config = IpcServerConfig {
         buffer_ttl_secs: 1,
+        clock: clock.clone(),
         ..Default::default()
     };
     let (server, mut cmd_rx) = IpcServer::bind(socket_path.clone(), 64, config)
@@ -133,7 +143,7 @@ async fn buffer_ttl_eviction() {
     let mut line = String::new();
     reader.read_line(&mut line).await.expect("read");
 
-    // Push a message
+    // Push a message (at fake_time = 1_000_000 ms)
     let envelope = Envelope::new(
         "ed25519.sender".to_string(),
         "ed25519.receiver".to_string(),
@@ -145,8 +155,8 @@ async fn buffer_ttl_eviction() {
         .await
         .expect("broadcast");
 
-    // Wait for TTL to expire (1.5 seconds to be safe)
-    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+    // Advance clock by 1.5 seconds (1500 ms) — beyond the 1s TTL
+    fake_time.store(1_001_500, Ordering::Relaxed);
 
     // Fetch - should be empty due to TTL eviction
     write_half

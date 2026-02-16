@@ -18,7 +18,7 @@ use super::receive_buffer::ReceiveBuffer;
 use crate::message::Envelope;
 
 const MAX_CLIENT_QUEUE: usize = 1024;
-const MAX_IPC_LINE_LENGTH: usize = 256 * 1024; // 256 KB
+const MAX_IPC_LINE_LENGTH: usize = 64 * 1024; // 64 KB, aligned with MAX_MESSAGE_SIZE
 
 // Re-export config and types for public API
 pub use super::handlers::IpcServerConfig;
@@ -45,49 +45,55 @@ impl IpcServer {
         config: IpcServerConfig,
     ) -> Result<(Self, mpsc::Receiver<CommandEvent>)> {
         if socket_path.exists() {
-            let meta = fs::symlink_metadata(&socket_path).with_context(|| {
-                format!(
-                    "failed to read metadata for socket path: {}",
-                    socket_path.display()
-                )
-            })?;
+            let meta = tokio::fs::symlink_metadata(&socket_path)
+                .await
+                .with_context(|| {
+                    format!(
+                        "failed to read metadata for socket path: {}",
+                        socket_path.display()
+                    )
+                })?;
             if !meta.file_type().is_socket() {
                 anyhow::bail!(
                     "refusing to remove non-socket file at socket path: {}",
                     socket_path.display()
                 );
             }
-            fs::remove_file(&socket_path).with_context(|| {
-                format!(
-                    "failed to remove stale unix socket: {}",
-                    socket_path.display()
-                )
-            })?;
+            tokio::fs::remove_file(&socket_path)
+                .await
+                .with_context(|| {
+                    format!(
+                        "failed to remove stale unix socket: {}",
+                        socket_path.display()
+                    )
+                })?;
         }
 
         if let Some(parent) = socket_path.parent()
             && !parent.exists()
         {
-            fs::create_dir_all(parent)
+            tokio::fs::create_dir_all(parent)
+                .await
                 .with_context(|| format!("failed to create socket dir: {}", parent.display()))?;
         }
 
         let listener = UnixListener::bind(&socket_path)
             .with_context(|| format!("failed to bind unix socket: {}", socket_path.display()))?;
-        fs::set_permissions(&socket_path, fs::Permissions::from_mode(0o600)).with_context(
-            || {
+        tokio::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600))
+            .await
+            .with_context(|| {
                 format!(
                     "failed to set socket permissions: {}",
                     socket_path.display()
                 )
-            },
-        )?;
+            })?;
 
         let owner_uid = unsafe { libc::getuid() };
 
         let clients = Arc::new(Mutex::new(HashMap::new()));
         let client_states = Arc::new(Mutex::new(HashMap::new()));
-        let mut buffer = ReceiveBuffer::new(config.buffer_size, config.buffer_ttl_secs);
+        let mut buffer = ReceiveBuffer::new(config.buffer_size, config.buffer_ttl_secs)
+            .with_clock(config.clock.clone());
         if let Some(byte_cap) = config.buffer_byte_cap {
             buffer = buffer.with_byte_cap(byte_cap);
         }
@@ -262,9 +268,23 @@ async fn handle_client(
         }
     });
 
-    let mut lines = BufReader::new(read_half).lines();
-    while let Some(line) = lines.next_line().await.context("failed reading IPC line")? {
-        if line.len() > MAX_IPC_LINE_LENGTH {
+    let mut reader = BufReader::new(read_half);
+    let mut buf = Vec::new();
+    loop {
+        buf.clear();
+        let n = reader
+            .read_until(b'\n', &mut buf)
+            .await
+            .context("failed reading IPC line")?;
+        if n == 0 {
+            break; // EOF
+        }
+        // Strip trailing newline
+        if buf.last() == Some(&b'\n') {
+            buf.pop();
+        }
+        if buf.len() > MAX_IPC_LINE_LENGTH {
+            // Reject overlong line without parsing
             let err_line = serde_json::to_string(&DaemonReply::Error {
                 ok: false,
                 error: super::protocol::IpcErrorCode::InvalidCommand,
@@ -274,7 +294,20 @@ async fn handle_client(
             let _ = out_tx.try_send(Arc::from(err_line));
             continue;
         }
-        match serde_json::from_str::<IpcCommand>(&line) {
+        let line = match std::str::from_utf8(&buf) {
+            Ok(s) => s,
+            Err(_) => {
+                let err_line = serde_json::to_string(&DaemonReply::Error {
+                    ok: false,
+                    error: super::protocol::IpcErrorCode::InvalidCommand,
+                    req_id: None,
+                })
+                .context("failed to serialize IPC parse error")?;
+                let _ = out_tx.try_send(Arc::from(err_line));
+                continue;
+            }
+        };
+        match serde_json::from_str::<IpcCommand>(line) {
             Ok(command) => {
                 cmd_tx
                     .send(CommandEvent { client_id, command })

@@ -16,6 +16,25 @@ pub(crate) struct Counters {
     pub(crate) received: AtomicU64,
 }
 
+#[derive(Debug)]
+pub(crate) enum DaemonIpcError {
+    PeerNotFound,
+    PeerUnreachable,
+    InvalidCommand(String),
+}
+
+impl std::fmt::Display for DaemonIpcError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DaemonIpcError::PeerNotFound => write!(f, "peer_not_found"),
+            DaemonIpcError::PeerUnreachable => write!(f, "peer_unreachable"),
+            DaemonIpcError::InvalidCommand(msg) => write!(f, "invalid_command: {msg}"),
+        }
+    }
+}
+
+impl std::error::Error for DaemonIpcError {}
+
 pub(crate) struct DaemonContext<'a> {
     pub(crate) ipc: &'a IpcServer,
     pub(crate) peer_table: &'a PeerTable,
@@ -68,14 +87,14 @@ impl IpcBackend for DaemonIpcBackend<'_> {
             .peer_table
             .get(&to)
             .await
-            .ok_or_else(|| anyhow::anyhow!("peer_not_found"))?;
+            .ok_or_else(|| anyhow::anyhow!(DaemonIpcError::PeerNotFound))?;
 
         // Initiator rule: lower agent_id initiates. If we are higher,
         // wait briefly for the peer to connect, then error if still absent.
         if self.local_agent_id.as_str() > to.as_str() && !self.transport.has_connection(&to).await {
             tokio::time::sleep(Duration::from_secs(2)).await;
             if !self.transport.has_connection(&to).await {
-                anyhow::bail!("peer_unreachable");
+                anyhow::bail!(DaemonIpcError::PeerUnreachable);
             }
         }
 
@@ -84,7 +103,7 @@ impl IpcBackend for DaemonIpcBackend<'_> {
 
         envelope
             .validate()
-            .map_err(|e| anyhow::anyhow!("invalid_command: {e}"))?;
+            .map_err(|e| anyhow::anyhow!(DaemonIpcError::InvalidCommand(e.to_string())))?;
 
         let msg_id = envelope.id;
 
@@ -113,7 +132,7 @@ impl IpcBackend for DaemonIpcBackend<'_> {
             }
             Err(_err) => {
                 self.peer_table.set_disconnected(&to).await;
-                anyhow::bail!("peer_unreachable")
+                anyhow::bail!(DaemonIpcError::PeerUnreachable)
             }
         }
     }
