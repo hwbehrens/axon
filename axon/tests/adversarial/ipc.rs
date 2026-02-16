@@ -183,7 +183,7 @@ async fn ipc_malformed_input_resilience() {
             let mut eof_line = String::new();
             let eof_result = reader.read_line(&mut eof_line).await;
             match eof_result {
-                Ok(0) => {} // clean EOF
+                Ok(0) => {}                                                     // clean EOF
                 Err(e) if e.kind() == std::io::ErrorKind::ConnectionReset => {} // RST on Linux
                 Ok(n) => panic!("expected EOF after overlong line, got {n} bytes: {eof_line}"),
                 Err(e) => panic!("unexpected error after overlong line: {e}"),
