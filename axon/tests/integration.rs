@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use axon::config::{
     AxonPaths, Config, KnownPeer, StaticPeerConfig, load_known_peers, save_known_peers,
 };
-use axon::discovery::{Discovery, PeerEvent, StaticDiscovery};
+use axon::discovery::{PeerEvent, run_static_discovery};
 use axon::identity::Identity;
 use axon::ipc::{DaemonReply, IpcCommand, IpcServer, IpcServerConfig};
 use axon::message::{AgentId, Envelope, MessageKind, decode, encode};

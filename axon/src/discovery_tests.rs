@@ -4,23 +4,22 @@ use super::*;
 async fn static_discovery_emits_all_peers() {
     let peers = vec![
         StaticPeerConfig {
-            agent_id: "ed25519.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+            agent_id: "ed25519.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
             addr: "127.0.0.1:7100".parse().expect("addr"),
             pubkey: "Zm9v".to_string(),
         },
         StaticPeerConfig {
-            agent_id: "ed25519.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string(),
+            agent_id: "ed25519.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
             addr: "127.0.0.1:7101".parse().expect("addr"),
             pubkey: "YmFy".to_string(),
         },
     ];
 
-    let discovery = StaticDiscovery::new(peers);
     let (tx, mut rx) = mpsc::channel(8);
     let cancel = CancellationToken::new();
 
     tokio::spawn(async move {
-        let _ = discovery.run(tx, cancel).await;
+        let _ = run_static_discovery(peers, tx, cancel).await;
     });
 
     let first = rx.recv().await.expect("first event");
@@ -43,16 +42,15 @@ async fn static_discovery_emits_all_peers() {
 #[tokio::test]
 async fn static_discovery_stays_alive() {
     let peers = vec![StaticPeerConfig {
-        agent_id: "ed25519.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+        agent_id: "ed25519.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
         addr: "127.0.0.1:7100".parse().expect("addr"),
         pubkey: "Zm9v".to_string(),
     }];
 
-    let discovery = StaticDiscovery::new(peers);
     let (tx, mut rx) = mpsc::channel(8);
     let cancel = CancellationToken::new();
 
-    let handle = tokio::spawn(async move { discovery.run(tx, cancel).await });
+    let handle = tokio::spawn(async move { run_static_discovery(peers, tx, cancel).await });
 
     rx.recv().await.expect("should receive event");
     tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
@@ -155,19 +153,19 @@ fn parse_resolved_skips_missing_pubkey() {
 #[test]
 fn peer_event_equality() {
     let a = PeerEvent::Discovered {
-        agent_id: "abc".to_string(),
+        agent_id: "abc".into(),
         addr: "10.0.0.1:7100".parse().unwrap(),
         pubkey: "key".to_string(),
     };
     let b = PeerEvent::Discovered {
-        agent_id: "abc".to_string(),
+        agent_id: "abc".into(),
         addr: "10.0.0.1:7100".parse().unwrap(),
         pubkey: "key".to_string(),
     };
     assert_eq!(a, b);
 
     let c = PeerEvent::Lost {
-        agent_id: "abc".to_string(),
+        agent_id: "abc".into(),
     };
     assert_ne!(a, c);
 }

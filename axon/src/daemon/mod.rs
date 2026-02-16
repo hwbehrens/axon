@@ -18,7 +18,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
 use crate::config::{AxonPaths, Config, load_known_peers, save_known_peers};
-use crate::discovery::{Discovery, MdnsDiscovery, StaticDiscovery};
+use crate::discovery::{run_mdns_discovery, run_static_discovery};
 use crate::identity::Identity;
 use crate::ipc::IpcServer;
 use crate::message::AgentId;
@@ -160,24 +160,21 @@ pub async fn run_daemon(opts: DaemonOptions) -> Result<()> {
     let (peer_event_tx, mut peer_event_rx) = mpsc::channel(256);
     {
         let tx = peer_event_tx.clone();
-        let static_discovery = StaticDiscovery::new(config.peers.clone());
+        let peers = config.peers.clone();
         let cancel_clone = cancel.clone();
         tokio::spawn(async move {
-            if let Err(err) = static_discovery.run(tx, cancel_clone).await {
+            if let Err(err) = run_static_discovery(peers, tx, cancel_clone).await {
                 warn!(error = %err, "static discovery failed");
             }
         });
     }
     if !opts.disable_mdns {
         let tx = peer_event_tx.clone();
-        let mdns = MdnsDiscovery::new(
-            local_agent_id.clone(),
-            identity.public_key_base64().to_string(),
-            port,
-        );
+        let agent_id = local_agent_id.clone();
+        let pubkey = identity.public_key_base64().to_string();
         let cancel_clone = cancel.clone();
         tokio::spawn(async move {
-            if let Err(err) = mdns.run(tx, cancel_clone).await {
+            if let Err(err) = run_mdns_discovery(agent_id, pubkey, port, tx, cancel_clone).await {
                 warn!(error = %err, "mDNS discovery failed");
             }
         });
