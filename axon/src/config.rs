@@ -19,6 +19,7 @@ pub struct AxonPaths {
     pub known_peers: PathBuf,
     pub replay_cache: PathBuf,
     pub socket: PathBuf,
+    pub ipc_token: PathBuf,
 }
 
 impl AxonPaths {
@@ -36,12 +37,28 @@ impl AxonPaths {
             known_peers: root.join("known_peers.json"),
             replay_cache: root.join("replay_cache.json"),
             socket: root.join("axon.sock"),
+            ipc_token: root.join("ipc-token"),
             root,
         }
     }
 
     pub fn ensure_root_exists(&self) -> Result<()> {
-        if !self.root.exists() {
+        if self.root.exists() {
+            // Reject symlinked root directory (security: IPC.md §2.2)
+            let meta = fs::symlink_metadata(&self.root).with_context(|| {
+                format!(
+                    "failed to read metadata for AXON root: {}",
+                    self.root.display()
+                )
+            })?;
+            if meta.file_type().is_symlink() {
+                anyhow::bail!(
+                    "AXON root directory is a symlink (security violation): {}. \
+                     Remove the symlink and restart.",
+                    self.root.display()
+                );
+            }
+        } else {
             fs::create_dir_all(&self.root).with_context(|| {
                 format!("failed to create AXON root dir: {}", self.root.display())
             })?;
@@ -57,7 +74,25 @@ impl AxonPaths {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct IpcConfig {
+    #[serde(default)]
+    pub allow_v1: Option<bool>,
+    #[serde(default)]
+    pub buffer_size: Option<usize>,
+    #[serde(default)]
+    pub buffer_ttl_secs: Option<u64>,
+    #[serde(default)]
+    pub buffer_byte_cap: Option<usize>,
+    #[serde(default)]
+    pub token_path: Option<String>,
+    #[serde(default)]
+    pub max_client_queue: Option<usize>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct Config {
+    #[serde(default)]
+    pub name: Option<String>,
     #[serde(default)]
     pub port: Option<u16>,
     #[serde(default)]
@@ -74,6 +109,8 @@ pub struct Config {
     pub handshake_timeout_secs: Option<u64>,
     #[serde(default)]
     pub inbound_read_timeout_secs: Option<u64>,
+    #[serde(default)]
+    pub ipc: Option<IpcConfig>,
     #[serde(default)]
     pub peers: Vec<StaticPeerConfig>,
 }
@@ -120,6 +157,42 @@ impl Config {
 
     pub fn effective_inbound_read_timeout(&self) -> Duration {
         Duration::from_secs(self.inbound_read_timeout_secs.unwrap_or(10))
+    }
+
+    pub fn effective_allow_v1(&self) -> bool {
+        self.ipc.as_ref().and_then(|c| c.allow_v1).unwrap_or(true)
+    }
+
+    pub fn effective_buffer_byte_cap(&self) -> usize {
+        self.ipc
+            .as_ref()
+            .and_then(|c| c.buffer_byte_cap)
+            .unwrap_or(4_194_304)
+    }
+
+    pub fn effective_max_client_queue(&self) -> usize {
+        self.ipc
+            .as_ref()
+            .and_then(|c| c.max_client_queue)
+            .unwrap_or(1024)
+    }
+
+    pub fn effective_token_path(&self, root: &Path) -> PathBuf {
+        self.ipc
+            .as_ref()
+            .and_then(|c| c.token_path.as_ref())
+            .map(|p| {
+                if let Some(rest) = p.strip_prefix("~/") {
+                    if let Ok(home) = std::env::var("HOME") {
+                        PathBuf::from(home).join(rest)
+                    } else {
+                        PathBuf::from(p)
+                    }
+                } else {
+                    PathBuf::from(p)
+                }
+            })
+            .unwrap_or_else(|| root.join("ipc-token"))
     }
 }
 

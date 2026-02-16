@@ -98,7 +98,7 @@ The receiver responds on the same stream:
 
 - `v`: protocol version (negotiated via hello).
 - `id`: unique message identifier (UUID v4).
-- `from` / `to`: agent IDs (SHA-256 of public key, hex, first 16 bytes = 32 chars).
+- `from` / `to`: typed agent IDs (e.g. `ed25519.` + first 16 bytes of SHA-256 of public key, hex, 40 chars total).
 - `ts`: unix milliseconds.
 - `kind`: message type string.
 - `ref`: the message ID this responds to. Null for initiating messages.

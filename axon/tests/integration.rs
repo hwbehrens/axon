@@ -11,7 +11,7 @@ use axon::config::{
 };
 use axon::discovery::{Discovery, PeerEvent, StaticDiscovery};
 use axon::identity::Identity;
-use axon::ipc::{DaemonReply, IpcCommand, IpcServer};
+use axon::ipc::{DaemonReply, IpcCommand, IpcServer, IpcServerConfig};
 use axon::message::{Envelope, MessageKind, decode, encode};
 use axon::peer_table::{ConnectionStatus, PeerSource, PeerTable};
 use axon::transport::QuicTransport;

@@ -94,22 +94,213 @@ fn bench_envelope_clone_vs_arc(c: &mut Criterion) {
 }
 
 fn bench_ipc_command_parse(c: &mut Criterion) {
+    use axon::ipc::IpcCommand;
     let mut group = c.benchmark_group("ipc_command_parse");
 
-    let send_cmd =
-        r#"{"cmd":"send","to":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","kind":"ping","payload":{}}"#;
+    let send_cmd = r#"{"cmd":"send","to":"ed25519.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","kind":"ping","payload":{}}"#;
     group.bench_function("send", |b| {
-        b.iter(|| serde_json::from_str::<serde_json::Value>(black_box(send_cmd)).unwrap())
+        b.iter(|| serde_json::from_str::<IpcCommand>(black_box(send_cmd)).unwrap())
     });
 
     let peers_cmd = r#"{"cmd":"peers"}"#;
     group.bench_function("peers", |b| {
-        b.iter(|| serde_json::from_str::<serde_json::Value>(black_box(peers_cmd)).unwrap())
+        b.iter(|| serde_json::from_str::<IpcCommand>(black_box(peers_cmd)).unwrap())
     });
 
-    let status_cmd = r#"{"cmd":"status"}"#;
-    group.bench_function("status", |b| {
-        b.iter(|| serde_json::from_str::<serde_json::Value>(black_box(status_cmd)).unwrap())
+    let hello_cmd = r#"{"cmd":"hello","version":2}"#;
+    group.bench_function("hello", |b| {
+        b.iter(|| serde_json::from_str::<IpcCommand>(black_box(hello_cmd)).unwrap())
+    });
+
+    let inbox_cmd = r#"{"cmd":"inbox","limit":50,"kinds":["query","notify"]}"#;
+    group.bench_function("inbox", |b| {
+        b.iter(|| serde_json::from_str::<IpcCommand>(black_box(inbox_cmd)).unwrap())
+    });
+
+    let subscribe_cmd = r#"{"cmd":"subscribe","kinds":["query","delegate","notify"]}"#;
+    group.bench_function("subscribe", |b| {
+        b.iter(|| serde_json::from_str::<IpcCommand>(black_box(subscribe_cmd)).unwrap())
+    });
+
+    group.finish();
+}
+
+fn bench_daemon_reply_serialize(c: &mut Criterion) {
+    let mut group = c.benchmark_group("daemon_reply_serialize");
+
+    let reply_inbox = json!({
+        "ok": true,
+        "messages": [
+            {
+                "envelope": {
+                    "v": 1, "id": "550e8400-e29b-41d4-a716-446655440000",
+                    "from": "ed25519.aaaa", "to": "ed25519.bbbb",
+                    "ts": 1700000000000u64, "kind": "notify",
+                    "payload": {"topic": "test"}
+                },
+                "buffered_at": "2026-02-15T08:00:00.000Z"
+            }
+        ],
+        "has_more": false
+    });
+    group.bench_function("inbox_reply", |b| {
+        b.iter(|| serde_json::to_string(black_box(&reply_inbox)).unwrap())
+    });
+
+    let reply_hello = json!({
+        "ok": true,
+        "version": 2,
+        "agent_id": "ed25519.a1b2c3d4e5f6a7b8",
+        "features": ["auth", "buffer", "subscribe"]
+    });
+    group.bench_function("hello_reply", |b| {
+        b.iter(|| serde_json::to_string(black_box(&reply_hello)).unwrap())
+    });
+
+    group.finish();
+}
+
+fn bench_ipc_inbound_event_serialize(c: &mut Criterion) {
+    let mut group = c.benchmark_group("ipc_v2_events");
+
+    let envelope = make_envelope();
+
+    // v2 InboundEvent serialization (what broadcast_inbound produces)
+    group.bench_function("inbound_event", |b| {
+        b.iter(|| {
+            let event = json!({
+                "event": "inbound",
+                "replay": false,
+                "seq": 42u64,
+                "buffered_at_ms": 1700000000000u64,
+                "envelope": black_box(&envelope),
+            });
+            serde_json::to_string(&event).unwrap()
+        })
+    });
+
+    // v2 InboundEvent with Arc<str> fanout to 10 clients
+    group.bench_function("inbound_event_fanout_10", |b| {
+        b.iter(|| {
+            let event = json!({
+                "event": "inbound",
+                "replay": false,
+                "seq": 42u64,
+                "buffered_at_ms": 1700000000000u64,
+                "envelope": black_box(&envelope),
+            });
+            let line: std::sync::Arc<str> =
+                std::sync::Arc::from(serde_json::to_string(&event).unwrap());
+            for _ in 0..10 {
+                let _cloned = line.clone();
+            }
+        })
+    });
+
+    group.finish();
+}
+
+fn bench_inbox_reply_serialize(c: &mut Criterion) {
+    let mut group = c.benchmark_group("ipc_v2_inbox");
+
+    let envelope = make_envelope();
+
+    // Inbox reply with 50 messages (default limit)
+    let messages: Vec<serde_json::Value> = (0..50)
+        .map(|i| {
+            json!({
+                "seq": i + 1,
+                "buffered_at_ms": 1700000000000u64 + i * 1000,
+                "envelope": &envelope,
+            })
+        })
+        .collect();
+
+    let reply = json!({
+        "ok": true,
+        "messages": messages,
+        "next_seq": 50,
+        "has_more": false,
+        "req_id": "r1",
+    });
+
+    group.bench_function("inbox_50_messages", |b| {
+        b.iter(|| serde_json::to_string(black_box(&reply)).unwrap())
+    });
+
+    group.finish();
+}
+
+fn bench_receive_buffer_push(c: &mut Criterion) {
+    let mut group = c.benchmark_group("receive_buffer");
+
+    group.bench_function("push", |b| {
+        let mut buf = axon::ipc::ReceiveBuffer::new(1000, 86400);
+        b.iter(|| {
+            buf.push(black_box(make_envelope()));
+        })
+    });
+
+    group.bench_function("push_at_capacity", |b| {
+        let mut buf = axon::ipc::ReceiveBuffer::new(100, 86400);
+        // Fill to capacity first
+        for _ in 0..100 {
+            buf.push(make_envelope());
+        }
+        b.iter(|| {
+            buf.push(black_box(make_envelope()));
+        })
+    });
+
+    group.finish();
+}
+
+fn bench_receive_buffer_fetch(c: &mut Criterion) {
+    let mut group = c.benchmark_group("receive_buffer_fetch");
+
+    // Fetch from a buffer with 100 messages
+    group.bench_function("fetch_50_from_100", |b| {
+        b.iter_batched(
+            || {
+                let mut buf = axon::ipc::ReceiveBuffer::new(1000, 86400);
+                for _ in 0..100 {
+                    buf.push(make_envelope());
+                }
+                buf
+            },
+            |mut buf| {
+                black_box(buf.fetch("consumer", 50, None));
+            },
+            criterion::BatchSize::SmallInput,
+        )
+    });
+
+    // Fetch with kind filter
+    group.bench_function("fetch_with_kind_filter", |b| {
+        b.iter_batched(
+            || {
+                let mut buf = axon::ipc::ReceiveBuffer::new(1000, 86400);
+                for i in 0..100 {
+                    let kind = if i % 2 == 0 {
+                        MessageKind::Query
+                    } else {
+                        MessageKind::Notify
+                    };
+                    buf.push(Envelope::new(
+                        "ed25519.sender".to_string(),
+                        "ed25519.receiver".to_string(),
+                        kind,
+                        json!({"i": i}),
+                    ));
+                }
+                buf
+            },
+            |mut buf| {
+                let kinds = [MessageKind::Query];
+                black_box(buf.fetch("consumer", 50, Some(&kinds)));
+            },
+            criterion::BatchSize::SmallInput,
+        )
     });
 
     group.finish();
@@ -121,5 +312,10 @@ criterion_group!(
     bench_ipc_serialize_then_clone,
     bench_envelope_clone_vs_arc,
     bench_ipc_command_parse,
+    bench_daemon_reply_serialize,
+    bench_ipc_inbound_event_serialize,
+    bench_inbox_reply_serialize,
+    bench_receive_buffer_push,
+    bench_receive_buffer_fetch,
 );
 criterion_main!(benches);

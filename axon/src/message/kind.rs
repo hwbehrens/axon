@@ -2,6 +2,10 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
+/// AXON message kind — determines stream mapping and payload schema.
+///
+/// See `spec/MESSAGE_TYPES.md` §Core Types for the full kind table and
+/// `spec/MESSAGE_TYPES.md` §Payload Schemas for per-kind payload definitions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MessageKind {

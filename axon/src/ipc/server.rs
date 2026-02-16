@@ -2,81 +2,135 @@ use std::collections::HashMap;
 use std::fs;
 use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, LazyLock};
 
 use anyhow::{Context, Result};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{Mutex, mpsc};
 
+use super::auth;
+use super::backend::IpcBackend;
+use super::handlers::{ClientState, DispatchResult, IpcHandlers};
 use super::protocol::{CommandEvent, DaemonReply, IpcCommand};
+use super::receive_buffer::ReceiveBuffer;
 use crate::message::Envelope;
 
-const MAX_CLIENT_QUEUE: usize = 1024;
-const MAX_IPC_LINE_LENGTH: usize = 256 * 1024; // 256 KB
+const MAX_IPC_LINE_LENGTH: usize = 64 * 1024; // 64 KB, aligned with MAX_MESSAGE_SIZE
+
+static INVALID_COMMAND_LINE: LazyLock<Arc<str>> = LazyLock::new(|| {
+    let error = super::protocol::IpcErrorCode::InvalidCommand;
+    Arc::from(
+        serde_json::to_string(&DaemonReply::Error {
+            ok: false,
+            message: error.message(),
+            error,
+            req_id: None,
+        })
+        .expect("static error serialization"),
+    )
+});
+
+// Re-export config and types for public API
+pub use super::handlers::IpcServerConfig;
 
 // ---------------------------------------------------------------------------
 // IPC server
 // ---------------------------------------------------------------------------
 
+/// Unix domain socket IPC server that bridges local clients to the AXON daemon.
+/// Handles connection accept, per-client read/write loops, and command dispatch.
 #[derive(Clone)]
 pub struct IpcServer {
     socket_path: PathBuf,
     max_clients: usize,
     clients: Arc<Mutex<HashMap<u64, mpsc::Sender<Arc<str>>>>>,
+    client_states: Arc<Mutex<HashMap<u64, ClientState>>>,
     next_client_id: Arc<AtomicU64>,
+    handlers: Arc<IpcHandlers>,
+    owner_uid: u32,
+    max_client_queue: usize,
 }
 
 impl IpcServer {
     pub async fn bind(
         socket_path: PathBuf,
         max_clients: usize,
+        config: IpcServerConfig,
     ) -> Result<(Self, mpsc::Receiver<CommandEvent>)> {
         if socket_path.exists() {
-            let meta = fs::symlink_metadata(&socket_path).with_context(|| {
-                format!(
-                    "failed to read metadata for socket path: {}",
-                    socket_path.display()
-                )
-            })?;
+            let meta = tokio::fs::symlink_metadata(&socket_path)
+                .await
+                .with_context(|| {
+                    format!(
+                        "failed to read metadata for socket path: {}",
+                        socket_path.display()
+                    )
+                })?;
             if !meta.file_type().is_socket() {
                 anyhow::bail!(
                     "refusing to remove non-socket file at socket path: {}",
                     socket_path.display()
                 );
             }
-            fs::remove_file(&socket_path).with_context(|| {
-                format!(
-                    "failed to remove stale unix socket: {}",
-                    socket_path.display()
-                )
-            })?;
+            tokio::fs::remove_file(&socket_path)
+                .await
+                .with_context(|| {
+                    format!(
+                        "failed to remove stale unix socket: {}",
+                        socket_path.display()
+                    )
+                })?;
         }
 
         if let Some(parent) = socket_path.parent()
             && !parent.exists()
         {
-            fs::create_dir_all(parent)
+            tokio::fs::create_dir_all(parent)
+                .await
                 .with_context(|| format!("failed to create socket dir: {}", parent.display()))?;
         }
 
         let listener = UnixListener::bind(&socket_path)
             .with_context(|| format!("failed to bind unix socket: {}", socket_path.display()))?;
-        fs::set_permissions(&socket_path, fs::Permissions::from_mode(0o600)).with_context(
-            || {
+        tokio::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600))
+            .await
+            .with_context(|| {
                 format!(
                     "failed to set socket permissions: {}",
                     socket_path.display()
                 )
-            },
-        )?;
+            })?;
+
+        let owner_uid = unsafe { libc::getuid() };
+        let max_client_queue = config.max_client_queue;
+
+        let clients = Arc::new(Mutex::new(HashMap::new()));
+        let client_states = Arc::new(Mutex::new(HashMap::new()));
+        let mut buffer = ReceiveBuffer::new(config.buffer_size, config.buffer_ttl_secs)
+            .with_clock(config.clock.clone());
+        if let Some(byte_cap) = config.buffer_byte_cap {
+            buffer = buffer.with_byte_cap(byte_cap);
+        }
+        let receive_buffer = Arc::new(Mutex::new(buffer));
+
+        let handlers = Arc::new(IpcHandlers::new(
+            Arc::new(config),
+            client_states.clone(),
+            receive_buffer,
+            clients.clone(),
+        ));
 
         let server = Self {
             socket_path,
             max_clients,
-            clients: Arc::new(Mutex::new(HashMap::new())),
+            clients,
+            client_states,
             next_client_id: Arc::new(AtomicU64::new(1)),
+            handlers,
+            owner_uid,
+            max_client_queue,
         };
 
         let (cmd_tx, cmd_rx) = mpsc::channel(256);
@@ -88,23 +142,51 @@ impl IpcServer {
     pub async fn send_reply(&self, client_id: u64, reply: &DaemonReply) -> Result<()> {
         let line: Arc<str> =
             Arc::from(serde_json::to_string(reply).context("failed to serialize daemon reply")?);
-        if let Some(tx) = self.clients.lock().await.get(&client_id).cloned() {
-            let _ = tx.try_send(line);
+        let tx = {
+            let clients = self.clients.lock().await;
+            clients.get(&client_id).cloned()
+        };
+        if let Some(tx) = tx {
+            let send_result =
+                tokio::time::timeout(std::time::Duration::from_secs(2), tx.send(line)).await;
+            match send_result {
+                Ok(Ok(())) => {}
+                Ok(Err(_)) | Err(_) => {
+                    self.close_client(client_id).await;
+                }
+            }
         }
         Ok(())
     }
 
     pub async fn broadcast_inbound(&self, envelope: &Envelope) -> Result<()> {
-        let msg = DaemonReply::Inbound {
-            inbound: true,
-            envelope: envelope.clone(),
-        };
-        let line: Arc<str> =
-            Arc::from(serde_json::to_string(&msg).context("failed to serialize inbound message")?);
-        for tx in self.clients.lock().await.values() {
-            let _ = tx.try_send(line.clone());
-        }
-        Ok(())
+        self.handlers.broadcast_inbound(envelope).await
+    }
+
+    pub async fn handle_command(&self, event: CommandEvent) -> Result<DaemonReply> {
+        self.handlers
+            .handle_command(event.client_id, event.command)
+            .await
+    }
+
+    /// Dispatch a command through unified IPC policy enforcement, delegating
+    /// Send/Peers/Status effects to the provided backend.
+    pub async fn dispatch_command(
+        &self,
+        client_id: u64,
+        command: IpcCommand,
+        backend: &(impl IpcBackend + ?Sized),
+    ) -> Result<DispatchResult> {
+        self.handlers
+            .dispatch_command(client_id, command, backend)
+            .await
+    }
+
+    /// Close a client connection by removing it from the client map.
+    /// The client's write loop will end when the sender is dropped.
+    pub async fn close_client(&self, client_id: u64) {
+        self.clients.lock().await.remove(&client_id);
+        self.client_states.lock().await.remove(&client_id);
     }
 
     pub async fn client_count(&self) -> usize {
@@ -129,8 +211,11 @@ impl IpcServer {
 
     fn start_accept_loop(&self, listener: UnixListener, cmd_tx: mpsc::Sender<CommandEvent>) {
         let clients = self.clients.clone();
+        let client_states = self.client_states.clone();
         let next_client_id = self.next_client_id.clone();
         let max_clients = self.max_clients;
+        let owner_uid = self.owner_uid;
+        let max_client_queue = self.max_client_queue;
 
         tokio::spawn(async move {
             loop {
@@ -157,16 +242,31 @@ impl IpcServer {
                     }
                 }
 
-                let (out_tx, out_rx) = mpsc::channel::<Arc<str>>(MAX_CLIENT_QUEUE);
+                // Check peer credentials for implicit authentication
+                let peer_authenticated = if let Some(peer_uid) = auth::peer_uid(&socket) {
+                    peer_uid == owner_uid
+                } else {
+                    false
+                };
+
+                let (out_tx, out_rx) = mpsc::channel::<Arc<str>>(max_client_queue);
                 clients.lock().await.insert(client_id, out_tx.clone());
 
+                let state = ClientState {
+                    authenticated: peer_authenticated,
+                    ..Default::default()
+                };
+                client_states.lock().await.insert(client_id, state);
+
                 let clients_for_remove = clients.clone();
+                let client_states_for_remove = client_states.clone();
                 let cmd_tx_for_client = cmd_tx.clone();
 
                 tokio::spawn(async move {
                     let _ =
                         handle_client(socket, client_id, out_tx, out_rx, cmd_tx_for_client).await;
                     clients_for_remove.lock().await.remove(&client_id);
+                    client_states_for_remove.lock().await.remove(&client_id);
                 });
             }
         });
@@ -197,35 +297,66 @@ async fn handle_client(
         }
     });
 
-    let mut lines = BufReader::new(read_half).lines();
-    while let Some(line) = lines.next_line().await.context("failed reading IPC line")? {
-        if line.len() > MAX_IPC_LINE_LENGTH {
-            let err_line = serde_json::to_string(&DaemonReply::Error {
-                ok: false,
-                error: format!(
-                    "line too long ({} bytes, max {})",
-                    line.len(),
-                    MAX_IPC_LINE_LENGTH
-                ),
-            })
-            .context("failed to serialize IPC length error")?;
-            let _ = out_tx.try_send(Arc::from(err_line));
-            continue;
+    let mut reader = BufReader::new(read_half);
+    let mut buf = Vec::with_capacity(MAX_IPC_LINE_LENGTH + 1);
+    loop {
+        buf.clear();
+        let mut found_newline = false;
+        let mut exceeded = false;
+
+        loop {
+            let available = reader.fill_buf().await.context("failed reading IPC")?;
+            if available.is_empty() {
+                break; // EOF
+            }
+
+            if let Some(pos) = available.iter().position(|&b| b == b'\n') {
+                let needed = pos;
+                if buf.len() + needed > MAX_IPC_LINE_LENGTH {
+                    exceeded = true;
+                    reader.consume(pos + 1);
+                    break;
+                }
+                buf.extend_from_slice(&available[..pos]);
+                reader.consume(pos + 1);
+                found_newline = true;
+                break;
+            } else {
+                let len = available.len();
+                if buf.len() + len > MAX_IPC_LINE_LENGTH {
+                    exceeded = true;
+                    reader.consume(len);
+                    break;
+                }
+                buf.extend_from_slice(available);
+                reader.consume(len);
+            }
         }
-        match serde_json::from_str::<IpcCommand>(&line) {
+
+        if exceeded {
+            let _ = out_tx.try_send(INVALID_COMMAND_LINE.clone());
+            break; // Close connection — can't reliably find next command boundary
+        }
+
+        if !found_newline {
+            break; // EOF
+        }
+        let line = match std::str::from_utf8(&buf) {
+            Ok(s) => s,
+            Err(_) => {
+                let _ = out_tx.try_send(INVALID_COMMAND_LINE.clone());
+                continue;
+            }
+        };
+        match serde_json::from_str::<IpcCommand>(line) {
             Ok(command) => {
                 cmd_tx
                     .send(CommandEvent { client_id, command })
                     .await
                     .map_err(|_| anyhow::anyhow!("daemon command channel closed"))?;
             }
-            Err(err) => {
-                let err_line = serde_json::to_string(&DaemonReply::Error {
-                    ok: false,
-                    error: format!("invalid command: {err}"),
-                })
-                .context("failed to serialize IPC parse error")?;
-                let _ = out_tx.try_send(Arc::from(err_line));
+            Err(_err) => {
+                let _ = out_tx.try_send(INVALID_COMMAND_LINE.clone());
             }
         }
     }
@@ -234,5 +365,5 @@ async fn handle_client(
 }
 
 #[cfg(test)]
-#[path = "server_tests.rs"]
+#[path = "server_tests/mod.rs"]
 mod tests;

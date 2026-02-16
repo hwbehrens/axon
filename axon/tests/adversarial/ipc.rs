@@ -11,7 +11,10 @@ async fn concurrent_ipc_flood() {
     let result = tokio::time::timeout(Duration::from_secs(30), async {
         let dir = tempdir().unwrap();
         let socket_path = dir.path().join("axon.sock");
-        let (server, mut cmd_rx) = IpcServer::bind(socket_path.clone(), 128).await.unwrap();
+        let (server, mut cmd_rx) =
+            IpcServer::bind(socket_path.clone(), 128, IpcServerConfig::default())
+                .await
+                .unwrap();
 
         let num_clients = 50;
         let cmds_per_client = 10;
@@ -31,6 +34,7 @@ async fn concurrent_ipc_flood() {
                             peers_connected: 0,
                             messages_sent: 0,
                             messages_received: 0,
+                            req_id: None,
                         },
                     )
                     .await;
@@ -101,7 +105,10 @@ async fn ipc_malformed_input_resilience() {
     let result = tokio::time::timeout(Duration::from_secs(10), async {
         let dir = tempdir().unwrap();
         let socket_path = dir.path().join("axon.sock");
-        let (server, mut cmd_rx) = IpcServer::bind(socket_path.clone(), 64).await.unwrap();
+        let (server, mut cmd_rx) =
+            IpcServer::bind(socket_path.clone(), 64, IpcServerConfig::default())
+                .await
+                .unwrap();
 
         // Spawn handler for valid commands.
         let server_clone = server.clone();
@@ -116,6 +123,7 @@ async fn ipc_malformed_input_resilience() {
                             peers_connected: 0,
                             messages_sent: 0,
                             messages_received: 0,
+                            req_id: None,
                         },
                     )
                     .await;
@@ -148,29 +156,38 @@ async fn ipc_malformed_input_resilience() {
                     "malformed input should get error reply, got: {line}"
                 );
             }
+        }
 
-            // Extremely long line (100KB of 'a' chars).
+        // --- Overlong line on a separate connection (closes connection) ---
+        // Bounded read: overlong lines close the connection since there's no
+        // reliable way to find the next command boundary in the stream.
+        {
+            let stream = UnixStream::connect(&socket_path).await.unwrap();
+            let (read_half, mut write_half) = stream.into_split();
+            let mut reader = BufReader::new(read_half);
+
             let long_line = format!("{}\n", "a".repeat(100_000));
-            write_half.write_all(long_line.as_bytes()).await.unwrap();
-            let mut line = String::new();
-            reader.read_line(&mut line).await.unwrap();
-            assert!(
-                line.contains("\"ok\":false"),
-                "long malformed input should get error reply, got: {line}"
-            );
+            // Server may close before we finish writing — ignore BrokenPipe
+            let _ = write_half.write_all(long_line.as_bytes()).await;
 
-            // Connection should still be alive — send a valid command.
-            write_half
-                .write_all(b"{\"cmd\":\"status\"}\n")
-                .await
-                .unwrap();
+            // Should get an error reply then the connection closes (EOF)
             let mut line = String::new();
-            reader.read_line(&mut line).await.unwrap();
-            let v: Value = serde_json::from_str(line.trim()).unwrap();
-            assert_eq!(
-                v["ok"], true,
-                "server must still respond after malformed input"
-            );
+            let n = reader.read_line(&mut line).await.unwrap();
+            if n > 0 {
+                assert!(
+                    line.contains("\"ok\":false"),
+                    "long malformed input should get error reply, got: {line}"
+                );
+            }
+            // Connection is closed — subsequent reads return EOF or ConnectionReset
+            let mut eof_line = String::new();
+            let eof_result = reader.read_line(&mut eof_line).await;
+            match eof_result {
+                Ok(0) => {}                                                     // clean EOF
+                Err(e) if e.kind() == std::io::ErrorKind::ConnectionReset => {} // RST on Linux
+                Ok(n) => panic!("expected EOF after overlong line, got {n} bytes: {eof_line}"),
+                Err(e) => panic!("unexpected error after overlong line: {e}"),
+            }
         }
 
         // --- Non-UTF8 binary garbage on a separate connection ---
@@ -229,7 +246,10 @@ async fn ipc_client_disconnect_under_load() {
     let result = tokio::time::timeout(Duration::from_secs(15), async {
         let dir = tempdir().unwrap();
         let socket_path = dir.path().join("axon.sock");
-        let (server, mut cmd_rx) = IpcServer::bind(socket_path.clone(), 64).await.unwrap();
+        let (server, mut cmd_rx) =
+            IpcServer::bind(socket_path.clone(), 64, IpcServerConfig::default())
+                .await
+                .unwrap();
 
         // Spawn command handler.
         let server_for_handler = server.clone();
@@ -244,6 +264,7 @@ async fn ipc_client_disconnect_under_load() {
                             peers_connected: 0,
                             messages_sent: 0,
                             messages_received: 0,
+                            req_id: None,
                         },
                     )
                     .await;

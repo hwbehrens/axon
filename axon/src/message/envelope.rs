@@ -9,6 +9,9 @@ use super::wire::now_millis;
 
 pub const PROTOCOL_VERSION: u8 = 1;
 
+/// Typed agent identity string (e.g. `ed25519.<32 hex chars>`).
+///
+/// See `spec/SPEC.md` §1 and `spec/WIRE_FORMAT.md` §3 for derivation rules.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct AgentId(String);
 
@@ -94,6 +97,11 @@ impl<'de> serde::Deserialize<'de> for AgentId {
     }
 }
 
+/// AXON wire envelope — the top-level JSON object for every QUIC message.
+///
+/// See `spec/MESSAGE_TYPES.md` §Envelope and `spec/WIRE_FORMAT.md` §4 for the
+/// normative schema. The `kind` field selects the payload schema; `payload`
+/// carries kind-specific data (see `spec/MESSAGE_TYPES.md` §Payload Schemas).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Envelope {
     pub v: u8,

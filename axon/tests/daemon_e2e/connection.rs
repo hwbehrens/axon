@@ -132,10 +132,10 @@ async fn initiator_rule_timeout_returns_error() {
     let elapsed = start.elapsed();
 
     assert_eq!(reply["ok"], json!(false));
-    let error = reply["error"].as_str().unwrap().to_lowercase();
-    assert!(
-        error.contains("initiator rule"),
-        "error should mention initiator rule, got: {error}"
+    let error = reply["error"].as_str().unwrap();
+    assert_eq!(
+        error, "peer_unreachable",
+        "error should be peer_unreachable, got: {error}"
     );
     assert!(
         elapsed >= Duration::from_secs(1),

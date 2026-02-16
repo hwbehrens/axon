@@ -18,8 +18,9 @@ spec/                      Protocol specifications (authoritative)
   SPEC.md                  Architecture + lifecycle (QUIC, identity, discovery, handshake)
   MESSAGE_TYPES.md         Message kinds + payload schemas + stream mapping
   WIRE_FORMAT.md           Normative interoperable wire format
+  IPC.md                   IPC protocol, Unix socket commands, auth, receive buffer
 
-RUBRIC.md                  Contribution scoring rubric (100-point checklist across 8 categories)
+rubrics/                   Evaluation rubrics (quality, documentation, alignment)
 evaluations/               Agent evaluation results (not part of the implementation)
 
 axon/                      Rust implementation (Cargo crate)
@@ -51,7 +52,7 @@ Client (OpenClaw/CLI) ←→ [Unix Socket IPC] ←→ AXON Daemon ←→ [QUIC/U
 - **Identity**: Ed25519 signing keypair. Agent ID derived from SHA-256 of public key. Self-signed X.509 cert generated on each startup for QUIC TLS.
 - **Discovery**: mDNS (`_axon._udp.local.`) broadcasts agent ID and public key. Static peers via config file for Tailscale/VPN. Discovery is trait-based for future extensibility.
 - **Transport**: QUIC via `quinn`. TLS 1.3 with forward secrecy. Unidirectional streams for fire-and-forget messages, bidirectional streams for request/response. 0-RTT reconnection.
-- **IPC**: Unix domain socket at `~/.axon/axon.sock`. Line-delimited JSON commands (`send`, `peers`, `status`). Inbound messages forwarded to all connected IPC clients.
+- **IPC**: Unix domain socket at `~/.axon/axon.sock`. Line-delimited JSON. IPC v1: `send`, `peers`, `status` with legacy broadcast. IPC v2: `hello` handshake, token/peer-credential auth, `req_id` correlation, `whoami`, `inbox`, `ack`, `subscribe`. v1 clients receive all inbound (broadcast); v2 clients receive nothing unsolicited unless subscribed.
 - **Messages**: JSON envelopes with version, UUID, sender/receiver, timestamp, kind, and payload. Kinds: `hello`, `ping/pong`, `query/response`, `delegate/ack/result`, `notify`, `cancel`, `discover/capabilities`, `error`.
 
 ## Module Map (summary)
@@ -127,4 +128,5 @@ Detailed requirements and recipes live in `CONTRIBUTING.md`. Key conventions:
 1. `spec/SPEC.md` — architecture + lifecycle (identity, discovery, transport, handshake)
 2. `spec/MESSAGE_TYPES.md` — message kinds, payload schemas, stream mapping
 3. `spec/WIRE_FORMAT.md` — normative interoperable wire format
-4. `CONTRIBUTING.md` — contribution workflow, full module map, invariants, testing requirements
+4. `spec/IPC.md` — IPC protocol, Unix socket commands, auth, receive buffer
+5. `CONTRIBUTING.md` — contribution workflow, full module map, invariants, testing requirements

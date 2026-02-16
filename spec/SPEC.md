@@ -40,7 +40,7 @@ OpenClaw ←→ [Unix Socket] ←→ AXON Daemon ←→ [QUIC/UDP] ←→ AXON D
 ## 2. Discovery
 
 ### Primary: mDNS/DNS-SD (LAN, zero-config)
-- Service type: `_axon._udp.local`
+- Service type: `_axon._udp.local.`
 - TXT records: `agent_id=<hex>`, `pubkey=<base64 Ed25519 public key>`
 - Browse continuously for peers; maintain a peer table.
 - Stale peer removal: 60s without mDNS refresh.
@@ -134,16 +134,17 @@ Two implementations for v0.2: `MdnsDiscovery` and `StaticDiscovery`. Both feed t
 - `id`: unique message identifier (UUID v4).
 - `from` / `to`: agent IDs (typed, e.g. `ed25519.` + first 16 bytes of SHA-256 of public key, hex, 40 chars).
 - `ts`: unix milliseconds.
-- `kind`: message type string. See `message-types.md` for the full set.
+- `kind`: message type string. See `MESSAGE_TYPES.md` for the full set.
 - `ref`: the message ID this responds to. Null for initiating messages.
 - `payload`: kind-specific data. Unknown fields MUST be ignored (forward compatibility).
 
 ### Payload Kinds
 
+The `payload` field carries kind-specific data. Note: `kind` belongs to the **envelope**, not the payload. See `MESSAGE_TYPES.md` §Payload Schemas for the full normative set. A brief summary of common kinds:
+
 **query** — Ask another agent a question.
 ```json
 {
-  "kind": "query",
   "question": "What are the kids' swim schedules this week?",
   "domain": "family.calendar",
   "max_tokens": 200,
@@ -158,7 +159,6 @@ Two implementations for v0.2: `MdnsDiscovery` and `StaticDiscovery`. Both feed t
 **response** — Answer to a query.
 ```json
 {
-  "kind": "response",
   "data": { ... },
   "summary": "Three swim practices: Mon/Wed/Fri 4-5pm"
 }
@@ -167,7 +167,6 @@ Two implementations for v0.2: `MdnsDiscovery` and `StaticDiscovery`. Both feed t
 **delegate** — Ask another agent to perform a task.
 ```json
 {
-  "kind": "delegate",
   "task": "Send a message to the family chat about dinner plans",
   "context": { "dinner_time": "7pm" },
   "priority": "normal",
@@ -178,7 +177,6 @@ Two implementations for v0.2: `MdnsDiscovery` and `StaticDiscovery`. Both feed t
 **notify** — Inform without expecting a response.
 ```json
 {
-  "kind": "notify",
   "topic": "user.location",
   "data": { "status": "heading out", "eta_back": "2h" },
   "importance": "low"
@@ -188,37 +186,42 @@ Two implementations for v0.2: `MdnsDiscovery` and `StaticDiscovery`. Both feed t
 
 ## 5. Local IPC: Unix Domain Socket
 
+The full IPC specification is in [`spec/IPC.md`](./IPC.md). This section provides a summary.
+
 ### Socket Path
 - `~/.axon/axon.sock`
-- Removed on startup (clean stale sockets). Created fresh.
+- Removed on startup (clean stale sockets). Created fresh. Permissions: mode `0600`.
 
 ### Protocol
-Line-delimited JSON over Unix socket. Each line is one complete JSON object.
+Line-delimited JSON over Unix socket. Each line is one complete JSON object. Protocol versioning via optional `hello` handshake (see `IPC.md` §1.2).
 
-### Client → Daemon (commands)
+### Core Commands (v1)
 ```json
 {"cmd": "send", "to": "<agent_id>", "kind": "query", "payload": { ... }}
-{"cmd": "send", "to": "<agent_id>", "kind": "delegate", "payload": { ... }}
-{"cmd": "send", "to": "<agent_id>", "kind": "notify", "payload": { ... }}
 {"cmd": "peers"}
 {"cmd": "status"}
 ```
 
-### Daemon → Client (responses + inbound)
-```json
-{"ok": true, "msg_id": "uuid"}
-{"ok": true, "peers": [{"id": "a1b2...", "addr": "192.168.1.50:7100", "status": "connected", "rtt_ms": 0.4}]}
-{"ok": true, "uptime_secs": 3600, "peers_connected": 1, "messages_sent": 42, "messages_received": 38}
-{"ok": false, "error": "peer not found: ed25519.e5f6a7b8"}
-```
+### v2 Commands
+- **`hello`** — Protocol version negotiation, feature discovery, and consumer registration.
+- **`auth`** — Token-based authentication (fallback when peer credentials unavailable).
+- **`whoami`** — Daemon identity (agent_id, public key, version).
+- **`inbox`** — Fetch buffered inbound messages (poll pattern).
+- **`ack`** — Advance consumer acknowledgement cursor.
+- **`subscribe`** — Stream inbound messages with optional replay and kind filtering.
 
-```json
-{"inbound": true, "envelope": { ... full envelope ... }}
-```
+IPC v2 commands include a `req_id` echoed in responses so clients can correlate responses while `subscribe` events interleave. See `IPC.md` §1.3.
+
+### Receive Buffer
+The IPC layer maintains a bounded in-memory receive buffer (default: 1000 messages, 24h TTL) so that messages arriving between client connections are not lost. Buffered messages have a daemon-assigned monotonic `seq`. IPC v2 inbox/ack state is tracked per `consumer` (from `hello`), and `ack` advances `acked_seq` for that consumer. See `IPC.md` §4.
+
+### Authentication
+Peer credential verification (`SO_PEERCRED`/`getpeereid`) as primary mechanism; token file as fallback. v1 clients (no `hello`) are exempt. See `IPC.md` §2.
 
 ### Multiple IPC Clients
 - Multiple clients can connect to the socket simultaneously.
-- All connected clients receive inbound messages (broadcast to all IPC clients).
+- v1 clients receive inbound messages via broadcast (legacy behavior).
+- v2 clients receive inbound messages only via `subscribe` or `inbox`.
 - Commands are handled by whichever client sends them.
 
 ## 6. CLI
@@ -288,7 +291,7 @@ All CLI commands (except `daemon`) connect to the Unix socket, send a command, p
 
 ## 9. Error Handling
 
-- **Peer unreachable:** Fail immediately, return error to IPC client. The calling agent can retry if it wants. AXON is a transport, not a queue.
+- **Peer unreachable:** Fail immediately, return error to IPC client. The calling agent can retry if it wants. AXON is a transport — peer-to-peer delivery has no store-and-forward semantics. (The IPC layer maintains a local receive buffer for inbound messages; see `IPC.md` §4.)
 - **Invalid peer cert:** Reject connection, log warning.
 - **Malformed message:** Drop, log warning. Don't crash.
 - **IPC client disconnects:** Clean up, no effect on other clients or QUIC connections.
@@ -298,7 +301,7 @@ All CLI commands (except `daemon`) connect to the Unix socket, send a command, p
 - **Forward secrecy:** Provided by QUIC's TLS 1.3. Ephemeral key exchange per connection. Compromising the static Ed25519 key does NOT decrypt past sessions.
 - **MITM on first discovery (TOFU):** mDNS is unauthenticated. First discovery trusts the pubkey advertised. Mitigations: (a) known_peers.json pins pubkeys after first contact, (b) static config with pre-shared pubkeys for high-security setups, (c) future: out-of-band verification (QR code, etc.).
 - **0-RTT replay:** QUIC 0-RTT data can be replayed. Mitigation: message IDs (UUIDs) for deduplication at application layer. Notify messages are idempotent anyway.
-- **Local IPC security:** Unix socket permissions (user-only). No authentication beyond filesystem ACLs.
+- **Local IPC security:** Unix socket permissions (`0600`, user-only) as baseline. IPC v2 adds peer-credential verification and token-based authentication as defense-in-depth. See [`IPC.md`](./IPC.md) §2 for details.
 
 ## 11. Dependencies
 

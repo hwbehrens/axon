@@ -9,7 +9,9 @@ use crate::*;
 async fn ipc_send_command_roundtrip() {
     let dir = tempdir().unwrap();
     let socket_path = dir.path().join("axon.sock");
-    let (server, mut cmd_rx) = IpcServer::bind(socket_path.clone(), 64).await.unwrap();
+    let (server, mut cmd_rx) = IpcServer::bind(socket_path.clone(), 64, IpcServerConfig::default())
+        .await
+        .unwrap();
 
     let mut client = UnixStream::connect(&socket_path).await.unwrap();
 
@@ -20,7 +22,7 @@ async fn ipc_send_command_roundtrip() {
         .await
         .unwrap()
         .unwrap();
-    assert!(matches!(cmd.command, IpcCommand::Peers));
+    assert!(matches!(cmd.command, IpcCommand::Peers { .. }));
 
     // Reply.
     server
@@ -29,6 +31,7 @@ async fn ipc_send_command_roundtrip() {
             &DaemonReply::Peers {
                 ok: true,
                 peers: vec![],
+                req_id: None,
             },
         )
         .await
@@ -47,7 +50,9 @@ async fn ipc_send_command_roundtrip() {
 async fn ipc_status_roundtrip() {
     let dir = tempdir().unwrap();
     let socket_path = dir.path().join("axon.sock");
-    let (server, mut cmd_rx) = IpcServer::bind(socket_path.clone(), 64).await.unwrap();
+    let (server, mut cmd_rx) = IpcServer::bind(socket_path.clone(), 64, IpcServerConfig::default())
+        .await
+        .unwrap();
 
     let mut client = UnixStream::connect(&socket_path).await.unwrap();
     client.write_all(b"{\"cmd\":\"status\"}\n").await.unwrap();
@@ -56,7 +61,7 @@ async fn ipc_status_roundtrip() {
         .await
         .unwrap()
         .unwrap();
-    assert!(matches!(cmd.command, IpcCommand::Status));
+    assert!(matches!(cmd.command, IpcCommand::Status { .. }));
 
     server
         .send_reply(
@@ -67,6 +72,7 @@ async fn ipc_status_roundtrip() {
                 peers_connected: 2,
                 messages_sent: 10,
                 messages_received: 5,
+                req_id: None,
             },
         )
         .await
@@ -88,7 +94,9 @@ async fn ipc_status_roundtrip() {
 async fn ipc_multiple_commands_sequential() {
     let dir = tempdir().unwrap();
     let socket_path = dir.path().join("axon.sock");
-    let (server, mut cmd_rx) = IpcServer::bind(socket_path.clone(), 64).await.unwrap();
+    let (server, mut cmd_rx) = IpcServer::bind(socket_path.clone(), 64, IpcServerConfig::default())
+        .await
+        .unwrap();
 
     let mut client = UnixStream::connect(&socket_path).await.unwrap();
     tokio::time::sleep(Duration::from_millis(20)).await;
@@ -111,6 +119,7 @@ async fn ipc_multiple_commands_sequential() {
                     peers_connected: 0,
                     messages_sent: 0,
                     messages_received: 0,
+                    req_id: None,
                 },
             )
             .await
@@ -129,7 +138,9 @@ async fn ipc_multiple_commands_sequential() {
 async fn ipc_invalid_command_returns_error() {
     let dir = tempdir().unwrap();
     let socket_path = dir.path().join("axon.sock");
-    let (_server, _cmd_rx) = IpcServer::bind(socket_path.clone(), 64).await.unwrap();
+    let (_server, _cmd_rx) = IpcServer::bind(socket_path.clone(), 64, IpcServerConfig::default())
+        .await
+        .unwrap();
 
     let mut client = UnixStream::connect(&socket_path).await.unwrap();
     client
@@ -141,7 +152,7 @@ async fn ipc_invalid_command_returns_error() {
     let mut reader = BufReader::new(client);
     reader.read_line(&mut line).await.unwrap();
     assert!(line.contains("\"ok\":false"));
-    assert!(line.contains("invalid command"));
+    assert!(line.contains("invalid_command"));
 }
 
 /// IPC send command with ref field deserializes correctly.
@@ -179,7 +190,9 @@ fn ipc_send_without_ref_defaults_to_none() {
 async fn ipc_client_disconnect_isolation() {
     let dir = tempdir().unwrap();
     let socket_path = dir.path().join("axon.sock");
-    let (server, _cmd_rx) = IpcServer::bind(socket_path.clone(), 64).await.unwrap();
+    let (server, _cmd_rx) = IpcServer::bind(socket_path.clone(), 64, IpcServerConfig::default())
+        .await
+        .unwrap();
 
     let client_a = UnixStream::connect(&socket_path).await.unwrap();
     let mut client_b = UnixStream::connect(&socket_path).await.unwrap();
@@ -210,7 +223,9 @@ async fn ipc_client_disconnect_isolation() {
 async fn ipc_broadcast_to_all_clients() {
     let dir = tempdir().unwrap();
     let socket_path = dir.path().join("axon.sock");
-    let (server, _cmd_rx) = IpcServer::bind(socket_path.clone(), 64).await.unwrap();
+    let (server, _cmd_rx) = IpcServer::bind(socket_path.clone(), 64, IpcServerConfig::default())
+        .await
+        .unwrap();
 
     let mut client_a = UnixStream::connect(&socket_path).await.unwrap();
     let mut client_b = UnixStream::connect(&socket_path).await.unwrap();
@@ -239,7 +254,9 @@ async fn ipc_broadcast_to_all_clients() {
 async fn ipc_cleanup_removes_socket() {
     let dir = tempdir().unwrap();
     let socket_path = dir.path().join("axon.sock");
-    let (server, _cmd_rx) = IpcServer::bind(socket_path.clone(), 64).await.unwrap();
+    let (server, _cmd_rx) = IpcServer::bind(socket_path.clone(), 64, IpcServerConfig::default())
+        .await
+        .unwrap();
 
     assert!(socket_path.exists());
     server.cleanup_socket().unwrap();

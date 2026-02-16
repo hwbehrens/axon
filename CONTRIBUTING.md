@@ -8,7 +8,9 @@ Read these in order:
 
 1. [`spec/SPEC.md`](./spec/SPEC.md) — protocol architecture (QUIC, Ed25519, discovery, lifecycle)
 2. [`spec/MESSAGE_TYPES.md`](./spec/MESSAGE_TYPES.md) — all message kinds, payload schemas, stream mapping
-3. [`AGENTS.md`](./AGENTS.md) — module map, key invariants, recipes, testing requirements
+3. [`spec/WIRE_FORMAT.md`](./spec/WIRE_FORMAT.md) — normative wire format for interoperable implementations
+4. [`spec/IPC.md`](./spec/IPC.md) — IPC protocol, Unix socket commands, auth, receive buffer
+5. [`AGENTS.md`](./AGENTS.md) — module map, key invariants, recipes, testing requirements
 
 The spec is authoritative. If the implementation disagrees with the spec, the spec wins.
 
@@ -25,9 +27,17 @@ Know where to make changes before you start editing:
 | Hello handshake / version negotiation | `axon/src/transport/handshake.rs` |
 | IPC command/reply schema | `axon/src/ipc/protocol.rs` |
 | IPC server behavior | `axon/src/ipc/server.rs` |
+| IPC dispatch + hello/auth/req_id gating | `axon/src/ipc/handlers/mod.rs` |
+| IPC hello + auth handlers | `axon/src/ipc/handlers/hello_auth.rs` |
+| IPC v2 commands (whoami/inbox/ack/subscribe) | `axon/src/ipc/handlers/commands.rs` |
+| IPC inbound broadcast fanout | `axon/src/ipc/handlers/broadcast.rs` |
+| IPC receive buffer | `axon/src/ipc/receive_buffer.rs` |
+| IPC peer credential auth | `axon/src/ipc/auth.rs` |
+| IPC backend trait | `axon/src/ipc/backend.rs` |
 | Peer table operations | `axon/src/peer_table.rs` |
 | mDNS / static discovery | `axon/src/discovery.rs` |
 | Daemon orchestration | `axon/src/daemon/mod.rs` |
+| IPC token lifecycle (generate, validate, reload) | `axon/src/daemon/token.rs` |
 | Reconnection logic | `axon/src/daemon/reconnect.rs` |
 | CLI commands | `axon/src/main.rs` |
 | Ed25519 identity / agent ID | `axon/src/identity.rs` |
@@ -66,6 +76,13 @@ All source files must stay **under 500 lines**. If a file approaches this limit,
 - Use existing libraries and utilities. Do not add new dependencies without justification.
 - Semantic field names: `question` not `q`, `report_back` not `rb`. LLMs infer meaning from names.
 - No comments unless the code is genuinely complex. The code should be self-documenting.
+- Prefer separating mechanical refactors (file splits, renames) from functional changes into distinct commits when possible.
+
+### Commit messages
+
+- State the user-visible behavior change in the subject line, not just what code was touched.
+- Note spec impact when applicable (e.g., "IPC: reject inbox limit outside 1–1000 (IPC.md §3.3)").
+- Separate mechanical refactors from functional changes into distinct commits.
 
 ### Security
 

@@ -431,6 +431,10 @@ Valid error codes:
 
 ## 10. IPC wire protocol (Unix domain socket)
 
+> **Normative reference:** IPC v2 is fully specified in [`spec/IPC.md`](IPC.md).
+> This section covers the baseline wire shapes common to both v1 and v2.
+> Where this section and `spec/IPC.md` conflict, `spec/IPC.md` takes precedence.
+
 ### 10.1 Socket location and permissions
 
 Default socket path: `~/.axon/axon.sock`
@@ -462,6 +466,10 @@ Default socket path: `~/.axon/axon.sock`
 {"cmd":"status"}
 ```
 
+> **v2 additions:** IPC v2 adds `hello`, `auth`, `whoami`, `inbox`, `ack`, and `subscribe` commands.
+> For v2 connections, `req_id` is mandatory on all commands except `hello`.
+> See [`spec/IPC.md`](IPC.md) §3 for full schemas.
+
 ### 10.4 Daemon → client replies
 
 #### SendAck
@@ -480,9 +488,19 @@ Default socket path: `~/.axon/axon.sock`
 ```
 
 #### Error
+
+v1:
 ```json
-{"ok":false,"error":"peer not found: e5f6a7b8"}
+{"ok":false,"error":"peer_not_found"}
 ```
+
+v2 (includes `req_id`):
+```json
+{"ok":false,"req_id":"r1","error":"peer_not_found"}
+```
+
+The `error` field MUST be a machine-readable `IpcErrorCode` (snake\_case).
+See [`spec/IPC.md`](IPC.md) §5 for the full list of error codes.
 
 #### Inbound message (broadcast to all connected clients)
 ```json
@@ -492,8 +510,19 @@ Default socket path: `~/.axon/axon.sock`
 ### 10.5 Multiple IPC clients
 
 - Multiple clients may connect simultaneously (default limit: **64**).
-- All connected clients receive all inbound network envelopes (broadcast).
 - If the client limit is reached, new connections are rejected.
+
+**Delivery rules by connection type:**
+
+| Connection type | Inbound delivery |
+|---|---|
+| **v1** (no `hello`) | Legacy broadcast: all inbound messages pushed to all connected v1 clients. |
+| **v2, no subscription** | No unsolicited inbound messages. Client MUST use `inbox` (pull) to retrieve buffered messages. |
+| **v2, active subscription** | Inbound messages matching the subscription filter are pushed as `{"event": "inbound", ...}` lines. |
+
+v1 broadcast and v2 subscriptions are separate delivery paths. See [`spec/IPC.md`](IPC.md) §3.5.
+
+**Note:** Subscribe replay bursts are bounded by the receive buffer capacity (`ipc.buffer_size`, default 1000 messages). See [`spec/IPC.md`](IPC.md) §3.5 for details.
 
 ---
 
@@ -501,7 +530,7 @@ Default socket path: `~/.axon/axon.sock`
 
 ### 11.1 Service type
 
-- Service type: **`_axon._udp.local`**
+- Service type: **`_axon._udp.local.`**
 - Underlying transport: UDP (advertises QUIC UDP port)
 
 ### 11.2 TXT record format (normative)
@@ -553,7 +582,7 @@ A compatible implementation MUST:
 7. Enforce hello gating: drop unauthenticated uni; error on unauthenticated bidi non-hello (§4.4).
 8. Implement replay dedup by envelope UUID with 300s TTL (§7.4).
 9. Implement the IPC newline-delimited JSON protocol if providing a daemon-compatible local API (§10).
-10. Implement mDNS discovery `_axon._udp.local` with required TXT keys if providing zero-config LAN discovery (§11).
+10. Implement mDNS discovery `_axon._udp.local.` with required TXT keys if providing zero-config LAN discovery (§11).
 
 ---
 

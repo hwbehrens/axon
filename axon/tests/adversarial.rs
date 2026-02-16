@@ -6,7 +6,7 @@
 use std::time::Duration;
 
 use axon::config::{Config, KnownPeer, load_known_peers, save_known_peers};
-use axon::ipc::{DaemonReply, IpcServer};
+use axon::ipc::{DaemonReply, IpcServer, IpcServerConfig};
 use axon::message::{Envelope, MAX_MESSAGE_SIZE, MessageKind, PROTOCOL_VERSION, decode, encode};
 use axon::peer_table::{ConnectionStatus, PeerTable};
 use serde_json::{Value, json};
@@ -16,6 +16,7 @@ use tokio::net::UnixStream;
 
 mod adversarial {
     pub(crate) mod ipc;
+    pub(crate) mod ipc_framing;
     pub(crate) mod peer_table;
     pub(crate) mod validation;
 }

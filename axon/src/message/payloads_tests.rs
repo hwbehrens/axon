@@ -129,6 +129,31 @@ fn cancel_payload_serde() {
 }
 
 #[test]
+fn cancel_missing_reason_tolerant() {
+    let result = serde_json::from_value::<CancelPayload>(json!({}));
+    assert!(
+        result.is_ok(),
+        "must tolerate missing reason for backward compat"
+    );
+    assert_eq!(result.unwrap().reason, None);
+}
+
+#[test]
+fn result_error_omitted_when_none() {
+    let res = ResultPayload {
+        status: TaskStatus::Completed,
+        outcome: "Done".to_string(),
+        data: None,
+        error: None,
+    };
+    let v = serde_json::to_value(&res).unwrap();
+    assert!(
+        v.get("error").is_none(),
+        "error field must be omitted when None"
+    );
+}
+
+#[test]
 fn discover_capabilities_payload_serde() {
     let d = DiscoverPayload {};
     let v = serde_json::to_value(&d).unwrap();

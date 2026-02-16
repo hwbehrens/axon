@@ -44,6 +44,9 @@ pub(crate) async fn send_request(
         .context("request timed out after 30s")??;
     let response = serde_json::from_slice::<Envelope>(&response_bytes)
         .context("failed to decode response envelope")?;
+    response
+        .validate()
+        .context("response envelope failed validation")?;
     Ok(response)
 }
 

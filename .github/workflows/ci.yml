@@ -17,8 +17,57 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  check-score:
+    name: score check
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    steps:
+      - name: Check for self-assessment score
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          if echo "$PR_BODY" | grep -qP '\*\*Score:\s*\d+\s*/\s*100\*\*'; then
+            score=$(echo "$PR_BODY" | grep -oP '\*\*Score:\s*\K\d+')
+            echo "✅ Self-assessment score: $score/100"
+            if [ "$score" -lt 70 ]; then
+              echo "⚠️  Score below 70 — please review RUBRIC.md and address gaps before requesting review."
+              exit 1
+            fi
+          else
+            echo "❌ No self-assessment score found in PR body."
+            echo "Please add a score line: **Score: NN/100** (see RUBRIC.md)"
+            exit 1
+          fi
+
+  file-length:
+    name: file length
+    needs: [check-score]
+    if: always() && (needs.check-score.result == 'success' || needs.check-score.result == 'skipped')
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check .rs files are under 500 lines
+        run: |
+          failed=0
+          while IFS= read -r file; do
+            lines=$(wc -l < "$file")
+            if [ "$lines" -ge 500 ]; then
+              echo "❌ $file: $lines lines (limit 500)"
+              failed=1
+            fi
+          done < <(find axon -name '*.rs' -type f)
+          if [ "$failed" -eq 1 ]; then
+            echo "::error::One or more .rs files exceed the 500-line limit."
+            exit 1
+          fi
+          echo "✅ All .rs files are under 500 lines."
+
   fmt:
     name: fmt
+    needs: [file-length]
+    if: always() && (needs.file-length.result == 'success' || needs.file-length.result == 'skipped')
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -31,6 +80,7 @@ jobs:
 
   clippy:
     name: clippy
+    needs: [fmt]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -46,6 +96,7 @@ jobs:
 
   test:
     name: test
+    needs: [clippy]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -59,6 +110,7 @@ jobs:
 
   bench:
     name: bench
+    needs: [test]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -72,6 +124,7 @@ jobs:
 
   fuzz:
     name: fuzz
+    needs: [bench]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
