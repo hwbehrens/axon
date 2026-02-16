@@ -98,6 +98,11 @@ impl ReceiveBuffer {
         self
     }
 
+    #[cfg(test)]
+    pub fn total_bytes(&self) -> usize {
+        self.total_bytes
+    }
+
     pub fn push(&mut self, envelope: Envelope) -> (u64, u64) {
         self.evict_expired();
 
@@ -220,6 +225,8 @@ impl ReceiveBuffer {
         replay_to_seq: u64,
         kinds: Option<&[MessageKind]>,
     ) -> Vec<BufferedMessage> {
+        self.evict_expired();
+
         let consumer_state = self.consumers.entry(consumer.to_string()).or_default();
         consumer_state.last_used_ms = (self.now_millis)();
         let acked_seq = consumer_state.acked_seq;

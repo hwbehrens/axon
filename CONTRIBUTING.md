@@ -37,6 +37,7 @@ Know where to make changes before you start editing:
 | Peer table operations | `axon/src/peer_table.rs` |
 | mDNS / static discovery | `axon/src/discovery.rs` |
 | Daemon orchestration | `axon/src/daemon/mod.rs` |
+| IPC token lifecycle (generate, validate, reload) | `axon/src/daemon/token.rs` |
 | Reconnection logic | `axon/src/daemon/reconnect.rs` |
 | CLI commands | `axon/src/main.rs` |
 | Ed25519 identity / agent ID | `axon/src/identity.rs` |

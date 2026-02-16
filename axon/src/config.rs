@@ -85,6 +85,8 @@ pub struct IpcConfig {
     pub buffer_byte_cap: Option<usize>,
     #[serde(default)]
     pub token_path: Option<String>,
+    #[serde(default)]
+    pub max_client_queue: Option<usize>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
@@ -166,6 +168,13 @@ impl Config {
             .as_ref()
             .and_then(|c| c.buffer_byte_cap)
             .unwrap_or(4_194_304)
+    }
+
+    pub fn effective_max_client_queue(&self) -> usize {
+        self.ipc
+            .as_ref()
+            .and_then(|c| c.max_client_queue)
+            .unwrap_or(1024)
     }
 
     pub fn effective_token_path(&self, root: &Path) -> PathBuf {

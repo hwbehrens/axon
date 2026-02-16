@@ -171,7 +171,8 @@ Located at `~/.axon/config.toml` (or `<axon_root>/config.toml`).
 | `ipc.allow_v1` | `bool` | `true` | When `false`, reject IPC v1 (no-hello) connections and require v2+ handshake. |
 | `ipc.buffer_size` | `usize` | `1000` | Maximum number of messages in the IPC receive buffer. Set to `0` to disable buffering. |
 | `ipc.buffer_ttl_secs` | `u64` | `86400` | Time-to-live for buffered messages in seconds (default: 24 hours). Expired messages are evicted lazily. |
-| `ipc.buffer_byte_cap` | `usize` | `4194304` | Hard byte cap on receive buffer memory (default: 4 MB). Oldest messages are evicted when exceeded. |
+| `ipc.buffer_byte_cap` | `usize` | `4194304` | Approximate byte cap on receive buffer memory (default: 4 MB). Uses envelope size estimates; actual usage may slightly exceed this under adversarial payloads. Oldest messages are evicted when exceeded. |
+| `ipc.max_client_queue` | `usize` | `1024` | Per-IPC-client outbound message queue depth. Messages are dropped if a client falls behind. |
 | `ipc.token_path` | `String` | `~/.axon/ipc-token` | Path to the IPC auth token file (used when peer credentials are unavailable). |
 
 > **⚠️ Hardened mode note:** The bundled CLI currently uses IPC v1 (no `hello` handshake). Setting `ipc.allow_v1 = false` will cause all CLI commands (`axon peers`, `axon send`, etc.) to be rejected with `hello_required`. Use raw IPC or a v2-capable client when hardened mode is enabled.
@@ -195,7 +196,6 @@ These are compile-time constants and cannot be changed via configuration.
 | `MAX_MESSAGE_SIZE` | `65536` (64 KB) | `message/wire.rs` | Maximum encoded envelope size. Messages exceeding this are rejected. |
 | `REQUEST_TIMEOUT` | `30s` | `transport/mod.rs` | Timeout for bidirectional request/response exchanges (query, delegate, etc.). |
 | `STALE_TIMEOUT` | `60s` | `peer_table.rs` | Discovered (non-static, non-cached) peers with no activity for this duration are removed. |
-| `MAX_CLIENT_QUEUE` | `1024` | `ipc/server.rs` | Per-IPC-client outbound message queue depth. Messages are dropped if a client falls behind. |
 | `MAX_IPC_LINE_LENGTH` | `64 KB` | `ipc/server.rs` | Maximum length of a single IPC command line. Overlong lines are rejected with `invalid_command`. |
 | Replay cache TTL | `300s` (5 min) | `daemon/mod.rs` | Duration for which message UUIDs are remembered to detect replays. |
 | Replay cache max entries | `100,000` | `daemon/mod.rs` | Maximum replay cache size. Oldest entries are evicted when exceeded. |
@@ -206,7 +206,7 @@ These are compile-time constants and cannot be changed via configuration.
 | Initiator-rule wait | `2s` | `daemon/command_handler.rs` | When the higher-ID daemon sends a message, it waits this long for the lower-ID peer to initiate a connection. |
 | `IPC_VERSION` | `2` | `ipc/handlers/mod.rs` | Maximum IPC protocol version supported by the daemon. |
 | `MAX_CONSUMER_LEN` | `64` bytes | `ipc/handlers/mod.rs` | Maximum length of a consumer name in `hello`. |
-| `DEFAULT_BYTE_CAP` | `4194304` (4 MB) | `ipc/receive_buffer.rs` | Default hard byte cap on receive buffer memory. |
+| `DEFAULT_BYTE_CAP` | `4194304` (4 MB) | `ipc/receive_buffer.rs` | Default approximate byte cap on receive buffer memory. |
 | Max consumers | `1024` | `ipc/receive_buffer.rs` | Maximum number of tracked consumer states before LRU eviction. |
 
 ## Documentation

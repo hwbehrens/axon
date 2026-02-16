@@ -17,8 +17,7 @@ async fn subscribe_replay_true_replays_buffered() {
     let dir = tempfile::tempdir().unwrap();
     let socket_path = dir.path().join("axon.sock");
     let config = IpcServerConfig {
-        token: Some(TOKEN.to_string()),
-        ..Default::default()
+        ..IpcServerConfig::default().with_token(Some(TOKEN.to_string()))
     };
     let (server, mut cmd_rx) = IpcServer::bind(socket_path.clone(), 64, config)
         .await
@@ -112,8 +111,7 @@ async fn subscribe_cutover_no_message_loss() {
     let dir = tempfile::tempdir().unwrap();
     let socket_path = dir.path().join("axon.sock");
     let config = IpcServerConfig {
-        token: Some(TOKEN.to_string()),
-        ..Default::default()
+        ..IpcServerConfig::default().with_token(Some(TOKEN.to_string()))
     };
     let (server, mut cmd_rx) = IpcServer::bind(socket_path.clone(), 64, config)
         .await

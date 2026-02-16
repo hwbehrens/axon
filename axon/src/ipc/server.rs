@@ -17,7 +17,6 @@ use super::protocol::{CommandEvent, DaemonReply, IpcCommand};
 use super::receive_buffer::ReceiveBuffer;
 use crate::message::Envelope;
 
-const MAX_CLIENT_QUEUE: usize = 1024;
 const MAX_IPC_LINE_LENGTH: usize = 64 * 1024; // 64 KB, aligned with MAX_MESSAGE_SIZE
 
 static INVALID_COMMAND_LINE: LazyLock<Arc<str>> = LazyLock::new(|| {
@@ -38,6 +37,8 @@ pub use super::handlers::IpcServerConfig;
 // IPC server
 // ---------------------------------------------------------------------------
 
+/// Unix domain socket IPC server that bridges local clients to the AXON daemon.
+/// Handles connection accept, per-client read/write loops, and command dispatch.
 #[derive(Clone)]
 pub struct IpcServer {
     socket_path: PathBuf,
@@ -47,6 +48,7 @@ pub struct IpcServer {
     next_client_id: Arc<AtomicU64>,
     handlers: Arc<IpcHandlers>,
     owner_uid: u32,
+    max_client_queue: usize,
 }
 
 impl IpcServer {
@@ -100,6 +102,7 @@ impl IpcServer {
             })?;
 
         let owner_uid = unsafe { libc::getuid() };
+        let max_client_queue = config.max_client_queue;
 
         let clients = Arc::new(Mutex::new(HashMap::new()));
         let client_states = Arc::new(Mutex::new(HashMap::new()));
@@ -125,6 +128,7 @@ impl IpcServer {
             next_client_id: Arc::new(AtomicU64::new(1)),
             handlers,
             owner_uid,
+            max_client_queue,
         };
 
         let (cmd_tx, cmd_rx) = mpsc::channel(256);
@@ -209,6 +213,7 @@ impl IpcServer {
         let next_client_id = self.next_client_id.clone();
         let max_clients = self.max_clients;
         let owner_uid = self.owner_uid;
+        let max_client_queue = self.max_client_queue;
 
         tokio::spawn(async move {
             loop {
@@ -242,7 +247,7 @@ impl IpcServer {
                     false
                 };
 
-                let (out_tx, out_rx) = mpsc::channel::<Arc<str>>(MAX_CLIENT_QUEUE);
+                let (out_tx, out_rx) = mpsc::channel::<Arc<str>>(max_client_queue);
                 clients.lock().await.insert(client_id, out_tx.clone());
 
                 let state = ClientState {

@@ -53,8 +53,7 @@ async fn auth_with_token() {
     let config = IpcServerConfig {
         agent_id: "ed25519.test".to_string(),
         public_key: "key".to_string(),
-        token: Some(token.clone()),
-        ..Default::default()
+        ..IpcServerConfig::default().with_token(Some(token.clone()))
     };
     let (server, _rx) = IpcServer::bind(socket_path.clone(), 64, config)
         .await
@@ -130,8 +129,7 @@ async fn auth_with_peer_credentials_succeeds_even_with_wrong_token() {
     let config = IpcServerConfig {
         agent_id: "ed25519.test".to_string(),
         public_key: "key".to_string(),
-        token: Some("ab".repeat(32)),
-        ..Default::default()
+        ..IpcServerConfig::default().with_token(Some("ab".repeat(32)))
     };
     let (server, mut cmd_rx) = IpcServer::bind(socket_path.clone(), 64, config)
         .await
@@ -247,10 +245,8 @@ async fn auth_gating_v2_client_needs_auth() {
     // without going through the socket (which would auto-authenticate via peer creds)
     let dir = tempdir().expect("tempdir");
     let socket_path = dir.path().join("axon.sock");
-    let config = IpcServerConfig {
-        token: Some("test_token_1234567890abcdef".to_string()),
-        ..Default::default()
-    };
+    let config =
+        IpcServerConfig::default().with_token(Some("test_token_1234567890abcdef".to_string()));
     let (server, _rx) = IpcServer::bind(socket_path.clone(), 64, config)
         .await
         .expect("bind IPC server");
@@ -301,10 +297,7 @@ async fn v2_command_without_hello_returns_hello_required() {
     // should return hello_required error
     let dir = tempdir().expect("tempdir");
     let socket_path = dir.path().join("axon.sock");
-    let config = IpcServerConfig {
-        token: Some("a".repeat(64)),
-        ..Default::default()
-    };
+    let config = IpcServerConfig::default().with_token(Some("a".repeat(64)));
     let (server, _rx) = IpcServer::bind(socket_path.clone(), 64, config)
         .await
         .expect("bind IPC server");

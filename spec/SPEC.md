@@ -134,7 +134,7 @@ Two implementations for v0.2: `MdnsDiscovery` and `StaticDiscovery`. Both feed t
 - `id`: unique message identifier (UUID v4).
 - `from` / `to`: agent IDs (typed, e.g. `ed25519.` + first 16 bytes of SHA-256 of public key, hex, 40 chars).
 - `ts`: unix milliseconds.
-- `kind`: message type string. See `message-types.md` for the full set.
+- `kind`: message type string. See `MESSAGE_TYPES.md` for the full set.
 - `ref`: the message ID this responds to. Null for initiating messages.
 - `payload`: kind-specific data. Unknown fields MUST be ignored (forward compatibility).
 

@@ -20,16 +20,14 @@ const TOKEN: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 
 fn test_config() -> IpcServerConfig {
     IpcServerConfig {
-        token: Some(TOKEN.to_string()),
-        ..Default::default()
+        ..IpcServerConfig::default().with_token(Some(TOKEN.to_string()))
     }
 }
 
 fn hardened_config() -> IpcServerConfig {
     IpcServerConfig {
-        token: Some(TOKEN.to_string()),
         allow_v1: false,
-        ..Default::default()
+        ..IpcServerConfig::default().with_token(Some(TOKEN.to_string()))
     }
 }
 

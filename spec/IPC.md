@@ -242,7 +242,9 @@ Opens a streaming subscription on the current connection for the connection's `c
 | `kinds` | array of string | No | *(all kinds)* | Filter by envelope `kind`. Unknown kinds MUST cause `invalid_command`. |
 | `replay` | boolean | No | `true` | If `true`, the daemon first replays buffered messages with `seq > consumer.acked_seq` that match `kinds`, then switches to live delivery. |
 
-**Immediate response:**
+**Replay and response ordering:** When `replay = true`, the daemon first pushes replay events (with `"replay": true`), then sends the subscribe response. This allows the response's `replayed` field to reflect the actual number of replay events emitted. Live events (with `"replay": false`) begin after the response.
+
+**Subscribe response:**
 ```json
 {"ok": true, "req_id": "6", "subscribed": true, "replayed": 3, "replay_to_seq": 105}
 ```
@@ -296,7 +298,7 @@ The receive buffer preserves inbound messages that arrive when no IPC client is 
 - **Storage:** In-memory `VecDeque`.
 - **Ordering:** Each buffered message is assigned a monotonically increasing `seq: u64` by the daemon. Sequence numbers are unique within a daemon process lifetime and never reused. They reset on daemon restart.
 - **Capacity:** Configurable via `ipc.buffer_size` in `config.toml`. Default: **1000**. When `buffer_size = 0`, no messages are buffered and `inbox` always returns empty.
-- **Byte bound:** The daemon enforces an internal hard byte cap (default: 4 MB) to keep memory bounded regardless of `buffer_size`. When total buffered bytes exceed this limit, the oldest messages are evicted until under the limit.
+- **Byte bound:** The daemon enforces an approximate byte cap (default: 4 MB) to keep memory bounded regardless of `buffer_size`. Byte accounting uses an envelope size estimate (fixed overhead plus variable-length field sizes) rather than exact serialization measurement. The actual memory usage may slightly exceed the configured cap under adversarial payloads, but remains bounded. When estimated total buffered bytes exceed this limit, the oldest messages are evicted until under the limit.
 - **TTL:** Configurable via `ipc.buffer_ttl_secs`. Default: 86400 (24 hours). Expired messages are evicted on the next `inbox` call or buffer append.
 - **Eviction:** When the buffer is full (by count or bytes), the oldest message is dropped (FIFO). No per-kind bucketing.
 - **Delivery interaction:** Inbound messages are delivered to subscribed/broadcast clients AND appended to the buffer. Messages persist until TTL expiry or eviction; `ack` advances per-consumer cursors but does not delete messages from the buffer (other consumers may not have processed them yet).
@@ -371,7 +373,10 @@ allow_v1 = true             # Accept v1 (no-hello) connections
 # Receive buffer
 buffer_size = 1000          # Max buffered messages (0 = disabled)
 buffer_ttl_secs = 86400     # Message TTL in seconds (24 hours)
-buffer_byte_cap = 4194304   # Hard byte cap on buffer memory (4 MB)
+buffer_byte_cap = 4194304   # Approximate byte cap on buffer memory (4 MB)
+
+# Per-client queue
+max_client_queue = 1024     # Per-client outbound event queue depth
 
 # Auth (token mode fallback)
 token_path = "~/.axon/ipc-token"  # Token file location

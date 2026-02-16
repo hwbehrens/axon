@@ -42,11 +42,10 @@ fuzz_target!(|data: &[u8]| {
         let _ = std::fs::remove_file(&socket_path);
 
         let config = IpcServerConfig {
-            token: Some(TOKEN.to_string()),
             allow_v1: true,
             buffer_size: 100,
             buffer_ttl_secs: 60,
-            ..Default::default()
+            ..IpcServerConfig::default().with_token(Some(TOKEN.to_string()))
         };
 
         let Ok((server, _rx)) = IpcServer::bind(socket_path.clone(), 8, config).await else {

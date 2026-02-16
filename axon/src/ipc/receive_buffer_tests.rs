@@ -311,6 +311,72 @@ fn consumer_gc_resets_cursor() {
     );
 }
 
+#[test]
+fn replay_messages_evicts_expired() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    let clock = Arc::new(AtomicU64::new(1000));
+    let clock_for_buf = clock.clone();
+
+    let mut buf = ReceiveBuffer::new(100, 1) // 1-second TTL
+        .with_clock(Arc::new(move || clock_for_buf.load(Ordering::Relaxed)));
+
+    // Push messages at t=1000ms
+    buf.push(make_envelope(MessageKind::Query));
+    buf.push(make_envelope(MessageKind::Notify));
+
+    // Advance clock past TTL (1s = 1000ms)
+    clock.store(3000, Ordering::Relaxed);
+
+    // Push a fresh message at t=3000ms
+    buf.push(make_envelope(MessageKind::Query));
+
+    // replay_messages should evict the expired entries
+    let replay_to_seq = buf.highest_seq();
+    let msgs = buf.replay_messages("c1", replay_to_seq, None);
+
+    // Only the fresh message (seq=3) should remain
+    assert_eq!(msgs.len(), 1, "expired messages should be evicted during replay");
+    assert_eq!(msgs[0].seq, 3);
+}
+
+#[test]
+fn byte_cap_eviction_with_large_payloads() {
+    // Use a 2 KB byte cap and push messages with ~500-byte payloads to
+    // verify that the envelope_byte_size heuristic triggers eviction and
+    // keeps the buffer bounded. This exercises the approximation under
+    // larger-than-trivial payloads.
+    let byte_cap = 2048;
+    let mut buf = ReceiveBuffer::new(100, 86400).with_byte_cap(byte_cap);
+
+    let large_payload = "x".repeat(500);
+    for _ in 0..20 {
+        let env = Envelope::new(
+            "ed25519.sender".to_string(),
+            "ed25519.receiver".to_string(),
+            MessageKind::Notify,
+            serde_json::json!({"data": large_payload}),
+        );
+        buf.push(env);
+    }
+
+    let (msgs, _, _) = buf.fetch("c1", 100, None);
+    // With ~500-byte payloads + ~128-byte overhead, each envelope is ~680+ bytes.
+    // A 2 KB cap should hold at most ~3 messages.
+    assert!(msgs.len() < 20, "byte cap should have evicted some messages");
+    assert!(msgs.len() <= 5, "byte cap heuristic should keep buffer small (got {})", msgs.len());
+    assert!(!msgs.is_empty(), "buffer should not be empty");
+
+    // Verify total_bytes tracking stays bounded relative to byte_cap.
+    // The heuristic is approximate, so allow up to 2x overshoot.
+    assert!(
+        buf.total_bytes() <= byte_cap * 2,
+        "total_bytes ({}) should be roughly bounded by byte_cap ({})",
+        buf.total_bytes(),
+        byte_cap
+    );
+}
+
 proptest! {
     #[test]
     fn fetch_respects_limit(limit in 1usize..=1000) {

@@ -4,10 +4,8 @@ use super::super::*;
 async fn auth_empty_token() {
     let dir = tempdir().expect("tempdir");
     let socket_path = dir.path().join("axon.sock");
-    let config = IpcServerConfig {
-        token: Some("test_token_1234567890abcdef".to_string()),
-        ..Default::default()
-    };
+    let config =
+        IpcServerConfig::default().with_token(Some("test_token_1234567890abcdef".to_string()));
     let (server, _rx) = IpcServer::bind(socket_path.clone(), 64, config)
         .await
         .expect("bind IPC server");
@@ -52,10 +50,7 @@ async fn auth_empty_token() {
 async fn auth_oversized_token() {
     let dir = tempdir().expect("tempdir");
     let socket_path = dir.path().join("axon.sock");
-    let config = IpcServerConfig {
-        token: Some("ab".repeat(32)),
-        ..Default::default()
-    };
+    let config = IpcServerConfig::default().with_token(Some("ab".repeat(32)));
     let (server, _rx) = IpcServer::bind(socket_path.clone(), 64, config)
         .await
         .expect("bind IPC server");
@@ -103,10 +98,7 @@ async fn v2_client_send_without_auth_requires_auth() {
     // Use direct handle_command calls to avoid peer credential auto-auth
     let dir = tempdir().expect("tempdir");
     let socket_path = dir.path().join("axon.sock");
-    let config = IpcServerConfig {
-        token: Some("a".repeat(64)), // Valid 64-char token
-        ..Default::default()
-    };
+    let config = IpcServerConfig::default().with_token(Some("a".repeat(64)));
     let (server, _rx) = IpcServer::bind(socket_path.clone(), 64, config)
         .await
         .expect("bind IPC server");
@@ -159,10 +151,7 @@ async fn auth_malformed_token_non_hex() {
     // Test: token with non-hex characters should be rejected
     let dir = tempdir().expect("tempdir");
     let socket_path = dir.path().join("axon.sock");
-    let config = IpcServerConfig {
-        token: Some("a".repeat(64)), // Valid 64-char hex token
-        ..Default::default()
-    };
+    let config = IpcServerConfig::default().with_token(Some("a".repeat(64)));
     let (server, _rx) = IpcServer::bind(socket_path.clone(), 64, config)
         .await
         .expect("bind IPC server");
@@ -199,10 +188,7 @@ async fn auth_malformed_token_wrong_length() {
     // Test: token with wrong length should be rejected
     let dir = tempdir().expect("tempdir");
     let socket_path = dir.path().join("axon.sock");
-    let config = IpcServerConfig {
-        token: Some("a".repeat(64)), // Valid 64-char hex token
-        ..Default::default()
-    };
+    let config = IpcServerConfig::default().with_token(Some("a".repeat(64)));
     let (server, _rx) = IpcServer::bind(socket_path.clone(), 64, config)
         .await
         .expect("bind IPC server");
@@ -240,10 +226,7 @@ async fn auth_fails_closed_when_no_token_configured() {
     // Only peer-credential auth works in this mode.
     let dir = tempdir().expect("tempdir");
     let socket_path = dir.path().join("axon.sock");
-    let config = IpcServerConfig {
-        token: None, // No token configured
-        ..Default::default()
-    };
+    let config = IpcServerConfig::default(); // No token configured
     let (server, _rx) = IpcServer::bind(socket_path.clone(), 64, config)
         .await
         .expect("bind IPC server");

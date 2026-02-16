@@ -87,8 +87,9 @@ impl IpcHandlers {
             });
         }
 
-        // Check token if configured
-        if let Some(expected_token) = &self.config.token {
+        // Check token if configured (read latest value for SIGHUP rotation)
+        let current_token = self.config.token.borrow().clone();
+        if let Some(expected_token) = &current_token {
             // Validate token format: must be exactly 64 hex characters
             if token.len() != 64 || !token.chars().all(|c| c.is_ascii_hexdigit()) {
                 debug!(client_id, "IPC auth failed: malformed token");

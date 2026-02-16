@@ -25,6 +25,8 @@ pub fn validate_raw_kinds(raw: &[String]) -> Result<Vec<MessageKind>, String> {
 // IPC protocol types
 // ---------------------------------------------------------------------------
 
+/// Client-to-daemon IPC command, deserialized from line-delimited JSON.
+/// Tagged by the `cmd` field (e.g., `{"cmd": "send", ...}`).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "cmd", rename_all = "lowercase")]
 pub enum IpcCommand {
@@ -128,12 +130,14 @@ fn default_replay() -> bool {
     true
 }
 
+/// A parsed IPC command paired with the originating client's connection ID.
 #[derive(Debug, Clone)]
 pub struct CommandEvent {
     pub client_id: u64,
     pub command: IpcCommand,
 }
 
+/// Summary of a connected or known peer, returned by the `peers` command.
 #[derive(Debug, Clone, Serialize)]
 pub struct PeerSummary {
     pub id: String,
@@ -144,6 +148,8 @@ pub struct PeerSummary {
     pub source: String,
 }
 
+/// A message stored in the IPC receive buffer, with daemon-assigned sequence
+/// number and buffering timestamp.
 #[derive(Debug, Clone, Serialize)]
 pub struct BufferedMessage {
     pub seq: u64,
@@ -151,6 +157,7 @@ pub struct BufferedMessage {
     pub envelope: Envelope,
 }
 
+/// Daemon identity information returned by the `whoami` command.
 #[derive(Debug, Clone, Serialize)]
 pub struct WhoamiInfo {
     pub agent_id: String,
@@ -166,6 +173,7 @@ pub struct WhoamiInfo {
 // Error codes (IPC.md §5)
 // ---------------------------------------------------------------------------
 
+/// IPC error codes returned in error responses (IPC.md §5).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum IpcErrorCode {
@@ -200,6 +208,8 @@ impl std::fmt::Display for IpcErrorCode {
 // Daemon replies
 // ---------------------------------------------------------------------------
 
+/// Daemon-to-client IPC response, serialized as line-delimited JSON.
+/// Uses `#[serde(untagged)]` — variants are distinguished by their field shapes.
 #[derive(Debug, Clone, Serialize)]
 #[serde(untagged)]
 pub enum DaemonReply {

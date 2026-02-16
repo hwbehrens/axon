@@ -23,8 +23,7 @@ async fn setup_server_with_token(
     let config = IpcServerConfig {
         agent_id: "ed25519.testnode".to_string(),
         public_key: "testkey".to_string(),
-        token: Some(token.to_string()),
-        ..Default::default()
+        ..IpcServerConfig::default().with_token(Some(token.to_string()))
     };
     let path = socket_path.clone();
     std::mem::forget(dir);
@@ -176,8 +175,7 @@ async fn buffer_size_zero_inbox_always_empty() {
     let token = "a".repeat(64);
     let config = IpcServerConfig {
         buffer_size: 0,
-        token: Some(token.clone()),
-        ..Default::default()
+        ..IpcServerConfig::default().with_token(Some(token.clone()))
     };
     let path = socket_path.clone();
     std::mem::forget(dir);

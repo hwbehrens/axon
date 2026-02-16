@@ -9,7 +9,7 @@ use std::sync::Arc;
 use super::protocol::DaemonReply;
 use super::receive_buffer::ReceiveBuffer;
 use crate::message::{Envelope, MessageKind};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, watch};
 
 const IPC_VERSION: u32 = 2;
 const MAX_CONSUMER_LEN: usize = 64;
@@ -75,11 +75,12 @@ pub struct IpcServerConfig {
     pub public_key: String,
     pub name: Option<String>,
     pub version: String,
-    pub token: Option<String>,
+    pub token: watch::Receiver<Option<String>>,
     pub buffer_size: usize,
     pub buffer_ttl_secs: u64,
     pub buffer_byte_cap: Option<usize>,
     pub allow_v1: bool,
+    pub max_client_queue: usize,
     pub uptime_secs: Arc<dyn Fn() -> u64 + Send + Sync>,
     pub clock: Arc<dyn Fn() -> u64 + Send + Sync>,
 }
@@ -91,11 +92,12 @@ impl Default for IpcServerConfig {
             public_key: String::new(),
             name: None,
             version: "0.1.0".to_string(),
-            token: None,
+            token: watch::channel(None).1,
             buffer_size: 1000,
             buffer_ttl_secs: 86400,
             buffer_byte_cap: None,
             allow_v1: true,
+            max_client_queue: 1024,
             uptime_secs: Arc::new(|| 0),
             clock: Arc::new(|| {
                 std::time::SystemTime::now()
@@ -104,6 +106,15 @@ impl Default for IpcServerConfig {
                     .as_millis() as u64
             }),
         }
+    }
+}
+
+impl IpcServerConfig {
+    /// Set a static token value (convenience for tests and simple configurations).
+    pub fn with_token(mut self, token: Option<String>) -> Self {
+        let (_, rx) = watch::channel(token);
+        self.token = rx;
+        self
     }
 }
 

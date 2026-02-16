@@ -19,9 +19,8 @@ async fn setup_server() -> (IpcServer, tokio::sync::mpsc::Receiver<CommandEvent>
     let config = IpcServerConfig {
         agent_id: "ed25519.testnode".to_string(),
         public_key: "testkey".to_string(),
-        token: Some("a".repeat(64)),
         allow_v1: true,
-        ..Default::default()
+        ..IpcServerConfig::default().with_token(Some("a".repeat(64)))
     };
     let path = socket_path.clone();
     std::mem::forget(dir);
