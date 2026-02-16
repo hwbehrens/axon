@@ -140,10 +140,11 @@ Two implementations for v0.2: `MdnsDiscovery` and `StaticDiscovery`. Both feed t
 
 ### Payload Kinds
 
+The `payload` field carries kind-specific data. Note: `kind` belongs to the **envelope**, not the payload. See `MESSAGE_TYPES.md` §Payload Schemas for the full normative set. A brief summary of common kinds:
+
 **query** — Ask another agent a question.
 ```json
 {
-  "kind": "query",
   "question": "What are the kids' swim schedules this week?",
   "domain": "family.calendar",
   "max_tokens": 200,
@@ -158,7 +159,6 @@ Two implementations for v0.2: `MdnsDiscovery` and `StaticDiscovery`. Both feed t
 **response** — Answer to a query.
 ```json
 {
-  "kind": "response",
   "data": { ... },
   "summary": "Three swim practices: Mon/Wed/Fri 4-5pm"
 }
@@ -167,7 +167,6 @@ Two implementations for v0.2: `MdnsDiscovery` and `StaticDiscovery`. Both feed t
 **delegate** — Ask another agent to perform a task.
 ```json
 {
-  "kind": "delegate",
   "task": "Send a message to the family chat about dinner plans",
   "context": { "dinner_time": "7pm" },
   "priority": "normal",
@@ -178,7 +177,6 @@ Two implementations for v0.2: `MdnsDiscovery` and `StaticDiscovery`. Both feed t
 **notify** — Inform without expecting a response.
 ```json
 {
-  "kind": "notify",
   "topic": "user.location",
   "data": { "status": "heading out", "eta_back": "2h" },
   "importance": "low"

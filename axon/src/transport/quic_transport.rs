@@ -132,6 +132,19 @@ impl QuicTransport {
         }
     }
 
+    /// Remove stale per-peer connecting lock entries for peers that are no
+    /// longer expected (not in `expected_pubkeys`). Called periodically to
+    /// prevent unbounded growth from transient mDNS peers.
+    pub async fn gc_connecting_locks(&self) {
+        let expected: Vec<String> = self
+            .expected_pubkeys
+            .read()
+            .map(|m| m.keys().cloned().collect())
+            .unwrap_or_default();
+        let mut locks = self.connecting_locks.write().await;
+        locks.retain(|k, _| expected.contains(k));
+    }
+
     pub async fn has_connection(&self, agent_id: &str) -> bool {
         self.connections.read().await.contains_key(agent_id)
     }

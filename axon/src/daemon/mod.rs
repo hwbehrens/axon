@@ -294,6 +294,7 @@ pub async fn run_daemon(opts: DaemonOptions) -> Result<()> {
                         warn!(error = %err, "failed to persist known peers after stale cleanup");
                     }
                 }
+                transport.gc_connecting_locks().await;
             }
             _ = reconnect_interval.tick() => {
                 attempt_reconnects(
