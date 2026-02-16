@@ -40,10 +40,34 @@ jobs:
             exit 1
           fi
 
-  fmt:
-    name: fmt
+  file-length:
+    name: file length
     needs: [check-score]
     if: always() && (needs.check-score.result == 'success' || needs.check-score.result == 'skipped')
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check .rs files are under 500 lines
+        run: |
+          failed=0
+          while IFS= read -r file; do
+            lines=$(wc -l < "$file")
+            if [ "$lines" -ge 500 ]; then
+              echo "❌ $file: $lines lines (limit 500)"
+              failed=1
+            fi
+          done < <(find axon -name '*.rs' -type f)
+          if [ "$failed" -eq 1 ]; then
+            echo "::error::One or more .rs files exceed the 500-line limit."
+            exit 1
+          fi
+          echo "✅ All .rs files are under 500 lines."
+
+  fmt:
+    name: fmt
+    needs: [file-length]
+    if: always() && (needs.file-length.result == 'success' || needs.file-length.result == 'skipped')
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
