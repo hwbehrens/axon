@@ -2,22 +2,20 @@ use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use serde_json::json;
 use uuid::Uuid;
 
-use axon::message::{Envelope, MessageKind};
+use axon::message::{AgentId, Envelope, MessageKind};
 
 fn make_envelope() -> Envelope {
     Envelope {
-        v: 1,
         id: Uuid::new_v4(),
-        from: format!("ed25519.{}", "a".repeat(32)).into(),
-        to: format!("ed25519.{}", "b".repeat(32)).into(),
-        ts: 1700000000000,
-        kind: MessageKind::Notify,
+        kind: MessageKind::Message,
         ref_id: None,
         payload: Envelope::raw_json(&json!({
             "topic": "build.progress",
             "data": {"step": 3, "total": 10, "message": "Compiling module xyz"},
             "importance": "medium"
         })),
+        from: Some(AgentId::from(format!("ed25519.{}", "a".repeat(32)))),
+        to: Some(AgentId::from(format!("ed25519.{}", "b".repeat(32)))),
     }
 }
 
@@ -97,7 +95,7 @@ fn bench_ipc_command_parse(c: &mut Criterion) {
     use axon::ipc::IpcCommand;
     let mut group = c.benchmark_group("ipc_command_parse");
 
-    let send_cmd = r#"{"cmd":"send","to":"ed25519.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","kind":"ping","payload":{}}"#;
+    let send_cmd = r#"{"cmd":"send","to":"ed25519.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","kind":"request","payload":{}}"#;
     group.bench_function("send", |b| {
         b.iter(|| serde_json::from_str::<IpcCommand>(black_box(send_cmd)).unwrap())
     });
@@ -112,12 +110,12 @@ fn bench_ipc_command_parse(c: &mut Criterion) {
         b.iter(|| serde_json::from_str::<IpcCommand>(black_box(hello_cmd)).unwrap())
     });
 
-    let inbox_cmd = r#"{"cmd":"inbox","limit":50,"kinds":["query","notify"]}"#;
+    let inbox_cmd = r#"{"cmd":"inbox","limit":50,"kinds":["request","message"]}"#;
     group.bench_function("inbox", |b| {
         b.iter(|| serde_json::from_str::<IpcCommand>(black_box(inbox_cmd)).unwrap())
     });
 
-    let subscribe_cmd = r#"{"cmd":"subscribe","kinds":["query","delegate","notify"]}"#;
+    let subscribe_cmd = r#"{"cmd":"subscribe","kinds":["request","message"]}"#;
     group.bench_function("subscribe", |b| {
         b.iter(|| serde_json::from_str::<IpcCommand>(black_box(subscribe_cmd)).unwrap())
     });
@@ -133,9 +131,9 @@ fn bench_daemon_reply_serialize(c: &mut Criterion) {
         "messages": [
             {
                 "envelope": {
-                    "v": 1, "id": "550e8400-e29b-41d4-a716-446655440000",
+                    "id": "550e8400-e29b-41d4-a716-446655440000",
                     "from": "ed25519.aaaa", "to": "ed25519.bbbb",
-                    "ts": 1700000000000u64, "kind": "notify",
+                    "kind": "message",
                     "payload": {"topic": "test"}
                 },
                 "buffered_at": "2026-02-15T08:00:00.000Z"
@@ -282,13 +280,13 @@ fn bench_receive_buffer_fetch(c: &mut Criterion) {
                 let mut buf = axon::ipc::ReceiveBuffer::new(1000, 86400);
                 for i in 0..100 {
                     let kind = if i % 2 == 0 {
-                        MessageKind::Query
+                        MessageKind::Request
                     } else {
-                        MessageKind::Notify
+                        MessageKind::Message
                     };
                     buf.push(Envelope::new(
-                        "ed25519.sender".to_string(),
-                        "ed25519.receiver".to_string(),
+                        "ed25519.sender",
+                        "ed25519.receiver",
                         kind,
                         json!({"i": i}),
                     ));
@@ -296,7 +294,7 @@ fn bench_receive_buffer_fetch(c: &mut Criterion) {
                 buf
             },
             |mut buf| {
-                let kinds = [MessageKind::Query];
+                let kinds = [MessageKind::Request];
                 black_box(buf.fetch("consumer", 50, Some(&kinds)));
             },
             criterion::BatchSize::SmallInput,

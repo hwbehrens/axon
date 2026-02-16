@@ -78,8 +78,8 @@ async fn hello_and_auth_consumer(
 
 fn make_envelope(kind: MessageKind) -> Envelope {
     Envelope::new(
-        "ed25519.sender1234".to_string(),
-        "ed25519.receiver5678".to_string(),
+        "ed25519.sender12345678901234567890",
+        "ed25519.receiver567890123456789012",
         kind,
         json!({"data": "test"}),
     )
@@ -183,7 +183,7 @@ async fn hello_with_consumer() {
 
     // Buffer a message first
     server
-        .broadcast_inbound(&make_envelope(MessageKind::Query))
+        .broadcast_inbound(&make_envelope(MessageKind::Request))
         .await
         .unwrap();
 
@@ -219,7 +219,7 @@ async fn req_id_echoed_on_all_v2_responses() {
 
     // Buffer a message so inbox/ack have something to work with
     server
-        .broadcast_inbound(&make_envelope(MessageKind::Notify))
+        .broadcast_inbound(&make_envelope(MessageKind::Message))
         .await
         .unwrap();
 

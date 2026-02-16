@@ -110,8 +110,8 @@ async fn send_notify_unidirectional() {
     let notify = Envelope::new(
         id_a.agent_id().to_string(),
         id_b.agent_id().to_string(),
-        MessageKind::Notify,
-        json!({"topic": "test", "data": {"msg": "hello"}, "importance": "low"}),
+        MessageKind::Message,
+        json!({"topic": "test", "data": {"msg": "hello"}}),
     );
 
     let result = transport_a
@@ -124,12 +124,12 @@ async fn send_notify_unidirectional() {
         .await
         .expect("timeout waiting for inbound")
         .expect("recv");
-    assert_eq!(received.kind, MessageKind::Notify);
-    assert_eq!(received.from, id_a.agent_id());
+    assert_eq!(received.kind, MessageKind::Message);
+    assert_eq!(received.from.as_deref(), Some(id_a.agent_id()));
 }
 
 #[tokio::test]
-async fn send_ping_bidirectional() {
+async fn send_request_bidirectional_default_error() {
     let dir_a = tempdir().expect("tempdir a");
     let paths_a = AxonPaths::from_root(PathBuf::from(dir_a.path()));
     let id_a = Identity::load_or_generate(&paths_a).expect("identity a");
@@ -166,15 +166,18 @@ async fn send_ping_bidirectional() {
         last_seen: std::time::Instant::now(),
     };
 
-    let ping = Envelope::new(
+    let request = Envelope::new(
         id_a.agent_id().to_string(),
         id_b.agent_id().to_string(),
-        MessageKind::Ping,
-        json!({}),
+        MessageKind::Request,
+        json!({"question": "test?"}),
     );
 
-    let result = transport_a.send(&peer_b, ping.clone()).await.expect("send");
+    let result = transport_a
+        .send(&peer_b, request.clone())
+        .await
+        .expect("send");
     let response = result.expect("expected response");
-    assert_eq!(response.kind, MessageKind::Pong);
-    assert_eq!(response.ref_id, Some(ping.id));
+    assert_eq!(response.kind, MessageKind::Error);
+    assert_eq!(response.ref_id, Some(request.id));
 }

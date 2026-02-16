@@ -16,7 +16,7 @@ fn encode_decode_roundtrip() {
     let env = Envelope::new(
         agent_a(),
         agent_b(),
-        MessageKind::Query,
+        MessageKind::Request,
         json!({"question": "test?"}),
     );
     let encoded = encode(&env).unwrap();
@@ -30,7 +30,7 @@ fn reject_oversized_message() {
     let env = Envelope::new(
         agent_a(),
         agent_b(),
-        MessageKind::Query,
+        MessageKind::Request,
         json!({"question": big}),
     );
     let result = encode(&env);
@@ -59,18 +59,9 @@ fn now_millis_is_plausible() {
 use proptest::prelude::*;
 
 const ALL_KINDS: &[MessageKind] = &[
-    MessageKind::Hello,
-    MessageKind::Ping,
-    MessageKind::Pong,
-    MessageKind::Query,
+    MessageKind::Request,
     MessageKind::Response,
-    MessageKind::Delegate,
-    MessageKind::Ack,
-    MessageKind::Result,
-    MessageKind::Notify,
-    MessageKind::Cancel,
-    MessageKind::Discover,
-    MessageKind::Capabilities,
+    MessageKind::Message,
     MessageKind::Error,
 ];
 
@@ -96,7 +87,7 @@ proptest! {
         let env = Envelope::new(
             agent_a(),
             agent_b(),
-            MessageKind::Query,
+            MessageKind::Request,
             json!({"data": payload_str}),
         );
         if let Ok(encoded) = encode(&env) {
@@ -120,8 +111,8 @@ fn encode_accepts_exactly_max_size() {
     let env_template = Envelope::new(
         agent_a(),
         agent_b(),
-        MessageKind::Notify,
-        json!({"topic":"x", "data": ""}),
+        MessageKind::Message,
+        json!({"data": ""}),
     );
     let base_len = serde_json::to_vec(&env_template).unwrap().len();
     assert!(base_len < MAX_MESSAGE_SIZE as usize);
@@ -135,8 +126,8 @@ fn encode_accepts_exactly_max_size() {
     let env = Envelope::new(
         agent_a(),
         agent_b(),
-        MessageKind::Notify,
-        json!({"topic":"x", "data": padding}),
+        MessageKind::Message,
+        json!({"data": padding}),
     );
     let json_len = serde_json::to_vec(&env).unwrap().len();
     assert_eq!(

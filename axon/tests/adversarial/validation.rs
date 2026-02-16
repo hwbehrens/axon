@@ -4,158 +4,44 @@ use crate::*;
 // §4 Envelope validation edge cases
 // =========================================================================
 
-/// Envelope::validate() rejects malformed agent IDs, zero versions, etc.
+/// Envelope::validate() rejects nil UUIDs. Agent-ID format, version, and
+/// timestamp checks were removed in the architecture simplification.
 #[test]
 fn envelope_validation_edge_cases() {
-    // Uppercase hex — is_ascii_hexdigit accepts uppercase, so validate() passes.
+    // Valid envelope — validate() should pass.
     let env = Envelope {
-        v: PROTOCOL_VERSION,
         id: uuid::Uuid::new_v4(),
-        from: "ed25519.A1B2C3D4E5F6A7B8A1B2C3D4E5F6A7B8".into(),
-        to: agent_b().into(),
-        ts: 1_700_000_000_000,
-        kind: MessageKind::Ping,
+        kind: MessageKind::Request,
         ref_id: None,
         payload: Envelope::raw_json(&json!({})),
+        from: Some("ed25519.A1B2C3D4E5F6A7B8A1B2C3D4E5F6A7B8".into()),
+        to: Some(agent_b().into()),
+    };
+    assert!(env.validate().is_ok(), "valid envelope should pass");
+
+    // Nil UUID — validate() should reject.
+    let env = Envelope {
+        id: uuid::Uuid::nil(),
+        kind: MessageKind::Request,
+        ref_id: None,
+        payload: Envelope::raw_json(&json!({})),
+        from: Some(agent_a().into()),
+        to: Some(agent_b().into()),
+    };
+    assert!(env.validate().is_err(), "nil UUID should fail validation");
+
+    // None from/to — valid in simplified model (daemon fills these in).
+    let env = Envelope {
+        id: uuid::Uuid::new_v4(),
+        kind: MessageKind::Message,
+        ref_id: None,
+        payload: Envelope::raw_json(&json!({})),
+        from: None,
+        to: None,
     };
     assert!(
         env.validate().is_ok(),
-        "uppercase hex is valid per is_ascii_hexdigit"
-    );
-
-    // Non-hex characters in agent ID.
-    let env = Envelope {
-        v: PROTOCOL_VERSION,
-        id: uuid::Uuid::new_v4(),
-        from: "ed25519.zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz".into(),
-        to: agent_b().into(),
-        ts: 1_700_000_000_000,
-        kind: MessageKind::Ping,
-        ref_id: None,
-        payload: Envelope::raw_json(&json!({})),
-    };
-    assert!(
-        env.validate().is_err(),
-        "non-hex characters should fail validation"
-    );
-
-    // Missing ed25519. prefix.
-    let env = Envelope {
-        v: PROTOCOL_VERSION,
-        id: uuid::Uuid::new_v4(),
-        from: "a1b2c3d4e5f6a7b8a1b2c3d4e5f6a7b8".into(),
-        to: agent_b().into(),
-        ts: 1_700_000_000_000,
-        kind: MessageKind::Ping,
-        ref_id: None,
-        payload: Envelope::raw_json(&json!({})),
-    };
-    assert!(
-        env.validate().is_err(),
-        "agent ID without ed25519. prefix should fail validation"
-    );
-
-    // Hex part too short (31 hex chars).
-    let env = Envelope {
-        v: PROTOCOL_VERSION,
-        id: uuid::Uuid::new_v4(),
-        from: "ed25519.a1b2c3d4e5f6a7b8a1b2c3d4e5f6a7b".into(),
-        to: agent_b().into(),
-        ts: 1_700_000_000_000,
-        kind: MessageKind::Ping,
-        ref_id: None,
-        payload: Envelope::raw_json(&json!({})),
-    };
-    assert!(
-        env.validate().is_err(),
-        "31-char hex suffix should fail validation"
-    );
-
-    // Hex part too long (33 hex chars).
-    let env = Envelope {
-        v: PROTOCOL_VERSION,
-        id: uuid::Uuid::new_v4(),
-        from: "ed25519.a1b2c3d4e5f6a7b8a1b2c3d4e5f6a7b80".into(),
-        to: agent_b().into(),
-        ts: 1_700_000_000_000,
-        kind: MessageKind::Ping,
-        ref_id: None,
-        payload: Envelope::raw_json(&json!({})),
-    };
-    assert!(
-        env.validate().is_err(),
-        "33-char hex suffix should fail validation"
-    );
-
-    // Version = 0.
-    let env = Envelope {
-        v: 0,
-        id: uuid::Uuid::new_v4(),
-        from: agent_a().into(),
-        to: agent_b().into(),
-        ts: 1_700_000_000_000,
-        kind: MessageKind::Ping,
-        ref_id: None,
-        payload: Envelope::raw_json(&json!({})),
-    };
-    assert!(env.validate().is_err(), "version 0 should fail validation");
-
-    // Timestamp = 0.
-    let env = Envelope {
-        v: PROTOCOL_VERSION,
-        id: uuid::Uuid::new_v4(),
-        from: agent_a().into(),
-        to: agent_b().into(),
-        ts: 0,
-        kind: MessageKind::Ping,
-        ref_id: None,
-        payload: Envelope::raw_json(&json!({})),
-    };
-    assert!(
-        env.validate().is_err(),
-        "timestamp 0 should fail validation"
-    );
-
-    // Empty from string.
-    let env = Envelope {
-        v: PROTOCOL_VERSION,
-        id: uuid::Uuid::new_v4(),
-        from: String::new().into(),
-        to: agent_b().into(),
-        ts: 1_700_000_000_000,
-        kind: MessageKind::Ping,
-        ref_id: None,
-        payload: Envelope::raw_json(&json!({})),
-    };
-    assert!(env.validate().is_err(), "empty from should fail validation");
-
-    // Empty to string.
-    let env = Envelope {
-        v: PROTOCOL_VERSION,
-        id: uuid::Uuid::new_v4(),
-        from: agent_a().into(),
-        to: String::new().into(),
-        ts: 1_700_000_000_000,
-        kind: MessageKind::Ping,
-        ref_id: None,
-        payload: Envelope::raw_json(&json!({})),
-    };
-    assert!(env.validate().is_err(), "empty to should fail validation");
-
-    // Unicode characters in agent IDs.
-    let env = Envelope {
-        v: PROTOCOL_VERSION,
-        id: uuid::Uuid::new_v4(),
-        from: "a1b2c3d4e5f6a7b8a1b2c3d4e5f6a7b✓".into(),
-        to: agent_b().into(),
-        ts: 1_700_000_000_000,
-        kind: MessageKind::Ping,
-        ref_id: None,
-        payload: Envelope::raw_json(&json!({})),
-    };
-    assert!(
-        env.validate().is_err(),
-        "unicode in agent ID should fail validation"
+        "None from/to should pass validation in simplified model"
     );
 }
 
@@ -176,7 +62,7 @@ fn wire_format_boundary_conditions() {
         let env = Envelope::new(
             agent_a(),
             agent_b(),
-            MessageKind::Query,
+            MessageKind::Request,
             json!({"question": payload_str}),
         );
         match encode(&env) {
@@ -199,7 +85,7 @@ fn wire_format_boundary_conditions() {
     let env = Envelope::new(
         agent_a(),
         agent_b(),
-        MessageKind::Query,
+        MessageKind::Request,
         json!({"question": payload_str}),
     );
     assert!(
@@ -212,7 +98,7 @@ fn wire_format_boundary_conditions() {
     let env_over = Envelope::new(
         agent_a(),
         agent_b(),
-        MessageKind::Query,
+        MessageKind::Request,
         json!({"question": payload_str_over}),
     );
     assert!(
@@ -239,14 +125,14 @@ fn wire_format_boundary_conditions() {
     );
 
     // Valid JSON but missing required fields.
-    let incomplete = br#"{"v":1,"id":"550e8400-e29b-41d4-a716-446655440000"}"#;
+    let incomplete = br#"{"id":"550e8400-e29b-41d4-a716-446655440000"}"#;
     assert!(
         decode(incomplete).is_err(),
         "JSON missing required fields should return Err"
     );
 
-    // Valid JSON but wrong types (v as string instead of number).
-    let wrong_types = br#"{"v":"one","id":"550e8400-e29b-41d4-a716-446655440000","from":"a1b2c3d4e5f6a7b8a1b2c3d4e5f6a7b8","to":"f6e5d4c3b2a1f6e5d4c3b2a1f6e5d4c3","ts":1700000000000,"kind":"ping","payload":{}}"#;
+    // Valid JSON but wrong types (kind as number instead of string).
+    let wrong_types = br#"{"id":"550e8400-e29b-41d4-a716-446655440000","kind":123,"payload":{}}"#;
     assert!(
         decode(wrong_types).is_err(),
         "JSON with wrong types should return Err"

@@ -26,7 +26,7 @@ async fn subscribe_replay_true_replays_buffered() {
     // Buffer 2 messages before client connects
     for _ in 0..2 {
         server
-            .broadcast_inbound(&make_envelope(MessageKind::Query))
+            .broadcast_inbound(&make_envelope(MessageKind::Request))
             .await
             .unwrap();
     }
@@ -119,7 +119,7 @@ async fn subscribe_cutover_no_message_loss() {
 
     // Buffer 1 message before subscribing
     server
-        .broadcast_inbound(&make_envelope(MessageKind::Query))
+        .broadcast_inbound(&make_envelope(MessageKind::Request))
         .await
         .unwrap();
 
@@ -157,7 +157,7 @@ async fn subscribe_cutover_no_message_loss() {
 
     // Now broadcast a LIVE message (after subscribe was processed)
     server
-        .broadcast_inbound(&make_envelope(MessageKind::Notify))
+        .broadcast_inbound(&make_envelope(MessageKind::Message))
         .await
         .unwrap();
 
@@ -200,7 +200,7 @@ async fn subscribe_replay_false_skips_replay() {
 
     // Buffer messages
     server
-        .broadcast_inbound(&make_envelope(MessageKind::Query))
+        .broadcast_inbound(&make_envelope(MessageKind::Request))
         .await
         .unwrap();
 

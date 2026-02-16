@@ -122,7 +122,7 @@ async fn v2_client_send_without_auth_requires_auth() {
         client_id: 888,
         command: IpcCommand::Send {
             to: "ed25519.target".to_string(),
-            kind: MessageKind::Notify,
+            kind: MessageKind::Message,
             payload: json!({}),
             ref_id: None,
             req_id: Some("s1".to_string()),

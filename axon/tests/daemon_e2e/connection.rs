@@ -44,7 +44,7 @@ async fn wrong_pubkey_prevents_connection() {
     let send_cmd = json!({
         "cmd": "send",
         "to": id_b.agent_id(),
-        "kind": "ping",
+        "kind": "request",
         "payload": {}
     });
     let reply = ipc_command(&daemon_a.paths.socket, send_cmd).await.unwrap();
@@ -123,7 +123,7 @@ async fn initiator_rule_timeout_returns_error() {
         json!({
             "cmd": "send",
             "to": lo_id.agent_id(),
-            "kind": "ping",
+            "kind": "request",
             "payload": {}
         }),
     )

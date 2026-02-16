@@ -4,7 +4,7 @@ pub fn print_annotated_examples() {
 ==============================================
 
 LLMs learn from examples faster than from specifications.
-Below is a full hello → discover → query → delegate → cancel → notify sequence.
+Below is a full request → response and fire-and-forget messaging sequence.
 
 Agent IDs used:
   Alice: ed25519.a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4  (lower — initiates connection)
@@ -44,99 +44,31 @@ $ axon peers
   }}
 
 ──────────────────────────────────────────────
-Step 2: Discover peer capabilities
-──────────────────────────────────────────────
-$ axon discover ed25519.f6e5d4c3b2a1f6e5d4c3b2a1f6e5d4c3
-
-  IPC sent:     {{"cmd":"send","to":"ed25519.f6e5d4c3b2a1f6e5d4c3b2a1f6e5d4c3","kind":"discover","payload":{{}}}}
-  IPC ack:      {{"ok":true,"msg_id":"550e8400-e29b-41d4-a716-446655440000"}}
-  Wire message: {{
-    "v": 1,
-    "id": "550e8400-e29b-41d4-a716-446655440000",
-    "from": "ed25519.a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4",
-    "to": "ed25519.f6e5d4c3b2a1f6e5d4c3b2a1f6e5d4c3",
-    "ts": 1771108000000,
-    "kind": "discover",
-    "payload": {{}}
-  }}
-  Wire response: {{
-    "v": 1,
-    "id": "660e8400-e29b-41d4-a716-446655440001",
-    "from": "ed25519.f6e5d4c3b2a1f6e5d4c3b2a1f6e5d4c3",
-    "to": "ed25519.a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4",
-    "ts": 1771108000050,
-    "kind": "capabilities",
-    "ref": "550e8400-e29b-41d4-a716-446655440000",
-    "payload": {{
-      "agent_name": "Bob's Research Assistant",
-      "domains": ["web_search", "summarization"],
-      "tools": ["web_search", "pdf_reader"],
-      "max_concurrent_tasks": 4
-    }}
-  }}
-
-──────────────────────────────────────────────
-Step 3: Send a query
+Step 2: Send a request
 ──────────────────────────────────────────────
 $ axon send ed25519.f6e5d4c3b2a1f6e5d4c3b2a1f6e5d4c3 "What is the capital of France?"
 
-  IPC sent:     {{"cmd":"send","to":"ed25519.f6e5d4c3b2a1f6e5d4c3b2a1f6e5d4c3","kind":"query","payload":{{"question":"What is the capital of France?","domain":"meta.query","max_tokens":200,"deadline_ms":30000}}}}
+  IPC sent:     {{"cmd":"send","to":"ed25519.f6e5d4c3b2a1f6e5d4c3b2a1f6e5d4c3","kind":"request","payload":{{"message":"What is the capital of France?"}}}}
+  Wire message: {{
+    "id": "550e8400-e29b-41d4-a716-446655440000",
+    "kind": "request",
+    "payload": {{"message":"What is the capital of France?"}}
+  }}
   Wire response: {{
-    "v": 1,
+    "id": "660e8400-e29b-41d4-a716-446655440001",
     "kind": "response",
-    "ref": "<msg_id>",
-    "payload": {{
-      "data": {{"answer": "Paris"}},
-      "summary": "The capital of France is Paris.",
-      "tokens_used": 12,
-      "truncated": false
-    }}
+    "ref": "550e8400-e29b-41d4-a716-446655440000",
+    "payload": {{"answer": "Paris"}}
   }}
 
 ──────────────────────────────────────────────
-Step 4: Delegate a task
+Step 3: Send a fire-and-forget message
 ──────────────────────────────────────────────
-$ axon delegate ed25519.f6e5d4c3b2a1f6e5d4c3b2a1f6e5d4c3 "Summarize today's tech news"
+$ axon notify ed25519.f6e5d4c3b2a1f6e5d4c3b2a1f6e5d4c3 '{{"state":"ready"}}'
 
-  IPC sent:     {{"cmd":"send","to":"ed25519.f6e5d4c3b2a1f6e5d4c3b2a1f6e5d4c3","kind":"delegate","payload":{{"task":"Summarize today's tech news","priority":"normal","report_back":true,"deadline_ms":60000}}}}
-  Wire response (immediate ack): {{
-    "v": 1,
-    "kind": "ack",
-    "ref": "<msg_id>",
-    "payload": {{"accepted": true, "estimated_ms": 15000}}
-  }}
-  Wire response (later, via unidirectional stream): {{
-    "v": 1,
-    "kind": "result",
-    "ref": "<msg_id>",
-    "payload": {{
-      "status": "completed",
-      "outcome": "Here are today's top tech stories: ...",
-      "data": {{"articles": 5}}
-    }}
-  }}
-
-──────────────────────────────────────────────
-Step 5: Cancel a delegated task
-──────────────────────────────────────────────
-$ axon cancel ed25519.f6e5d4c3b2a1f6e5d4c3b2a1f6e5d4c3 --ref 550e8400-e29b-41d4-a716-446655440000 --reason "No longer needed"
-
-  IPC sent:     {{"cmd":"send","to":"ed25519.f6e5d4c3b2a1f6e5d4c3b2a1f6e5d4c3","kind":"cancel","payload":{{"reason":"No longer needed"}},"ref":"550e8400-e29b-41d4-a716-446655440000"}}
-  Wire response: {{
-    "v": 1,
-    "kind": "ack",
-    "ref": "<msg_id>",
-    "payload": {{"accepted": true}}
-  }}
-
-──────────────────────────────────────────────
-Step 6: Send a notification (fire-and-forget)
-──────────────────────────────────────────────
-$ axon notify ed25519.f6e5d4c3b2a1f6e5d4c3b2a1f6e5d4c3 meta.status '{{"state":"ready"}}'
-
-  IPC sent:     {{"cmd":"send","to":"ed25519.f6e5d4c3b2a1f6e5d4c3b2a1f6e5d4c3","kind":"notify","payload":{{"topic":"meta.status","data":{{"state":"ready"}},"importance":"low"}}}}
+  IPC sent:     {{"cmd":"send","to":"ed25519.f6e5d4c3b2a1f6e5d4c3b2a1f6e5d4c3","kind":"message","payload":{{"data":{{"state":"ready"}}}}}}
   IPC ack:      {{"ok":true,"msg_id":"..."}}
-  (No wire response — notify is unidirectional / fire-and-forget.)
+  (No wire response — message is unidirectional / fire-and-forget.)
 
 ──────────────────────────────────────────────
 IPC v2 — Raw JSON (Unix socket)
@@ -154,7 +86,7 @@ All examples below are newline-delimited JSON sent over ~/.axon/axon.sock.
 ← {{"ok":true,"auth":"accepted","req_id":"a1"}}
 
 # 3. Subscribe (live push, no replay)
-→ {{"cmd":"subscribe","replay":false,"kinds":["query","delegate"],"req_id":"s1"}}
+→ {{"cmd":"subscribe","replay":false,"kinds":["request","message"],"req_id":"s1"}}
 ← {{"ok":true,"subscribed":true,"replayed":0,"replay_to_seq":42,"req_id":"s1"}}
 ← {{"event":"inbound","replay":false,"seq":43,"buffered_at_ms":1771108300123,"envelope":{{...}}}}
 
@@ -175,9 +107,9 @@ Notes
 ──────────────────────────────────────────────
 - The lower agent_id always initiates the QUIC connection (initiator rule).
 - Messages are framed by QUIC stream FIN (no length prefix).
-- Bidirectional streams are used for request-response (hello, ping, query, delegate, cancel, discover).
-- Unidirectional streams are used for fire-and-forget (notify, result).
-- The hello handshake must complete before any other messages on a connection.
+- Bidirectional streams are used for request/response patterns (kind: "request").
+- Unidirectional streams are used for fire-and-forget messages (kind: "message").
+- Identity is established by mTLS — peer identity is derived from the TLS certificate.
 "#
     );
 }

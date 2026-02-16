@@ -5,15 +5,16 @@ use std::time::Duration;
 use anyhow::{Result, anyhow};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use rustls::pki_types::CertificateDer;
+use serde_json::json;
 use tokio::sync::{RwLock, broadcast};
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
-use crate::message::{Envelope, ErrorCode, ErrorPayload, MessageKind};
+use crate::message::{Envelope, MessageKind};
 
 use super::framing::{read_framed, write_framed};
-use super::handshake::auto_response;
+use super::handshake::default_error_response;
 use super::quic_transport::ResponseHandlerFn;
 use super::tls::{derive_agent_id_from_pubkey_bytes, extract_ed25519_pubkey_from_cert_der};
 
@@ -83,7 +84,7 @@ async fn handle_uni_stream(ctx: &ConnectionContext, peer_id: &str, mut recv: qui
 // Bidirectional stream handler
 // ---------------------------------------------------------------------------
 
-/// Handle an authenticated bidi request (post-hello).
+/// Handle an authenticated bidi request.
 async fn handle_authenticated_bidi(
     ctx: &ConnectionContext,
     request: Envelope,
@@ -94,12 +95,11 @@ async fn handle_authenticated_bidi(
             &request,
             ctx.local_agent_id.clone(),
             MessageKind::Error,
-            serde_json::to_value(ErrorPayload {
-                code: ErrorCode::UnknownKind,
-                message: "unknown message kind on bidirectional stream".to_string(),
-                retryable: false,
-            })
-            .unwrap(),
+            json!({
+                "code": "unknown_kind",
+                "message": "unknown message kind on bidirectional stream",
+                "retryable": false,
+            }),
         );
         send_response(&mut send, &response).await;
     } else if !request.kind.expects_response() {
@@ -115,12 +115,11 @@ async fn handle_authenticated_bidi(
             &request,
             ctx.local_agent_id.clone(),
             MessageKind::Error,
-            serde_json::to_value(ErrorPayload {
-                code: ErrorCode::InvalidEnvelope,
-                message: format!("envelope validation failed: {err}"),
-                retryable: false,
-            })
-            .unwrap(),
+            json!({
+                "code": "invalid_envelope",
+                "message": format!("envelope validation failed: {err}"),
+                "retryable": false,
+            }),
         );
         send_response(&mut send, &response).await;
     } else {
@@ -129,10 +128,10 @@ async fn handle_authenticated_bidi(
         let response = if let Some(ref handler) = ctx.response_handler {
             match handler(request_arc).await {
                 Some(resp) => resp,
-                None => auto_response(&request, &ctx.local_agent_id),
+                None => default_error_response(&request, &ctx.local_agent_id),
             }
         } else {
-            auto_response(&request, &ctx.local_agent_id)
+            default_error_response(&request, &ctx.local_agent_id)
         };
         send_response(&mut send, &response).await;
     }

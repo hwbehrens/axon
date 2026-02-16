@@ -51,7 +51,7 @@ fn ipc_v2_inbox_command_with_filters() {
     let cmd: axon::ipc::IpcCommand = serde_json::from_value(json!({
         "cmd": "inbox",
         "limit": 100,
-        "kinds": ["query", "notify"]
+        "kinds": ["request", "message"]
     }))
     .unwrap();
     match cmd {
@@ -59,8 +59,8 @@ fn ipc_v2_inbox_command_with_filters() {
             assert_eq!(limit, 100);
             let k = kinds.unwrap();
             assert_eq!(k.len(), 2);
-            assert!(k.contains(&"query".to_string()));
-            assert!(k.contains(&"notify".to_string()));
+            assert!(k.contains(&"request".to_string()));
+            assert!(k.contains(&"message".to_string()));
         }
         _ => panic!("expected Inbox"),
     }
@@ -117,7 +117,7 @@ fn ipc_v2_subscribe_command_shape() {
     let cmd: axon::ipc::IpcCommand = serde_json::from_value(json!({
         "cmd": "subscribe",
         "replay": true,
-        "kinds": ["notify"]
+        "kinds": ["message"]
     }))
     .unwrap();
     match cmd {

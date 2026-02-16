@@ -93,32 +93,15 @@ async fn initiator_rule_lower_id_connects() {
         "daemon B socket did not appear"
     );
 
-    // Wait for connection between the two daemons.
+    // Wait for both daemons to see each other as connected.
     assert!(
         wait_for_peer_connected(&paths_a.socket, id_b.agent_id(), Duration::from_secs(10)).await,
         "daemon A did not connect to B"
     );
-
-    // Both should see each other. The lower-ID daemon should have initiated.
-    let peers_a = ipc_command(&paths_a.socket, json!({"cmd": "peers"}))
-        .await
-        .expect("peers from A");
-    let peers_b = ipc_command(&paths_b.socket, json!({"cmd": "peers"}))
-        .await
-        .expect("peers from B");
-
-    let list_a = peers_a["peers"].as_array().unwrap();
-    let list_b = peers_b["peers"].as_array().unwrap();
-
-    let a_sees_b = list_a.iter().any(|p| {
-        p["id"].as_str() == Some(id_b.agent_id()) && p["status"].as_str() == Some("connected")
-    });
-    let b_sees_a = list_b.iter().any(|p| {
-        p["id"].as_str() == Some(id_a.agent_id()) && p["status"].as_str() == Some("connected")
-    });
-
-    assert!(a_sees_b, "daemon A should see daemon B as connected");
-    assert!(b_sees_a, "daemon B should see daemon A as connected");
+    assert!(
+        wait_for_peer_connected(&paths_b.socket, id_a.agent_id(), Duration::from_secs(10)).await,
+        "daemon B did not connect to A"
+    );
 
     // Clean up.
     cancel_a.cancel();
@@ -141,7 +124,7 @@ async fn send_to_unknown_peer_returns_error() {
     let send_cmd = json!({
         "cmd": "send",
         "to": "ed25519.deadbeefdeadbeefdeadbeefdeadbeef",
-        "kind": "ping",
+        "kind": "request",
         "payload": {}
     });
     let reply = ipc_command(&paths.socket, send_cmd)

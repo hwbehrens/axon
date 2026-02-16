@@ -214,7 +214,7 @@ async fn v2_subscribe_receives_cross_daemon_message() {
         json!({
             "cmd": "send",
             "to": td.id_b.agent_id(),
-            "kind": "notify",
+            "kind": "message",
             "payload": {"topic": "v2.test", "data": {"value": 42}, "importance": "low"}
         }),
     )
@@ -238,7 +238,7 @@ async fn v2_subscribe_receives_cross_daemon_message() {
         event["buffered_at_ms"].as_u64().is_some(),
         "event should have buffered_at_ms"
     );
-    assert_eq!(event["envelope"]["kind"], "notify");
+    assert_eq!(event["envelope"]["kind"], "message");
     assert_eq!(event["envelope"]["from"], td.id_a.agent_id());
 
     td.daemon_a.shutdown().await;

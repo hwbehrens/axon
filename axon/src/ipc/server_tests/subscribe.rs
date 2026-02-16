@@ -29,7 +29,7 @@ async fn v2_client_without_subscribe_gets_no_messages() {
     let envelope = Envelope::new(
         "ed25519.sender".to_string(),
         "ed25519.receiver".to_string(),
-        MessageKind::Notify,
+        MessageKind::Message,
         json!({"topic": "test"}),
     );
     server
@@ -80,7 +80,7 @@ async fn subscribe_with_replay() {
         let envelope = Envelope::new(
             "ed25519.sender".to_string(),
             format!("ed25519.receiver{}", i),
-            MessageKind::Notify,
+            MessageKind::Message,
             json!({"topic": format!("test{}", i)}),
         );
         server
@@ -183,9 +183,9 @@ async fn subscription_replacement() {
     let mut line = String::new();
     reader.read_line(&mut line).await.expect("read");
 
-    // Subscribe to "query" only
+    // Subscribe to "request" only
     write_half
-        .write_all(b"{\"cmd\":\"subscribe\",\"kinds\":[\"query\"],\"req_id\":\"r1\"}\n")
+        .write_all(b"{\"cmd\":\"subscribe\",\"kinds\":[\"request\"],\"req_id\":\"r1\"}\n")
         .await
         .expect("write");
     let cmd = cmd_rx.recv().await.expect("recv");
@@ -194,9 +194,9 @@ async fn subscription_replacement() {
     line.clear();
     reader.read_line(&mut line).await.expect("read");
 
-    // Now replace subscription with "notify" only
+    // Now replace subscription with "message" only
     write_half
-        .write_all(b"{\"cmd\":\"subscribe\",\"kinds\":[\"notify\"],\"req_id\":\"r2\"}\n")
+        .write_all(b"{\"cmd\":\"subscribe\",\"kinds\":[\"message\"],\"req_id\":\"r2\"}\n")
         .await
         .expect("write");
     let cmd = cmd_rx.recv().await.expect("recv");
@@ -205,36 +205,36 @@ async fn subscription_replacement() {
     line.clear();
     reader.read_line(&mut line).await.expect("read");
 
-    // Send a query message - client should NOT receive it
+    // Send a request message - client should NOT receive it
     let query_envelope = Envelope::new(
         "ed25519.sender".to_string(),
         "ed25519.receiver".to_string(),
-        MessageKind::Query,
+        MessageKind::Request,
         json!({"q": "test"}),
     );
     server
         .broadcast_inbound(&query_envelope)
         .await
-        .expect("broadcast query");
+        .expect("broadcast request");
 
-    // Send a notify message - client SHOULD receive it
+    // Send a message - client SHOULD receive it
     let notify_envelope = Envelope::new(
         "ed25519.sender".to_string(),
         "ed25519.receiver".to_string(),
-        MessageKind::Notify,
+        MessageKind::Message,
         json!({"topic": "test"}),
     );
     server
         .broadcast_inbound(&notify_envelope)
         .await
-        .expect("broadcast notify");
+        .expect("broadcast message");
 
-    // Read the message - should only get the notify, not the query
+    // Read the message - should only get the message, not the request
     line.clear();
-    reader.read_line(&mut line).await.expect("read notify");
+    reader.read_line(&mut line).await.expect("read message");
     let parsed: serde_json::Value = serde_json::from_str(&line).expect("parse");
 
-    // Should be the notify message (v2 clients get InboundEvent format)
+    // Should be the message kind (v2 clients get InboundEvent format)
     assert_eq!(parsed["event"], "inbound");
-    assert_eq!(parsed["envelope"]["kind"], "notify");
+    assert_eq!(parsed["envelope"]["kind"], "message");
 }

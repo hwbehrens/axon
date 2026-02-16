@@ -324,7 +324,7 @@ async fn ipc_client_disconnect_under_load() {
         let envelope = Envelope::new(
             agent_a(),
             agent_b(),
-            MessageKind::Notify,
+            MessageKind::Message,
             json!({"topic": "meta.status", "data": {}}),
         );
         server.broadcast_inbound(&envelope).await.unwrap();

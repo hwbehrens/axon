@@ -4,19 +4,11 @@ use proptest::prelude::*;
 
 fn arb_message_kind() -> impl Strategy<Value = MessageKind> {
     prop_oneof![
-        Just(MessageKind::Hello),
-        Just(MessageKind::Ping),
-        Just(MessageKind::Pong),
-        Just(MessageKind::Query),
+        Just(MessageKind::Request),
         Just(MessageKind::Response),
-        Just(MessageKind::Delegate),
-        Just(MessageKind::Ack),
-        Just(MessageKind::Result),
-        Just(MessageKind::Notify),
-        Just(MessageKind::Cancel),
-        Just(MessageKind::Discover),
-        Just(MessageKind::Capabilities),
+        Just(MessageKind::Message),
         Just(MessageKind::Error),
+        Just(MessageKind::Unknown),
     ]
 }
 

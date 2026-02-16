@@ -180,7 +180,7 @@ async fn ipc_send_delivers_message_e2e() {
     let send_cmd = json!({
         "cmd": "send",
         "to": id_b.agent_id(),
-        "kind": "query",
+        "kind": "request",
         "payload": {"question": "What is 2+2?", "domain": "math"}
     });
     let ack = ipc_command(&paths_a.socket, send_cmd)
@@ -201,7 +201,7 @@ async fn ipc_send_delivers_message_e2e() {
     assert!(bytes > 0, "B should receive inbound message");
     let inbound: Value = serde_json::from_str(line.trim()).unwrap();
     assert_eq!(inbound["inbound"], json!(true));
-    assert_eq!(inbound["envelope"]["kind"], "query");
+    assert_eq!(inbound["envelope"]["kind"], "request");
     assert_eq!(inbound["envelope"]["from"], id_a.agent_id());
 
     cancel_a.cancel();
@@ -260,7 +260,7 @@ async fn status_counters_increment_after_send() {
     let send_cmd = json!({
         "cmd": "send",
         "to": id_b.agent_id(),
-        "kind": "ping",
+        "kind": "request",
         "payload": {}
     });
     let ack = ipc_command(&paths_a.socket, send_cmd).await.unwrap();
@@ -334,7 +334,7 @@ async fn notify_delivered_through_daemon_e2e() {
     let send_cmd = json!({
         "cmd": "send",
         "to": id_b.agent_id(),
-        "kind": "notify",
+        "kind": "message",
         "payload": {"topic": "test.event", "data": {"value": 42}, "importance": "high"}
     });
     let ack = ipc_command(&paths_a.socket, send_cmd).await.unwrap();
@@ -349,7 +349,7 @@ async fn notify_delivered_through_daemon_e2e() {
     assert!(bytes > 0);
     let inbound: Value = serde_json::from_str(line.trim()).unwrap();
     assert_eq!(inbound["inbound"], json!(true));
-    assert_eq!(inbound["envelope"]["kind"], "notify");
+    assert_eq!(inbound["envelope"]["kind"], "message");
     assert_eq!(inbound["envelope"]["from"], id_a.agent_id());
 
     cancel_a.cancel();

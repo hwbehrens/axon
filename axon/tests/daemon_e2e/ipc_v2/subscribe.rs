@@ -14,7 +14,7 @@ async fn v2_subscribe_with_replay_e2e() {
             json!({
                 "cmd": "send",
                 "to": td.id_b.agent_id(),
-                "kind": "notify",
+                "kind": "message",
                 "payload": {"topic": topic, "data": {}, "importance": "low"}
             }),
         )
@@ -24,7 +24,7 @@ async fn v2_subscribe_with_replay_e2e() {
     }
 
     // Wait for messages to arrive at B
-    wait_for_buffered_messages(&td.daemon_b.paths.socket, "notify", 2).await;
+    wait_for_buffered_messages(&td.daemon_b.paths.socket, "message", 2).await;
 
     // Connect v2 client to B and subscribe with replay.
     // We send the subscribe command manually (not via ipc_v2_command) because
@@ -52,7 +52,7 @@ async fn v2_subscribe_with_replay_e2e() {
         }
         let v: Value = serde_json::from_str(line.trim()).unwrap();
         if v.get("event").is_some() && v["replay"] == true {
-            if v["envelope"]["kind"] == "notify" {
+            if v["envelope"]["kind"] == "message" {
                 notify_replays.push(v);
             }
         } else if v.get("subscribed").is_some() {
@@ -72,11 +72,7 @@ async fn v2_subscribe_with_replay_e2e() {
         "should replay at least 2 messages, got {replayed}"
     );
 
-    assert_eq!(
-        notify_replays.len(),
-        2,
-        "should replay exactly 2 notify messages"
-    );
+    assert_eq!(notify_replays.len(), 2, "should replay exactly 2 messages");
     assert_eq!(notify_replays[0]["envelope"]["from"], td.id_a.agent_id());
     assert_eq!(notify_replays[1]["envelope"]["from"], td.id_a.agent_id());
 
@@ -89,25 +85,25 @@ async fn v2_subscribe_with_replay_e2e() {
 async fn v2_subscribe_kind_filter_e2e() {
     let td = setup_connected_pair().await;
 
-    // Connect v2 client to B and subscribe to only "notify" kinds
+    // Connect v2 client to B and subscribe to only "message" kinds
     let (mut writer_b, mut reader_b) = connect_v2(&td.daemon_b.paths.socket, "default").await;
 
     let sub_reply = ipc_v2_command(
         &mut writer_b,
         &mut reader_b,
-        json!({"cmd": "subscribe", "replay": false, "kinds": ["notify"], "req_id": "s1"}),
+        json!({"cmd": "subscribe", "replay": false, "kinds": ["message"], "req_id": "s1"}),
     )
     .await;
     assert_eq!(sub_reply["ok"], true);
     assert_eq!(sub_reply["subscribed"], true);
 
-    // Send a query from A → B (should NOT be delivered to subscriber)
+    // Send a request from A → B (should NOT be delivered to subscriber)
     let ack1 = ipc_command(
         &td.daemon_a.paths.socket,
         json!({
             "cmd": "send",
             "to": td.id_b.agent_id(),
-            "kind": "query",
+            "kind": "request",
             "payload": {"question": "filtered?", "domain": "test"}
         }),
     )
@@ -115,13 +111,13 @@ async fn v2_subscribe_kind_filter_e2e() {
     .unwrap();
     assert_eq!(ack1["ok"], json!(true));
 
-    // Send a notify from A → B (SHOULD be delivered)
+    // Send a message from A → B (SHOULD be delivered)
     let ack2 = ipc_command(
         &td.daemon_a.paths.socket,
         json!({
             "cmd": "send",
             "to": td.id_b.agent_id(),
-            "kind": "notify",
+            "kind": "message",
             "payload": {"topic": "filtered.test", "data": {}, "importance": "low"}
         }),
     )
@@ -146,20 +142,20 @@ async fn v2_subscribe_kind_filter_e2e() {
         }
     }
 
-    // We should have received at least the notify
-    let notify_events: Vec<&Value> = received_events
+    // We should have received at least the message
+    let message_events: Vec<&Value> = received_events
         .iter()
-        .filter(|e| e["envelope"]["kind"] == "notify")
+        .filter(|e| e["envelope"]["kind"] == "message")
         .collect();
-    let query_events: Vec<&Value> = received_events
+    let request_events: Vec<&Value> = received_events
         .iter()
-        .filter(|e| e["envelope"]["kind"] == "query")
+        .filter(|e| e["envelope"]["kind"] == "request")
         .collect();
 
-    assert!(!notify_events.is_empty(), "should receive notify events");
+    assert!(!message_events.is_empty(), "should receive message events");
     assert!(
-        query_events.is_empty(),
-        "should NOT receive query events (filtered out)"
+        request_events.is_empty(),
+        "should NOT receive request events (filtered out)"
     );
 
     td.daemon_a.shutdown().await;

@@ -162,9 +162,11 @@ pub async fn run_daemon(opts: DaemonOptions) -> Result<()> {
                     match msg {
                         Ok(envelope) => {
                             counters_for_inbound.received.fetch_add(1, Ordering::Relaxed);
-                            peer_table_for_inbound
-                                .set_connected(&envelope.from, None)
-                                .await;
+                            if let Some(ref from) = envelope.from {
+                                peer_table_for_inbound
+                                    .set_connected(from.as_str(), None)
+                                    .await;
+                            }
                             if let Err(err) = ipc_for_inbound.broadcast_inbound(&envelope).await {
                                 warn!(error = %err, "failed broadcasting inbound to IPC clients");
                             }

@@ -12,7 +12,7 @@ async fn inbox_returns_seq_and_buffered_at_ms() {
     let server = bind_server(test_config()).await;
 
     server
-        .broadcast_inbound(&make_envelope(MessageKind::Query))
+        .broadcast_inbound(&make_envelope(MessageKind::Request))
         .await
         .unwrap();
 
@@ -49,7 +49,7 @@ async fn ack_advances_cursor() {
     // Buffer 3 messages
     for _ in 0..3 {
         server
-            .broadcast_inbound(&make_envelope(MessageKind::Query))
+            .broadcast_inbound(&make_envelope(MessageKind::Request))
             .await
             .unwrap();
     }
@@ -108,7 +108,7 @@ async fn ack_out_of_range_rejected() {
     let server = bind_server(test_config()).await;
 
     server
-        .broadcast_inbound(&make_envelope(MessageKind::Query))
+        .broadcast_inbound(&make_envelope(MessageKind::Request))
         .await
         .unwrap();
 
@@ -153,29 +153,29 @@ async fn ack_out_of_range_rejected() {
 async fn kinds_filter_stops_at_non_matching_kind() {
     let server = bind_server(test_config()).await;
 
-    // Buffer interleaved kinds: Query, Notify, Query
+    // Buffer interleaved kinds: Request, Message, Request
     server
-        .broadcast_inbound(&make_envelope(MessageKind::Query))
+        .broadcast_inbound(&make_envelope(MessageKind::Request))
         .await
         .unwrap();
     server
-        .broadcast_inbound(&make_envelope(MessageKind::Notify))
+        .broadcast_inbound(&make_envelope(MessageKind::Message))
         .await
         .unwrap();
     server
-        .broadcast_inbound(&make_envelope(MessageKind::Query))
+        .broadcast_inbound(&make_envelope(MessageKind::Request))
         .await
         .unwrap();
 
     hello_and_auth(&server, 1).await;
 
-    // Fetch with kinds=[Query] — should stop at seq=2 (Notify), return only seq=1
+    // Fetch with kinds=[request] — should stop at seq=2 (Message), return only seq=1
     let reply = server
         .handle_command(CommandEvent {
             client_id: 1,
             command: IpcCommand::Inbox {
                 limit: 50,
-                kinds: Some(vec!["query".into()]),
+                kinds: Some(vec!["request".into()]),
                 req_id: Some("r1".into()),
             },
         })
@@ -199,29 +199,29 @@ async fn kinds_filter_stops_at_non_matching_kind() {
 async fn ack_after_kinds_filter_does_not_skip_other_kinds() {
     let server = bind_server(test_config()).await;
 
-    // Buffer: Query(1), Notify(2), Query(3)
+    // Buffer: Request(1), Message(2), Request(3)
     server
-        .broadcast_inbound(&make_envelope(MessageKind::Query))
+        .broadcast_inbound(&make_envelope(MessageKind::Request))
         .await
         .unwrap();
     server
-        .broadcast_inbound(&make_envelope(MessageKind::Notify))
+        .broadcast_inbound(&make_envelope(MessageKind::Message))
         .await
         .unwrap();
     server
-        .broadcast_inbound(&make_envelope(MessageKind::Query))
+        .broadcast_inbound(&make_envelope(MessageKind::Request))
         .await
         .unwrap();
 
     hello_and_auth(&server, 1).await;
 
-    // Fetch with kinds=[Query] — gets seq=1 only
+    // Fetch with kinds=[request] — gets seq=1 only
     let reply = server
         .handle_command(CommandEvent {
             client_id: 1,
             command: IpcCommand::Inbox {
                 limit: 50,
-                kinds: Some(vec!["query".into()]),
+                kinds: Some(vec!["request".into()]),
                 req_id: Some("r1".into()),
             },
         })
@@ -243,7 +243,7 @@ async fn ack_after_kinds_filter_does_not_skip_other_kinds() {
         .unwrap();
     assert_ok(&reply);
 
-    // Fetch without filter — should see seq=2 (Notify) and seq=3 (Query)
+    // Fetch without filter — should see seq=2 (Message) and seq=3 (Request)
     let reply = server
         .handle_command(CommandEvent {
             client_id: 1,
@@ -260,7 +260,7 @@ async fn ack_after_kinds_filter_does_not_skip_other_kinds() {
     assert_eq!(
         msgs.len(),
         2,
-        "Notify at seq=2 must not have been skipped by ack"
+        "Message at seq=2 must not have been skipped by ack"
     );
     assert_eq!(msgs[0]["seq"], 2);
     assert_eq!(msgs[1]["seq"], 3);
@@ -278,7 +278,7 @@ async fn multi_consumer_cursor_independence() {
     // Buffer 3 messages
     for _ in 0..3 {
         server
-            .broadcast_inbound(&make_envelope(MessageKind::Notify))
+            .broadcast_inbound(&make_envelope(MessageKind::Message))
             .await
             .unwrap();
     }
@@ -399,7 +399,7 @@ async fn inbox_limit_min_valid() {
     // Buffer 3 messages
     for _ in 0..3 {
         server
-            .broadcast_inbound(&make_envelope(MessageKind::Notify))
+            .broadcast_inbound(&make_envelope(MessageKind::Message))
             .await
             .unwrap();
     }

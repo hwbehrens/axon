@@ -158,14 +158,14 @@ async fn ipc_invalid_command_returns_error() {
 /// IPC send command with ref field deserializes correctly.
 #[test]
 fn ipc_send_with_ref_deserializes() {
-    let input = r#"{"cmd":"send","to":"ed25519.deadbeef01234567deadbeef01234567","kind":"cancel","payload":{"reason":"changed plans"},"ref":"550e8400-e29b-41d4-a716-446655440000"}"#;
+    let input = r#"{"cmd":"send","to":"ed25519.deadbeef01234567deadbeef01234567","kind":"request","payload":{"reason":"changed plans"},"ref":"550e8400-e29b-41d4-a716-446655440000"}"#;
     let cmd: IpcCommand = serde_json::from_str(input).unwrap();
     match cmd {
         IpcCommand::Send {
             to, kind, ref_id, ..
         } => {
             assert_eq!(to, "ed25519.deadbeef01234567deadbeef01234567");
-            assert_eq!(kind, MessageKind::Cancel);
+            assert_eq!(kind, MessageKind::Request);
             assert!(ref_id.is_some());
         }
         _ => panic!("expected Send"),
@@ -175,7 +175,7 @@ fn ipc_send_with_ref_deserializes() {
 /// IPC send without ref defaults to None.
 #[test]
 fn ipc_send_without_ref_defaults_to_none() {
-    let input = r#"{"cmd":"send","to":"ed25519.deadbeef01234567deadbeef01234567","kind":"query","payload":{"question":"hello?"}}"#;
+    let input = r#"{"cmd":"send","to":"ed25519.deadbeef01234567deadbeef01234567","kind":"request","payload":{"question":"hello?"}}"#;
     let cmd: IpcCommand = serde_json::from_str(input).unwrap();
     match cmd {
         IpcCommand::Send { ref_id, .. } => {
@@ -207,7 +207,7 @@ async fn ipc_client_disconnect_isolation() {
     let envelope = Envelope::new(
         "ed25519.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
         "ed25519.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string(),
-        MessageKind::Notify,
+        MessageKind::Message,
         json!({"topic": "meta.status", "data": {}}),
     );
     server.broadcast_inbound(&envelope).await.unwrap();
@@ -234,7 +234,7 @@ async fn ipc_broadcast_to_all_clients() {
     let envelope = Envelope::new(
         "ed25519.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
         "ed25519.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string(),
-        MessageKind::Ping,
+        MessageKind::Request,
         json!({}),
     );
     server.broadcast_inbound(&envelope).await.unwrap();

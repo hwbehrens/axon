@@ -10,87 +10,43 @@ fn agent_b() -> String {
 }
 
 #[test]
-fn auto_response_ping() {
-    let req = Envelope::new(agent_a(), agent_b(), MessageKind::Ping, json!({}));
-    let resp = auto_response(&req, &agent_b());
-    assert_eq!(resp.kind, MessageKind::Pong);
+fn default_error_response_returns_error_kind() {
+    let req = Envelope::new(agent_a(), agent_b(), MessageKind::Request, json!({}));
+    let resp = default_error_response(&req, &agent_b());
+    assert_eq!(resp.kind, MessageKind::Error);
+}
+
+#[test]
+fn default_error_response_sets_ref_id() {
+    let req = Envelope::new(agent_a(), agent_b(), MessageKind::Request, json!({}));
+    let resp = default_error_response(&req, &agent_b());
     assert_eq!(resp.ref_id, Some(req.id));
 }
 
 #[test]
-fn auto_response_discover() {
-    let req = Envelope::new(agent_a(), agent_b(), MessageKind::Discover, json!({}));
-    let resp = auto_response(&req, &agent_b());
-    assert_eq!(resp.kind, MessageKind::Capabilities);
-}
-
-#[test]
-fn auto_response_query() {
-    let req = Envelope::new(
-        agent_a(),
-        agent_b(),
-        MessageKind::Query,
-        json!({"question": "test?"}),
-    );
-    let resp = auto_response(&req, &agent_b());
-    assert_eq!(resp.kind, MessageKind::Response);
-}
-
-#[test]
-fn auto_response_delegate() {
-    let req = Envelope::new(
-        agent_a(),
-        agent_b(),
-        MessageKind::Delegate,
-        json!({"task": "do something"}),
-    );
-    let resp = auto_response(&req, &agent_b());
-    assert_eq!(resp.kind, MessageKind::Ack);
-}
-
-#[test]
-fn auto_response_cancel() {
-    let req = Envelope::new(
-        agent_a(),
-        agent_b(),
-        MessageKind::Cancel,
-        json!({"reason": "changed mind"}),
-    );
-    let resp = auto_response(&req, &agent_b());
-    assert_eq!(resp.kind, MessageKind::Ack);
-}
-
-#[test]
-fn auto_response_unknown_kind() {
-    let req = Envelope::new(agent_a(), agent_b(), MessageKind::Pong, json!({}));
-    let resp = auto_response(&req, &agent_b());
-    assert_eq!(resp.kind, MessageKind::Error);
+fn default_error_response_payload_has_code_and_message() {
+    let req = Envelope::new(agent_a(), agent_b(), MessageKind::Request, json!({}));
+    let resp = default_error_response(&req, &agent_b());
+    let payload = resp.payload_value().unwrap();
     assert_eq!(
-        resp.payload_value()
-            .unwrap()
-            .get("code")
-            .and_then(|v| v.as_str()),
-        Some("unknown_kind")
+        payload.get("code").and_then(|v| v.as_str()),
+        Some("unhandled")
     );
+    assert!(payload.get("message").and_then(|v| v.as_str()).is_some());
 }
 
 #[test]
-fn auto_response_hello_returns_error() {
-    let req = Envelope::new(
-        agent_a(),
-        agent_b(),
-        MessageKind::Hello,
-        json!({"protocol_versions": [1], "features": ["delegate"]}),
-    );
-    let resp = auto_response(&req, &agent_b());
-    assert_eq!(resp.kind, MessageKind::Error);
-    assert_eq!(
-        resp.payload_value()
-            .unwrap()
-            .get("code")
-            .and_then(|v| v.as_str()),
-        Some("unknown_kind")
-    );
+fn default_error_response_from_is_local_agent() {
+    let req = Envelope::new(agent_a(), agent_b(), MessageKind::Request, json!({}));
+    let resp = default_error_response(&req, &agent_b());
+    assert_eq!(resp.from.as_deref(), Some(agent_b().as_str()));
+}
+
+#[test]
+fn default_error_response_to_is_request_sender() {
+    let req = Envelope::new(agent_a(), agent_b(), MessageKind::Request, json!({}));
+    let resp = default_error_response(&req, &agent_b());
+    assert_eq!(resp.to.as_deref(), Some(agent_a().as_str()));
 }
 
 // =========================================================================
@@ -99,21 +55,25 @@ fn auto_response_hello_returns_error() {
 
 use proptest::prelude::*;
 
-const REQUEST_RESPONSE_MAP: &[(MessageKind, MessageKind)] = &[
-    (MessageKind::Ping, MessageKind::Pong),
-    (MessageKind::Query, MessageKind::Response),
-    (MessageKind::Delegate, MessageKind::Ack),
-    (MessageKind::Cancel, MessageKind::Ack),
-    (MessageKind::Discover, MessageKind::Capabilities),
-];
+fn arb_kind() -> impl Strategy<Value = MessageKind> {
+    prop_oneof![
+        Just(MessageKind::Request),
+        Just(MessageKind::Response),
+        Just(MessageKind::Message),
+        Just(MessageKind::Error),
+        Just(MessageKind::Unknown),
+    ]
+}
 
 proptest! {
     #[test]
-    fn auto_response_kind_correctness(idx in 0..REQUEST_RESPONSE_MAP.len()) {
-        let (req_kind, expected_resp_kind) = REQUEST_RESPONSE_MAP[idx];
-        let req = Envelope::new(agent_a(), agent_b(), req_kind, json!({}));
-        let resp = auto_response(&req, &agent_b());
-        prop_assert_eq!(resp.kind, expected_resp_kind,
-            "auto_response({:?}) should be {:?}, got {:?}", req_kind, expected_resp_kind, resp.kind);
+    fn default_error_response_always_returns_error(kind in arb_kind()) {
+        let req = Envelope::new(agent_a(), agent_b(), kind, json!({}));
+        let resp = default_error_response(&req, &agent_b());
+        prop_assert_eq!(resp.kind, MessageKind::Error);
+        prop_assert_eq!(resp.ref_id, Some(req.id));
+        let payload = resp.payload_value().unwrap();
+        prop_assert!(payload.get("code").and_then(|v| v.as_str()).is_some());
+        prop_assert!(payload.get("message").and_then(|v| v.as_str()).is_some());
     }
 }

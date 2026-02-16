@@ -10,11 +10,11 @@ mod violations;
 /// spec.md §3: wire format is raw JSON bytes (FIN-delimited, no length prefix).
 #[test]
 fn wire_format_is_raw_json() {
-    let env = Envelope::new(agent_a(), agent_b(), MessageKind::Ping, json!({}));
+    let env = Envelope::new(agent_a(), agent_b(), MessageKind::Request, json!({}));
     let encoded = encode(&env).unwrap();
 
     let decoded: Value = serde_json::from_slice(&encoded).unwrap();
-    assert_eq!(decoded["kind"], "ping");
+    assert_eq!(decoded["kind"], "request");
 }
 
 /// spec.md §3: max message size is 64KB.
@@ -30,7 +30,7 @@ fn oversized_message_rejected() {
     let env = Envelope::new(
         agent_a(),
         agent_b(),
-        MessageKind::Query,
+        MessageKind::Request,
         json!({"question": big}),
     );
     let result = encode(&env);
@@ -43,7 +43,7 @@ fn encode_decode_full_roundtrip() {
     let env = Envelope::new(
         agent_a(),
         agent_b(),
-        MessageKind::Query,
+        MessageKind::Request,
         json!({"question": "what is 2+2?", "domain": "math"}),
     );
     let encoded = encode(&env).unwrap();
@@ -53,8 +53,6 @@ fn encode_decode_full_roundtrip() {
     assert_eq!(env.to, decoded.to);
     assert_eq!(env.kind, decoded.kind);
     assert_eq!(env.payload.get(), decoded.payload.get());
-    assert_eq!(env.v, decoded.v);
-    assert_eq!(env.ts, decoded.ts);
 }
 
 // =========================================================================
@@ -109,14 +107,14 @@ fn ipc_send_command_shape() {
     let cmd: axon::ipc::IpcCommand = serde_json::from_value(json!({
         "cmd": "send",
         "to": "ed25519.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        "kind": "query",
+        "kind": "request",
         "payload": {"question": "test?"}
     }))
     .unwrap();
     match cmd {
         axon::ipc::IpcCommand::Send { to, kind, .. } => {
             assert_eq!(to, "ed25519.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
-            assert_eq!(kind, MessageKind::Query);
+            assert_eq!(kind, MessageKind::Request);
         }
         _ => panic!("expected Send"),
     }
@@ -142,7 +140,7 @@ fn ipc_inbound_shape() {
     let envelope = Envelope::new(
         agent_a(),
         agent_b(),
-        MessageKind::Notify,
+        MessageKind::Message,
         json!({"topic":"t","data":{}}),
     );
     let reply = axon::ipc::DaemonReply::Inbound {

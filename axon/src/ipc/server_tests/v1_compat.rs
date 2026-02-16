@@ -33,7 +33,7 @@ async fn broadcasts_inbound_to_multiple_clients() {
     let envelope = Envelope::new(
         "ed25519.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
         "ed25519.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string(),
-        MessageKind::Notify,
+        MessageKind::Message,
         json!({"topic":"meta.status", "data":{}}),
     );
     server
@@ -157,7 +157,7 @@ async fn client_disconnect_does_not_affect_others() {
     let envelope = Envelope::new(
         "ed25519.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
         "ed25519.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string(),
-        MessageKind::Ping,
+        MessageKind::Message,
         json!({}),
     );
     server
@@ -189,7 +189,7 @@ async fn v1_client_receives_all_messages() {
     let envelope = Envelope::new(
         "ed25519.sender".to_string(),
         "ed25519.receiver".to_string(),
-        MessageKind::Notify,
+        MessageKind::Message,
         json!({"topic": "test"}),
     );
     server

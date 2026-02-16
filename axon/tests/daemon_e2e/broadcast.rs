@@ -25,7 +25,7 @@ async fn response_broadcast_to_all_sender_ipc_clients() {
     let cmd = json!({
         "cmd": "send",
         "to": td.id_b.agent_id(),
-        "kind": "ping",
+        "kind": "request",
         "payload": {}
     });
     let line = serde_json::to_string(&cmd).unwrap();
@@ -45,7 +45,7 @@ async fn response_broadcast_to_all_sender_ipc_clients() {
     assert_eq!(ack["ok"], json!(true));
     assert!(ack.get("msg_id").is_some(), "should be a SendAck");
 
-    // Sender client also gets the pong response broadcast.
+    // Sender client also gets the error response broadcast.
     let mut resp_line = String::new();
     timeout(
         Duration::from_secs(5),
@@ -56,9 +56,9 @@ async fn response_broadcast_to_all_sender_ipc_clients() {
     .unwrap();
     let sender_inbound: Value = serde_json::from_str(resp_line.trim()).unwrap();
     assert_eq!(sender_inbound["inbound"], json!(true));
-    assert_eq!(sender_inbound["envelope"]["kind"], "pong");
+    assert_eq!(sender_inbound["envelope"]["kind"], "error");
 
-    // Listener client (didn't send anything) also gets the pong broadcast.
+    // Listener client (didn't send anything) also gets the error broadcast.
     let mut listener_line = String::new();
     timeout(
         Duration::from_secs(5),
@@ -69,7 +69,7 @@ async fn response_broadcast_to_all_sender_ipc_clients() {
     .unwrap();
     let listener_inbound: Value = serde_json::from_str(listener_line.trim()).unwrap();
     assert_eq!(listener_inbound["inbound"], json!(true));
-    assert_eq!(listener_inbound["envelope"]["kind"], "pong");
+    assert_eq!(listener_inbound["envelope"]["kind"], "error");
 
     td.daemon_a.shutdown().await;
     td.daemon_b.shutdown().await;
@@ -102,7 +102,7 @@ async fn broadcast_fanout_to_multiple_receiver_clients() {
         json!({
             "cmd": "send",
             "to": td.id_b.agent_id(),
-            "kind": "notify",
+            "kind": "message",
             "payload": {"topic": "fanout.test", "data": {"n": 1}, "importance": "low"}
         }),
     )
@@ -120,7 +120,7 @@ async fn broadcast_fanout_to_multiple_receiver_clients() {
         assert!(bytes > 0, "client {i} should receive inbound");
         let inbound: Value = serde_json::from_str(line.trim()).unwrap();
         assert_eq!(inbound["inbound"], json!(true));
-        assert_eq!(inbound["envelope"]["kind"], "notify");
+        assert_eq!(inbound["envelope"]["kind"], "message");
     }
 
     // Counter should increment by 1, not 3.
@@ -169,7 +169,7 @@ async fn concurrent_sends_from_multiple_ipc_clients() {
         async {
             let mut stream = UnixStream::connect(&s1).await.unwrap();
             let cmd = serde_json::to_string(&json!({
-                "cmd": "send", "to": &t1, "kind": "notify",
+                "cmd": "send", "to": &t1, "kind": "message",
                 "payload": {"topic": "concurrent.1", "data": {}, "importance": "low"}
             }))
             .unwrap();
@@ -186,7 +186,7 @@ async fn concurrent_sends_from_multiple_ipc_clients() {
         async {
             let mut stream = UnixStream::connect(&s2).await.unwrap();
             let cmd = serde_json::to_string(&json!({
-                "cmd": "send", "to": &t2, "kind": "notify",
+                "cmd": "send", "to": &t2, "kind": "message",
                 "payload": {"topic": "concurrent.2", "data": {}, "importance": "low"}
             }))
             .unwrap();

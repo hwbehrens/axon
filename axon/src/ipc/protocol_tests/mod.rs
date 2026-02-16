@@ -13,7 +13,7 @@ fn parse_send_command() {
     let parsed: IpcCommand = serde_json::from_value(json!({
         "cmd": "send",
         "to": "ed25519.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        "kind": "notify",
+        "kind": "message",
         "payload": {"topic":"meta.status", "data":{}}
     }))
     .expect("parse command");
@@ -21,7 +21,7 @@ fn parse_send_command() {
     match parsed {
         IpcCommand::Send { to, kind, .. } => {
             assert_eq!(to, "ed25519.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
-            assert_eq!(kind, MessageKind::Notify);
+            assert_eq!(kind, MessageKind::Message);
         }
         _ => panic!("expected send command"),
     }
@@ -33,7 +33,7 @@ fn parse_send_with_ref() {
     let parsed: IpcCommand = serde_json::from_value(json!({
         "cmd": "send",
         "to": "ed25519.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        "kind": "cancel",
+        "kind": "message",
         "payload": {"reason": "changed mind"},
         "ref": id.to_string()
     }))
@@ -52,7 +52,7 @@ fn parse_send_with_req_id() {
     let parsed: IpcCommand = serde_json::from_value(json!({
         "cmd": "send",
         "to": "ed25519.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        "kind": "notify",
+        "kind": "message",
         "payload": {},
         "req_id": "r-42"
     }))
@@ -176,7 +176,7 @@ fn inbound_reply_serialization() {
     let envelope = Envelope::new(
         "ed25519.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
         "ed25519.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string(),
-        MessageKind::Notify,
+        MessageKind::Message,
         json!({"topic":"meta.status", "data":{}}),
     );
     let reply = DaemonReply::Inbound {
@@ -186,7 +186,7 @@ fn inbound_reply_serialization() {
     let json = serde_json::to_string(&reply).unwrap();
     let v: Value = serde_json::from_str(&json).unwrap();
     assert_eq!(v["inbound"], true);
-    assert_eq!(v["envelope"]["kind"], "notify");
+    assert_eq!(v["envelope"]["kind"], "message");
 }
 
 // --- req_id round-trip on IpcCommand accessor ---

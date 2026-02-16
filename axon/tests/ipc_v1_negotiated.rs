@@ -243,7 +243,7 @@ async fn negotiated_v1_gets_legacy_broadcast() {
     let envelope = Envelope::new(
         "ed25519.sender".to_string(),
         "ed25519.receiver".to_string(),
-        MessageKind::Notify,
+        MessageKind::Message,
         json!({"topic": "test"}),
     );
     server

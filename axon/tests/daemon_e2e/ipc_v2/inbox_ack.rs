@@ -13,7 +13,7 @@ async fn v2_inbox_and_ack_with_real_traffic() {
         json!({
             "cmd": "send",
             "to": td.id_b.agent_id(),
-            "kind": "notify",
+            "kind": "message",
             "payload": {"topic": "buffered.test", "data": {}, "importance": "low"}
         }),
     )
@@ -22,7 +22,7 @@ async fn v2_inbox_and_ack_with_real_traffic() {
     assert_eq!(ack["ok"], json!(true));
 
     // Wait for the message to arrive at B
-    wait_for_buffered_messages(&td.daemon_b.paths.socket, "notify", 1).await;
+    wait_for_buffered_messages(&td.daemon_b.paths.socket, "message", 1).await;
 
     // Now connect a v2 client to B and fetch inbox
     let (mut writer_b, mut reader_b) = connect_v2(&td.daemon_b.paths.socket, "default").await;
@@ -42,11 +42,11 @@ async fn v2_inbox_and_ack_with_real_traffic() {
         "inbox should contain the buffered message"
     );
 
-    // Find the notify message we sent
+    // Find the message we sent
     let notify_msg = messages
         .iter()
-        .find(|m| m["envelope"]["kind"] == "notify")
-        .expect("should find the notify message in inbox");
+        .find(|m| m["envelope"]["kind"] == "message")
+        .expect("should find the message in inbox");
     assert_eq!(notify_msg["envelope"]["from"], td.id_a.agent_id());
     let seq = notify_msg["seq"].as_u64().unwrap();
 
@@ -69,18 +69,14 @@ async fn v2_inbox_and_ack_with_real_traffic() {
     .await;
     assert_eq!(inbox2["ok"], true);
 
-    // Filter to just notify messages to avoid counting hello/etc
+    // Filter to just message kind to avoid counting hello/etc
     let remaining: Vec<&Value> = inbox2["messages"]
         .as_array()
         .unwrap()
         .iter()
-        .filter(|m| m["envelope"]["kind"] == "notify")
+        .filter(|m| m["envelope"]["kind"] == "message")
         .collect();
-    assert_eq!(
-        remaining.len(),
-        0,
-        "no notify messages should remain after ack"
-    );
+    assert_eq!(remaining.len(), 0, "no messages should remain after ack");
 
     td.daemon_a.shutdown().await;
     td.daemon_b.shutdown().await;
@@ -98,7 +94,7 @@ async fn v2_multi_consumer_e2e() {
         json!({
             "cmd": "send",
             "to": td.id_b.agent_id(),
-            "kind": "notify",
+            "kind": "message",
             "payload": {"topic": "multi.test", "data": {}, "importance": "low"}
         }),
     )
@@ -106,7 +102,7 @@ async fn v2_multi_consumer_e2e() {
     .unwrap();
     assert_eq!(ack["ok"], json!(true));
 
-    wait_for_buffered_messages(&td.daemon_b.paths.socket, "notify", 1).await;
+    wait_for_buffered_messages(&td.daemon_b.paths.socket, "message", 1).await;
 
     // Connect consumer A
     let (mut writer_a, mut reader_a) = connect_v2(&td.daemon_b.paths.socket, "consumer_a").await;
@@ -126,12 +122,9 @@ async fn v2_multi_consumer_e2e() {
         .as_array()
         .unwrap()
         .iter()
-        .filter(|m| m["envelope"]["kind"] == "notify")
+        .filter(|m| m["envelope"]["kind"] == "message")
         .collect();
-    assert!(
-        !msgs_a.is_empty(),
-        "consumer A should see the notify message"
-    );
+    assert!(!msgs_a.is_empty(), "consumer A should see the message");
 
     // Consumer A: ack the highest seq
     let max_seq = inbox_a["messages"]
@@ -161,11 +154,11 @@ async fn v2_multi_consumer_e2e() {
         .as_array()
         .unwrap()
         .iter()
-        .filter(|m| m["envelope"]["kind"] == "notify")
+        .filter(|m| m["envelope"]["kind"] == "message")
         .collect();
     assert!(
         !msgs_b.is_empty(),
-        "consumer B should still see the notify (independent cursor)"
+        "consumer B should still see the message (independent cursor)"
     );
 
     td.daemon_a.shutdown().await;

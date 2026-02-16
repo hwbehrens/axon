@@ -91,7 +91,8 @@ fn parse_whoami_with_req_id() {
 #[test]
 fn parse_inbox_command() {
     let cmd: IpcCommand =
-        serde_json::from_str(r#"{"cmd":"inbox","limit":100,"kinds":["query","notify"]}"#).unwrap();
+        serde_json::from_str(r#"{"cmd":"inbox","limit":100,"kinds":["request","message"]}"#)
+            .unwrap();
     match cmd {
         IpcCommand::Inbox {
             limit,
@@ -151,7 +152,7 @@ fn parse_ack_with_req_id() {
 #[test]
 fn parse_subscribe_command() {
     let cmd: IpcCommand =
-        serde_json::from_str(r#"{"cmd":"subscribe","replay":true,"kinds":["query"]}"#).unwrap();
+        serde_json::from_str(r#"{"cmd":"subscribe","replay":true,"kinds":["request"]}"#).unwrap();
     match cmd {
         IpcCommand::Subscribe {
             replay,
@@ -258,7 +259,7 @@ fn inbox_reply_serialization() {
     let envelope = Envelope::new(
         "ed25519.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
         "ed25519.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string(),
-        MessageKind::Query,
+        MessageKind::Request,
         json!({"question":"test"}),
     );
     let buffered = BufferedMessage {
@@ -320,7 +321,7 @@ fn inbound_event_serialization() {
     let envelope = Envelope::new(
         "ed25519.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
         "ed25519.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string(),
-        MessageKind::Notify,
+        MessageKind::Message,
         json!({"topic":"test"}),
     );
     let reply = DaemonReply::InboundEvent {
@@ -350,7 +351,7 @@ fn inbound_event_replay_true() {
     let envelope = Envelope::new(
         "ed25519.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
         "ed25519.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string(),
-        MessageKind::Query,
+        MessageKind::Request,
         json!({}),
     );
     let reply = DaemonReply::InboundEvent {

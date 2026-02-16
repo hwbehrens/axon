@@ -16,7 +16,7 @@ async fn inbox_and_ack_round_trip() {
         let envelope = Envelope::new(
             "ed25519.sender".to_string(),
             "ed25519.receiver".to_string(),
-            MessageKind::Query,
+            MessageKind::Request,
             json!({"question": format!("test {}", i)}),
         );
         server
@@ -147,7 +147,7 @@ async fn buffer_ttl_eviction() {
     let envelope = Envelope::new(
         "ed25519.sender".to_string(),
         "ed25519.receiver".to_string(),
-        MessageKind::Notify,
+        MessageKind::Message,
         json!({"topic": "test"}),
     );
     server
@@ -207,7 +207,7 @@ async fn buffer_capacity_eviction() {
         let envelope = Envelope::new(
             "ed25519.sender".to_string(),
             format!("ed25519.receiver{}", i),
-            MessageKind::Notify,
+            MessageKind::Message,
             json!({"topic": format!("test{}", i)}),
         );
         server
@@ -268,7 +268,7 @@ async fn inbox_seq_cursor_semantics() {
         let envelope = Envelope::new(
             "ed25519.sender".to_string(),
             format!("ed25519.receiver{}", i),
-            MessageKind::Notify,
+            MessageKind::Message,
             json!({"topic": format!("test{}", i)}),
         );
         server
@@ -340,7 +340,7 @@ async fn multi_consumer_inbox_independence() {
         let envelope = Envelope::new(
             "ed25519.sender".to_string(),
             format!("ed25519.receiver{}", i),
-            MessageKind::Notify,
+            MessageKind::Message,
             json!({"msg": i}),
         );
         server

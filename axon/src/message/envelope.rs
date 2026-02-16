@@ -5,9 +5,6 @@ use serde_json::value::RawValue;
 use uuid::Uuid;
 
 use super::kind::MessageKind;
-use super::wire::now_millis;
-
-pub const PROTOCOL_VERSION: u8 = 1;
 
 /// Typed agent identity string (e.g. `ed25519.<32 hex chars>`).
 ///
@@ -99,32 +96,30 @@ impl<'de> serde::Deserialize<'de> for AgentId {
 
 /// AXON wire envelope — the top-level JSON object for every QUIC message.
 ///
-/// See `spec/MESSAGE_TYPES.md` §Envelope and `spec/WIRE_FORMAT.md` §4 for the
-/// normative schema. The `kind` field selects the payload schema; `payload`
-/// carries kind-specific data (see `spec/MESSAGE_TYPES.md` §Payload Schemas).
+/// The wire format carries only `id`, `kind`, `payload`, and optionally `ref`.
+/// The `from` and `to` fields are populated by the daemon layer (not on wire)
+/// for IPC client consumption.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Envelope {
-    pub v: u8,
     pub id: Uuid,
-    pub from: AgentId,
-    pub to: AgentId,
-    pub ts: u64,
     pub kind: MessageKind,
     #[serde(rename = "ref", default, skip_serializing_if = "Option::is_none")]
     pub ref_id: Option<Uuid>,
     pub payload: Box<RawValue>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<AgentId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to: Option<AgentId>,
 }
 
 impl PartialEq for Envelope {
     fn eq(&self, other: &Self) -> bool {
-        self.v == other.v
-            && self.id == other.id
-            && self.from == other.from
-            && self.to == other.to
-            && self.ts == other.ts
+        self.id == other.id
             && self.kind == other.kind
             && self.ref_id == other.ref_id
             && self.payload.get() == other.payload.get()
+            && self.from == other.from
+            && self.to == other.to
     }
 }
 
@@ -152,14 +147,12 @@ impl Envelope {
         payload: Value,
     ) -> Self {
         Self {
-            v: PROTOCOL_VERSION,
             id: Uuid::new_v4(),
-            from: from.into(),
-            to: to.into(),
-            ts: now_millis(),
             kind,
             ref_id: None,
             payload: Self::raw_json(&payload),
+            from: Some(from.into()),
+            to: Some(to.into()),
         }
     }
 
@@ -170,35 +163,20 @@ impl Envelope {
         payload: Value,
     ) -> Self {
         Self {
-            v: request.v,
             id: Uuid::new_v4(),
-            from: from.into(),
-            to: request.from.clone(),
-            ts: now_millis(),
             kind,
             ref_id: Some(request.id),
             payload: Self::raw_json(&payload),
+            from: Some(from.into()),
+            to: request.from.clone(),
         }
     }
 
     pub fn validate(&self) -> Result<()> {
-        if self.v == 0 {
-            bail!("protocol version must be non-zero");
-        }
-        if !Self::is_valid_agent_id(&self.from) || !Self::is_valid_agent_id(&self.to) {
-            bail!("agent IDs must be in the format ed25519.<32 hex chars>");
-        }
-        if self.ts == 0 {
-            bail!("timestamp must be non-zero");
+        if self.id.is_nil() {
+            bail!("message id must be non-nil");
         }
         Ok(())
-    }
-
-    fn is_valid_agent_id(id: &str) -> bool {
-        let Some(hex) = id.strip_prefix("ed25519.") else {
-            return false;
-        };
-        hex.len() == 32 && hex.chars().all(|c| c.is_ascii_hexdigit())
     }
 }
 

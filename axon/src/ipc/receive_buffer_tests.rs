@@ -19,7 +19,7 @@ fn push_and_fetch_returns_messages_in_order() {
         let env = Envelope::new(
             format!("ed25519.sender{}", i),
             "ed25519.receiver".to_string(),
-            MessageKind::Notify,
+            MessageKind::Message,
             json!({"i": i}),
         );
         buf.push(env);
@@ -31,7 +31,7 @@ fn push_and_fetch_returns_messages_in_order() {
     for (i, msg) in msgs.iter().enumerate() {
         assert_eq!(msg.seq, (i + 1) as u64);
         assert_eq!(
-            msg.envelope.from.to_string(),
+            msg.envelope.from.as_ref().unwrap().to_string(),
             format!("ed25519.sender{}", i)
         );
     }
@@ -41,7 +41,7 @@ fn push_and_fetch_returns_messages_in_order() {
 fn capacity_eviction_drops_oldest() {
     let mut buf = ReceiveBuffer::new(3, 86400);
     for _ in 0..5 {
-        buf.push(make_envelope(MessageKind::Notify));
+        buf.push(make_envelope(MessageKind::Message));
     }
     let (msgs, _, _) = buf.fetch("c1", 10, None);
     assert_eq!(msgs.len(), 3);
@@ -54,7 +54,7 @@ fn capacity_eviction_drops_oldest() {
 fn ack_advances_cursor_without_deleting() {
     let mut buf = ReceiveBuffer::new(100, 86400);
     for _ in 0..3 {
-        buf.push(make_envelope(MessageKind::Query));
+        buf.push(make_envelope(MessageKind::Request));
     }
     let (msgs, _, _) = buf.fetch("c1", 10, None);
     assert_eq!(msgs.len(), 3);
@@ -78,7 +78,7 @@ fn ack_advances_cursor_without_deleting() {
 fn ack_out_of_range_rejected() {
     let mut buf = ReceiveBuffer::new(100, 86400);
     for _ in 0..3 {
-        buf.push(make_envelope(MessageKind::Notify));
+        buf.push(make_envelope(MessageKind::Message));
     }
 
     // Fetch only 2 (so highest_delivered_seq = 2)
@@ -101,15 +101,15 @@ fn ack_out_of_range_rejected() {
 #[test]
 fn fetch_with_kind_filter_stops_at_non_matching() {
     let mut buf = ReceiveBuffer::new(100, 86400);
-    buf.push(make_envelope(MessageKind::Query));
-    buf.push(make_envelope(MessageKind::Notify));
-    buf.push(make_envelope(MessageKind::Query));
+    buf.push(make_envelope(MessageKind::Request));
+    buf.push(make_envelope(MessageKind::Message));
+    buf.push(make_envelope(MessageKind::Request));
 
-    let kinds = [MessageKind::Query];
+    let kinds = [MessageKind::Request];
     let (msgs, next_seq, has_more) = buf.fetch("c1", 10, Some(&kinds));
     // Stops at seq=2 (Notify doesn't match), returns only seq=1
     assert_eq!(msgs.len(), 1);
-    assert_eq!(msgs[0].envelope.kind, MessageKind::Query);
+    assert_eq!(msgs[0].envelope.kind, MessageKind::Request);
     assert_eq!(next_seq, Some(1));
     assert!(has_more, "has_more because non-matching message blocks");
 }
@@ -117,11 +117,11 @@ fn fetch_with_kind_filter_stops_at_non_matching() {
 #[test]
 fn fetch_with_kind_filter_contiguous_matching() {
     let mut buf = ReceiveBuffer::new(100, 86400);
-    buf.push(make_envelope(MessageKind::Query));
-    buf.push(make_envelope(MessageKind::Query));
-    buf.push(make_envelope(MessageKind::Notify));
+    buf.push(make_envelope(MessageKind::Request));
+    buf.push(make_envelope(MessageKind::Request));
+    buf.push(make_envelope(MessageKind::Message));
 
-    let kinds = [MessageKind::Query];
+    let kinds = [MessageKind::Request];
     let (msgs, next_seq, has_more) = buf.fetch("c1", 10, Some(&kinds));
     // Returns both contiguous Query messages, stops at Notify
     assert_eq!(msgs.len(), 2);
@@ -132,9 +132,9 @@ fn fetch_with_kind_filter_contiguous_matching() {
 #[test]
 fn fetch_without_filter_returns_all() {
     let mut buf = ReceiveBuffer::new(100, 86400);
-    buf.push(make_envelope(MessageKind::Query));
-    buf.push(make_envelope(MessageKind::Notify));
-    buf.push(make_envelope(MessageKind::Query));
+    buf.push(make_envelope(MessageKind::Request));
+    buf.push(make_envelope(MessageKind::Message));
+    buf.push(make_envelope(MessageKind::Request));
 
     let (msgs, _, has_more) = buf.fetch("c1", 10, None);
     assert_eq!(msgs.len(), 3);
@@ -145,7 +145,7 @@ fn fetch_without_filter_returns_all() {
 fn multi_consumer_independence() {
     let mut buf = ReceiveBuffer::new(100, 86400);
     for _ in 0..3 {
-        buf.push(make_envelope(MessageKind::Notify));
+        buf.push(make_envelope(MessageKind::Message));
     }
 
     // Consumer A fetches and acks first two
@@ -177,7 +177,7 @@ fn byte_cap_eviction() {
 
     // Push messages that together exceed the byte cap
     for _ in 0..5 {
-        buf.push(make_envelope(MessageKind::Notify));
+        buf.push(make_envelope(MessageKind::Message));
     }
 
     let (msgs, _, _) = buf.fetch("c1", 100, None);
@@ -191,7 +191,7 @@ fn seq_monotonically_increases() {
     let mut buf = ReceiveBuffer::new(100, 86400);
     let mut seqs = Vec::new();
     for _ in 0..5 {
-        let (seq, _) = buf.push(make_envelope(MessageKind::Notify));
+        let (seq, _) = buf.push(make_envelope(MessageKind::Message));
         seqs.push(seq);
     }
     for window in seqs.windows(2) {
@@ -204,7 +204,7 @@ fn seq_monotonically_increases() {
 fn fetch_respects_acked_seq() {
     let mut buf = ReceiveBuffer::new(100, 86400);
     for _ in 0..5 {
-        buf.push(make_envelope(MessageKind::Notify));
+        buf.push(make_envelope(MessageKind::Message));
     }
 
     // Fetch all, then ack first 3
@@ -225,8 +225,8 @@ fn fetch_respects_acked_seq() {
 #[test]
 fn buffer_size_zero_disables_buffering() {
     let mut buf = ReceiveBuffer::new(0, 86400);
-    let (seq1, _) = buf.push(make_envelope(MessageKind::Notify));
-    let (seq2, _) = buf.push(make_envelope(MessageKind::Query));
+    let (seq1, _) = buf.push(make_envelope(MessageKind::Message));
+    let (seq2, _) = buf.push(make_envelope(MessageKind::Request));
 
     // Seqs still increment
     assert_eq!(seq1, 1);
@@ -244,7 +244,7 @@ fn buffer_size_zero_disables_buffering() {
 fn ack_beyond_delivered_rejected_under_backpressure() {
     let mut buf = ReceiveBuffer::new(100, 86400);
     for _ in 0..5 {
-        buf.push(make_envelope(MessageKind::Notify));
+        buf.push(make_envelope(MessageKind::Message));
     }
 
     // Fetch all 5 messages
@@ -266,7 +266,7 @@ fn ack_beyond_delivered_rejected_under_backpressure() {
 #[test]
 fn consumer_state_is_bounded() {
     let mut buf = ReceiveBuffer::new(100, 86400).with_max_consumers(3);
-    buf.push(make_envelope(MessageKind::Notify));
+    buf.push(make_envelope(MessageKind::Message));
 
     for i in 0..5 {
         buf.fetch(&format!("consumer_{}", i), 10, None);
@@ -279,7 +279,7 @@ fn consumer_state_is_bounded() {
 fn consumer_gc_resets_cursor() {
     let mut buf = ReceiveBuffer::new(100, 86400).with_max_consumers(2);
     for _ in 0..3 {
-        buf.push(make_envelope(MessageKind::Notify));
+        buf.push(make_envelope(MessageKind::Message));
     }
 
     // Consumer A fetches and acks
@@ -322,14 +322,14 @@ fn replay_messages_evicts_expired() {
         .with_clock(Arc::new(move || clock_for_buf.load(Ordering::Relaxed)));
 
     // Push messages at t=1000ms
-    buf.push(make_envelope(MessageKind::Query));
-    buf.push(make_envelope(MessageKind::Notify));
+    buf.push(make_envelope(MessageKind::Request));
+    buf.push(make_envelope(MessageKind::Message));
 
     // Advance clock past TTL (1s = 1000ms)
     clock.store(3000, Ordering::Relaxed);
 
     // Push a fresh message at t=3000ms
-    buf.push(make_envelope(MessageKind::Query));
+    buf.push(make_envelope(MessageKind::Request));
 
     // replay_messages should evict the expired entries
     let replay_to_seq = buf.highest_seq();
@@ -358,7 +358,7 @@ fn byte_cap_eviction_with_large_payloads() {
         let env = Envelope::new(
             "ed25519.sender".to_string(),
             "ed25519.receiver".to_string(),
-            MessageKind::Notify,
+            MessageKind::Message,
             serde_json::json!({"data": large_payload}),
         );
         buf.push(env);
@@ -393,7 +393,7 @@ proptest! {
     fn fetch_respects_limit(limit in 1usize..=1000) {
         let mut buf = ReceiveBuffer::new(100, 86400);
         for _ in 0..10 {
-            buf.push(make_envelope(MessageKind::Notify));
+            buf.push(make_envelope(MessageKind::Message));
         }
         let (msgs, _, _) = buf.fetch("c1", limit, None);
         prop_assert!(msgs.len() <= limit);
@@ -403,7 +403,7 @@ proptest! {
     fn push_never_exceeds_capacity(capacity in 1usize..50, count in 1usize..100) {
         let mut buf = ReceiveBuffer::new(capacity, 86400);
         for _ in 0..count {
-            buf.push(make_envelope(MessageKind::Notify));
+            buf.push(make_envelope(MessageKind::Message));
         }
         let (msgs, _, _) = buf.fetch("c1", 1000, None);
         prop_assert!(msgs.len() <= capacity);
@@ -416,14 +416,14 @@ proptest! {
             let env = Envelope::new(
                 format!("ed25519.sender{}", i),
                 "ed25519.receiver".to_string(),
-                MessageKind::Notify,
+                MessageKind::Message,
                 json!({"i": i}),
             );
             buf.push(env);
         }
         let (msgs, _, _) = buf.fetch("c1", 1000, None);
         for (i, msg) in msgs.iter().enumerate() {
-            prop_assert_eq!(msg.envelope.from.to_string(), format!("ed25519.sender{}", i));
+            prop_assert_eq!(msg.envelope.from.as_ref().unwrap().to_string(), format!("ed25519.sender{}", i));
             prop_assert_eq!(msg.seq, (i + 1) as u64);
         }
     }

@@ -2,29 +2,23 @@ use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use serde_json::json;
 use uuid::Uuid;
 
-use axon::message::{Envelope, MessageKind, decode, encode};
+use axon::message::{AgentId, Envelope, MessageKind, decode, encode};
 
 fn make_small_envelope() -> Envelope {
     Envelope {
-        v: 1,
         id: Uuid::new_v4(),
-        from: format!("ed25519.{}", "a".repeat(32)).into(),
-        to: format!("ed25519.{}", "b".repeat(32)).into(),
-        ts: 1700000000000,
-        kind: MessageKind::Ping,
+        kind: MessageKind::Request,
         ref_id: None,
         payload: Envelope::raw_json(&json!({})),
+        from: Some(AgentId::from(format!("ed25519.{}", "a".repeat(32)))),
+        to: Some(AgentId::from(format!("ed25519.{}", "b".repeat(32)))),
     }
 }
 
 fn make_medium_envelope() -> Envelope {
     Envelope {
-        v: 1,
         id: Uuid::new_v4(),
-        from: format!("ed25519.{}", "a".repeat(32)).into(),
-        to: format!("ed25519.{}", "b".repeat(32)).into(),
-        ts: 1700000000000,
-        kind: MessageKind::Query,
+        kind: MessageKind::Request,
         ref_id: None,
         payload: Envelope::raw_json(&json!({
             "question": "What is the meaning of life, the universe, and everything?",
@@ -32,6 +26,8 @@ fn make_medium_envelope() -> Envelope {
             "max_tokens": 1024,
             "deadline_ms": 30000
         })),
+        from: Some(AgentId::from(format!("ed25519.{}", "a".repeat(32)))),
+        to: Some(AgentId::from(format!("ed25519.{}", "b".repeat(32)))),
     }
 }
 
@@ -40,11 +36,7 @@ fn make_large_envelope() -> Envelope {
         .map(|i| format!("item_{i}: {}", "x".repeat(200)))
         .collect();
     Envelope {
-        v: 1,
         id: Uuid::new_v4(),
-        from: format!("ed25519.{}", "a".repeat(32)).into(),
-        to: format!("ed25519.{}", "b".repeat(32)).into(),
-        ts: 1700000000000,
         kind: MessageKind::Response,
         ref_id: Some(Uuid::new_v4()),
         payload: Envelope::raw_json(&json!({
@@ -53,6 +45,8 @@ fn make_large_envelope() -> Envelope {
             "tokens_used": 4096,
             "truncated": false
         })),
+        from: Some(AgentId::from(format!("ed25519.{}", "a".repeat(32)))),
+        to: Some(AgentId::from(format!("ed25519.{}", "b".repeat(32)))),
     }
 }
 

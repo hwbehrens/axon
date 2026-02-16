@@ -39,28 +39,10 @@ enum Commands {
         #[arg(long)]
         agent_id: Option<String>,
     },
-    /// Send a query to another agent.
+    /// Send a request to another agent and wait for a response.
     Send { agent_id: String, message: String },
-    /// Delegate a task to another agent.
-    Delegate { agent_id: String, task: String },
-    /// Send a notification (fire-and-forget).
-    Notify {
-        agent_id: String,
-        topic: String,
-        data: String,
-    },
-    /// Send a ping to another agent.
-    Ping { agent_id: String },
-    /// Discover another agent's capabilities.
-    Discover { agent_id: String },
-    /// Cancel a previously delegated task.
-    Cancel {
-        agent_id: String,
-        #[arg(long, name = "ref")]
-        ref_id: String,
-        #[arg(long)]
-        reason: String,
-    },
+    /// Send a fire-and-forget message to another agent.
+    Notify { agent_id: String, data: String },
     /// List discovered and connected peers.
     Peers,
     /// Show daemon status.
@@ -100,76 +82,20 @@ async fn main() -> Result<()> {
             .await?;
         }
         Commands::Send { agent_id, message } => {
-            let payload = json!({
-                "question": message,
-                "domain": "meta.query",
-                "max_tokens": 200,
-                "deadline_ms": 30000
-            });
+            let payload = json!({ "message": message });
             let line = send_ipc(
-                json!({"cmd": "send", "to": agent_id, "kind": "query", "payload": payload}),
+                json!({"cmd": "send", "to": agent_id, "kind": "request", "payload": payload}),
                 true,
             )
             .await?;
             println!("{line}");
         }
-        Commands::Delegate { agent_id, task } => {
-            let payload = json!({
-                "task": task,
-                "priority": "normal",
-                "report_back": true,
-                "deadline_ms": 60000
-            });
-            let line = send_ipc(
-                json!({"cmd": "send", "to": agent_id, "kind": "delegate", "payload": payload}),
-                true,
-            )
-            .await?;
-            println!("{line}");
-        }
-        Commands::Notify {
-            agent_id,
-            topic,
-            data,
-        } => {
+        Commands::Notify { agent_id, data } => {
             let parsed_data = serde_json::from_str::<Value>(&data).unwrap_or_else(|_| json!(data));
-            let payload = json!({
-                "topic": topic,
-                "data": parsed_data,
-                "importance": "low"
-            });
+            let payload = json!({ "data": parsed_data });
             let line = send_ipc(
-                json!({"cmd": "send", "to": agent_id, "kind": "notify", "payload": payload}),
+                json!({"cmd": "send", "to": agent_id, "kind": "message", "payload": payload}),
                 false,
-            )
-            .await?;
-            println!("{line}");
-        }
-        Commands::Ping { agent_id } => {
-            let line = send_ipc(
-                json!({"cmd": "send", "to": agent_id, "kind": "ping", "payload": {}}),
-                true,
-            )
-            .await?;
-            println!("{line}");
-        }
-        Commands::Discover { agent_id } => {
-            let line = send_ipc(
-                json!({"cmd": "send", "to": agent_id, "kind": "discover", "payload": {}}),
-                true,
-            )
-            .await?;
-            println!("{line}");
-        }
-        Commands::Cancel {
-            agent_id,
-            ref_id,
-            reason,
-        } => {
-            let payload = json!({"reason": reason});
-            let line = send_ipc(
-                json!({"cmd": "send", "to": agent_id, "kind": "cancel", "payload": payload, "ref": ref_id}),
-                true,
             )
             .await?;
             println!("{line}");

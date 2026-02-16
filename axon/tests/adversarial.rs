@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use axon::config::{Config, KnownPeer, load_known_peers, save_known_peers};
 use axon::ipc::{DaemonReply, IpcServer, IpcServerConfig};
-use axon::message::{Envelope, MAX_MESSAGE_SIZE, MessageKind, PROTOCOL_VERSION, decode, encode};
+use axon::message::{Envelope, MAX_MESSAGE_SIZE, MessageKind, decode, encode};
 use axon::peer_table::{ConnectionStatus, PeerTable};
 use serde_json::{Value, json};
 use tempfile::tempdir;

@@ -78,7 +78,7 @@ async fn v2_send_without_auth_returns_auth_required() {
         client_id: 100,
         command: IpcCommand::Send {
             to: "ed25519.target".to_string(),
-            kind: MessageKind::Notify,
+            kind: MessageKind::Message,
             payload: json!({}),
             ref_id: None,
             req_id: Some("s1".to_string()),
@@ -129,7 +129,7 @@ async fn v2_command_without_req_id_returns_invalid_command() {
         client_id: 200,
         command: IpcCommand::Send {
             to: "ed25519.x".to_string(),
-            kind: MessageKind::Notify,
+            kind: MessageKind::Message,
             payload: json!({}),
             ref_id: None,
             req_id: None,
@@ -184,7 +184,7 @@ async fn buffer_size_zero_inbox_always_empty() {
     let envelope = axon::message::Envelope::new(
         "ed25519.sender".to_string(),
         "ed25519.receiver".to_string(),
-        MessageKind::Notify,
+        MessageKind::Message,
         json!({"topic": "test", "data": {}}),
     );
     server.broadcast_inbound(&envelope).await.unwrap();
@@ -319,37 +319,4 @@ async fn re_hello_rejected_as_invalid_command() {
     };
     let reply = server.handle_command(whoami).await.unwrap();
     assert!(matches!(reply, DaemonReply::Whoami { ok: true, .. }));
-}
-
-// =========================================================================
-// Test 7: cancel.reason required (Issue #7)
-// =========================================================================
-
-#[test]
-fn cancel_missing_reason_tolerant() {
-    let result = serde_json::from_value::<axon::message::CancelPayload>(json!({}));
-    assert!(
-        result.is_ok(),
-        "must tolerate missing reason for backward compat"
-    );
-    assert_eq!(result.unwrap().reason, None);
-}
-
-// =========================================================================
-// Test 8: result.error serializes as null (Issue #8)
-// =========================================================================
-
-#[test]
-fn result_error_omitted_when_none() {
-    let result = axon::message::ResultPayload {
-        status: axon::message::TaskStatus::Completed,
-        outcome: "Done".to_string(),
-        data: None,
-        error: None,
-    };
-    let json = serde_json::to_value(&result).unwrap();
-    assert!(
-        json.get("error").is_none(),
-        "error field must be omitted when None"
-    );
 }

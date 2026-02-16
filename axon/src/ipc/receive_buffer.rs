@@ -27,8 +27,8 @@ fn envelope_byte_size(envelope: &Envelope) -> usize {
     // not a precise accounting.
     let base = 128; // JSON envelope boilerplate (braces, field names, punctuation)
     let id_len = 36; // UUID string length
-    let from_len = envelope.from.as_ref().len();
-    let to_len = envelope.to.as_ref().len();
+    let from_len = envelope.from.as_ref().map_or(0, |id| id.as_str().len());
+    let to_len = envelope.to.as_ref().map_or(0, |id| id.as_str().len());
     let kind_len = 12; // max kind string length
     let payload_len = envelope.payload.get().len();
     let ref_len = if envelope.ref_id.is_some() { 36 } else { 0 };

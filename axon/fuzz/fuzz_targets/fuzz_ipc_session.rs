@@ -58,7 +58,7 @@ fuzz_target!(|data: &[u8]| {
         let envelope = Envelope::new(
             "ed25519.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             "ed25519.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-            MessageKind::Notify,
+            MessageKind::Message,
             serde_json::json!({"topic": "fuzz", "data": {}, "importance": "low"}),
         );
         let _ = server.broadcast_inbound(&envelope).await;
