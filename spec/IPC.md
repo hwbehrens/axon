@@ -366,6 +366,7 @@ allow_v1 = true             # Accept v1 (no-hello) connections
 # Receive buffer
 buffer_size = 1000          # Max buffered messages (0 = disabled)
 buffer_ttl_secs = 86400     # Message TTL in seconds (24 hours)
+buffer_byte_cap = 4194304   # Hard byte cap on buffer memory (4 MB)
 
 # Auth (token mode fallback)
 token_path = "~/.axon/ipc-token"  # Token file location

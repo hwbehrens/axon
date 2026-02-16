@@ -127,4 +127,5 @@ Detailed requirements and recipes live in `CONTRIBUTING.md`. Key conventions:
 1. `spec/SPEC.md` — architecture + lifecycle (identity, discovery, transport, handshake)
 2. `spec/MESSAGE_TYPES.md` — message kinds, payload schemas, stream mapping
 3. `spec/WIRE_FORMAT.md` — normative interoperable wire format
-4. `CONTRIBUTING.md` — contribution workflow, full module map, invariants, testing requirements
+4. `spec/IPC.md` — IPC protocol, Unix socket commands, auth, receive buffer
+5. `CONTRIBUTING.md` — contribution workflow, full module map, invariants, testing requirements

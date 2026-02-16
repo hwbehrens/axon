@@ -501,7 +501,7 @@ Default socket path: `~/.axon/axon.sock`
 
 ### 11.1 Service type
 
-- Service type: **`_axon._udp.local`**
+- Service type: **`_axon._udp.local.`**
 - Underlying transport: UDP (advertises QUIC UDP port)
 
 ### 11.2 TXT record format (normative)
@@ -553,7 +553,7 @@ A compatible implementation MUST:
 7. Enforce hello gating: drop unauthenticated uni; error on unauthenticated bidi non-hello (§4.4).
 8. Implement replay dedup by envelope UUID with 300s TTL (§7.4).
 9. Implement the IPC newline-delimited JSON protocol if providing a daemon-compatible local API (§10).
-10. Implement mDNS discovery `_axon._udp.local` with required TXT keys if providing zero-config LAN discovery (§11).
+10. Implement mDNS discovery `_axon._udp.local.` with required TXT keys if providing zero-config LAN discovery (§11).
 
 ---
 

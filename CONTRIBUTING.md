@@ -8,7 +8,9 @@ Read these in order:
 
 1. [`spec/SPEC.md`](./spec/SPEC.md) — protocol architecture (QUIC, Ed25519, discovery, lifecycle)
 2. [`spec/MESSAGE_TYPES.md`](./spec/MESSAGE_TYPES.md) — all message kinds, payload schemas, stream mapping
-3. [`AGENTS.md`](./AGENTS.md) — module map, key invariants, recipes, testing requirements
+3. [`spec/WIRE_FORMAT.md`](./spec/WIRE_FORMAT.md) — normative wire format for interoperable implementations
+4. [`spec/IPC.md`](./spec/IPC.md) — IPC protocol, Unix socket commands, auth, receive buffer
+5. [`AGENTS.md`](./AGENTS.md) — module map, key invariants, recipes, testing requirements
 
 The spec is authoritative. If the implementation disagrees with the spec, the spec wins.
 

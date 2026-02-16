@@ -290,7 +290,7 @@ pub async fn run_daemon(opts: DaemonOptions) -> Result<()> {
             .as_ref()
             .and_then(|c| c.buffer_ttl_secs)
             .unwrap_or(86400),
-        buffer_byte_cap: config.ipc.as_ref().and_then(|c| c.buffer_byte_cap),
+        buffer_byte_cap: Some(config.effective_buffer_byte_cap()),
         uptime_secs: Arc::new(move || start.elapsed().as_secs()),
         clock: Arc::new(|| {
             std::time::SystemTime::now()

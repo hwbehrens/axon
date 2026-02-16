@@ -146,6 +146,13 @@ impl Config {
         self.ipc.as_ref().and_then(|c| c.allow_v1).unwrap_or(true)
     }
 
+    pub fn effective_buffer_byte_cap(&self) -> usize {
+        self.ipc
+            .as_ref()
+            .and_then(|c| c.buffer_byte_cap)
+            .unwrap_or(4_194_304)
+    }
+
     pub fn effective_token_path(&self, root: &Path) -> PathBuf {
         self.ipc
             .as_ref()

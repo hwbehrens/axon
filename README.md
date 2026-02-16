@@ -15,7 +15,7 @@
 </p>
 
 <p align="center">
-  <a href="./spec/SPEC.md">Spec</a> · <a href="./spec/MESSAGE_TYPES.md">Messages</a> · <a href="./spec/WIRE_FORMAT.md">Wire Format</a> · <a href="./CONTRIBUTING.md">Contributing</a>
+  <a href="./spec/SPEC.md">Spec</a> · <a href="./spec/MESSAGE_TYPES.md">Messages</a> · <a href="./spec/WIRE_FORMAT.md">Wire Format</a> · <a href="./spec/IPC.md">IPC</a> · <a href="./CONTRIBUTING.md">Contributing</a>
 </p>
 
 ---
@@ -146,6 +146,7 @@ axon examples    # prints a full annotated hello → discover → query → dele
 | `notify` | Unidirectional | Fire-and-forget information |
 | `cancel` → `ack` | Bidirectional | Cancel a pending delegation |
 | `discover` → `capabilities` | Bidirectional | Capability negotiation |
+| `error` | Bidir or Unidir | Error response or unsolicited error |
 
 See [`spec/MESSAGE_TYPES.md`](./spec/MESSAGE_TYPES.md) for full payload schemas and [`spec/WIRE_FORMAT.md`](./spec/WIRE_FORMAT.md) for the normative wire format.
 
@@ -209,6 +210,7 @@ These are compile-time constants and cannot be changed via configuration.
 | [`spec/SPEC.md`](./spec/SPEC.md) | Protocol architecture — QUIC, Ed25519, discovery, lifecycle |
 | [`spec/MESSAGE_TYPES.md`](./spec/MESSAGE_TYPES.md) | All message kinds, payload schemas, stream mapping |
 | [`spec/WIRE_FORMAT.md`](./spec/WIRE_FORMAT.md) | Normative wire format for interoperable implementations |
+| [`spec/IPC.md`](./spec/IPC.md) | IPC protocol — Unix socket commands, auth, receive buffer |
 | [`CONTRIBUTING.md`](./CONTRIBUTING.md) | Development guide, module map, testing requirements |
 | [`RUBRIC.md`](./RUBRIC.md) | Contribution scoring rubric — 100 points across 8 categories |
 | [`SECURITY.md`](./SECURITY.md) | Security policy and vulnerability reporting |
