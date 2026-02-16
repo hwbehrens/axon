@@ -1,7 +1,6 @@
 pub(crate) mod command_handler;
 mod peer_events;
 mod reconnect;
-mod token;
 
 use command_handler::{Counters, DaemonContext, handle_command};
 use peer_events::handle_peer_event;
@@ -14,7 +13,7 @@ use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use tokio::sync::{mpsc, watch};
+use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
@@ -107,38 +106,14 @@ pub async fn run_daemon(opts: DaemonOptions) -> Result<()> {
     }
 
     // --- IPC ---
-    // Generate IPC token if it doesn't exist, then load it
-    let token_path = config.effective_token_path(&paths.root);
-    let ipc_token = token::load_or_generate(&token_path).await?;
-
     let start = Instant::now();
-    let (token_tx, token_rx) = watch::channel(ipc_token);
     let ipc_config = crate::ipc::IpcServerConfig {
         agent_id: local_agent_id.to_string(),
         public_key: identity.public_key_base64().to_string(),
         name: config.name.clone(),
         version: env!("CARGO_PKG_VERSION").to_string(),
-        token: token_rx,
-        allow_v1: config.effective_allow_v1(),
         max_client_queue: config.effective_max_client_queue(),
-        buffer_size: config
-            .ipc
-            .as_ref()
-            .and_then(|c| c.buffer_size)
-            .unwrap_or(1000),
-        buffer_ttl_secs: config
-            .ipc
-            .as_ref()
-            .and_then(|c| c.buffer_ttl_secs)
-            .unwrap_or(86400),
-        buffer_byte_cap: Some(config.effective_buffer_byte_cap()),
         uptime_secs: Arc::new(move || start.elapsed().as_secs()),
-        clock: Arc::new(|| {
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_millis() as u64
-        }),
     };
 
     let (ipc, mut cmd_rx) = IpcServer::bind(
@@ -216,10 +191,6 @@ pub async fn run_daemon(opts: DaemonOptions) -> Result<()> {
         }
     }
 
-    // --- SIGHUP handler for token rotation (IPC.md §2.2) ---
-    let mut sighup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
-        .context("failed to register SIGHUP handler")?;
-
     // --- Timers ---
     let mut save_interval = tokio::time::interval(Duration::from_secs(60));
     let mut stale_interval = tokio::time::interval(Duration::from_secs(5));
@@ -289,18 +260,6 @@ pub async fn run_daemon(opts: DaemonOptions) -> Result<()> {
             _ = save_interval.tick() => {
                 if let Err(err) = save_known_peers(&paths.known_peers, &peer_table.to_known_peers().await).await {
                     warn!(error = %err, "failed to persist known peers");
-                }
-            }
-            _ = sighup.recv() => {
-                info!("SIGHUP received, reloading IPC token");
-                match token::reload(&token_path).await {
-                    Ok(new_token) => {
-                        let _ = token_tx.send(Some(new_token));
-                        info!(path = %token_path.display(), "IPC token reloaded");
-                    }
-                    Err(err) => {
-                        error!(error = %err, "failed to reload IPC token on SIGHUP");
-                    }
                 }
             }
         }

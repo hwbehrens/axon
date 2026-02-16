@@ -200,7 +200,7 @@ async fn ipc_send_delivers_message_e2e() {
         .expect("read failed");
     assert!(bytes > 0, "B should receive inbound message");
     let inbound: Value = serde_json::from_str(line.trim()).unwrap();
-    assert_eq!(inbound["inbound"], json!(true));
+    assert_eq!(inbound["event"], json!("inbound"));
     assert_eq!(inbound["envelope"]["kind"], "request");
     assert_eq!(inbound["envelope"]["from"], id_a.agent_id());
 
@@ -348,7 +348,7 @@ async fn notify_delivered_through_daemon_e2e() {
         .expect("read failed");
     assert!(bytes > 0);
     let inbound: Value = serde_json::from_str(line.trim()).unwrap();
-    assert_eq!(inbound["inbound"], json!(true));
+    assert_eq!(inbound["event"], json!("inbound"));
     assert_eq!(inbound["envelope"]["kind"], "message");
     assert_eq!(inbound["envelope"]["from"], id_a.agent_id());
 

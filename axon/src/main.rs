@@ -85,7 +85,7 @@ async fn main() -> Result<()> {
             let payload = json!({ "message": message });
             let line = send_ipc(
                 json!({"cmd": "send", "to": agent_id, "kind": "request", "payload": payload}),
-                true,
+                false,
             )
             .await?;
             println!("{line}");
@@ -242,7 +242,7 @@ async fn send_ipc(command: Value, wait_for_correlated_inbound: bool) -> Result<S
 
         let value: Value =
             serde_json::from_str(trimmed).context("failed decoding inbound IPC line")?;
-        let is_match = value.get("inbound") == Some(&json!(true))
+        let is_match = value.get("event") == Some(&json!("inbound"))
             && value
                 .get("envelope")
                 .and_then(|e| e.get("ref"))

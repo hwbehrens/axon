@@ -143,94 +143,14 @@ fn ipc_inbound_shape() {
         MessageKind::Message,
         json!({"topic":"t","data":{}}),
     );
-    let reply = axon::ipc::DaemonReply::Inbound {
-        inbound: true,
+    let reply = axon::ipc::DaemonReply::InboundEvent {
+        event: "inbound",
+        from: agent_a().to_string(),
         envelope,
     };
     let j: Value = serde_json::to_value(&reply).unwrap();
-    assert_eq!(j["inbound"], true);
+    assert_eq!(j["event"], "inbound");
     assert!(j["envelope"]["kind"].is_string());
-}
-
-// =========================================================================
-// IPC v2 — Protocol Versioning and Auth (spec/IPC.md)
-// =========================================================================
-
-/// IPC.md §1.2: hello command includes version number.
-#[test]
-fn ipc_v2_hello_command_shape() {
-    let cmd: axon::ipc::IpcCommand = serde_json::from_value(json!({
-        "cmd": "hello",
-        "version": 2
-    }))
-    .unwrap();
-    match cmd {
-        axon::ipc::IpcCommand::Hello { version, .. } => {
-            assert_eq!(version, 2);
-        }
-        _ => panic!("expected Hello"),
-    }
-}
-
-/// IPC.md §1.2: hello response includes version, agent_id, and features.
-#[test]
-fn ipc_v2_hello_response_shape() {
-    let reply = axon::ipc::DaemonReply::Hello {
-        ok: true,
-        version: 2,
-        daemon_max_version: 2,
-        agent_id: "ed25519.test1234567890abcdef1234567890".to_string(),
-        features: vec!["auth".to_string(), "buffer".to_string()],
-        req_id: None,
-    };
-    let j: Value = serde_json::to_value(&reply).unwrap();
-    assert_eq!(j["ok"], true);
-    assert_eq!(j["version"], 2);
-    assert!(j["agent_id"].as_str().unwrap().starts_with("ed25519."));
-    assert!(j["features"].as_array().unwrap().contains(&json!("auth")));
-}
-
-/// IPC.md §2.3: auth command includes token.
-#[test]
-fn ipc_v2_auth_command_shape() {
-    let cmd: axon::ipc::IpcCommand = serde_json::from_value(json!({
-        "cmd": "auth",
-        "token": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-    }))
-    .unwrap();
-    match cmd {
-        axon::ipc::IpcCommand::Auth { token, .. } => {
-            assert_eq!(token.len(), 64);
-        }
-        _ => panic!("expected Auth"),
-    }
-}
-
-/// IPC.md §2.3: auth success response.
-#[test]
-fn ipc_v2_auth_success_response_shape() {
-    let reply = axon::ipc::DaemonReply::Auth {
-        ok: true,
-        auth: "accepted".to_string(),
-        req_id: None,
-    };
-    let j: Value = serde_json::to_value(&reply).unwrap();
-    assert_eq!(j["ok"], true);
-    assert_eq!(j["auth"], "accepted");
-}
-
-/// IPC.md §2.3: auth failure returns error with auth_failed.
-#[test]
-fn ipc_v2_auth_failure_response_shape() {
-    let reply = axon::ipc::DaemonReply::Error {
-        ok: false,
-        error: axon::ipc::IpcErrorCode::AuthFailed,
-        message: axon::ipc::IpcErrorCode::AuthFailed.message(),
-        req_id: None,
-    };
-    let j: Value = serde_json::to_value(&reply).unwrap();
-    assert_eq!(j["ok"], false);
-    assert_eq!(j["error"], "auth_failed");
 }
 
 // =========================================================================

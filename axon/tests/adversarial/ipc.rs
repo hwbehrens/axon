@@ -334,7 +334,7 @@ async fn ipc_client_disconnect_under_load() {
             let mut reader = BufReader::new(stream);
             reader.read_line(&mut line).await.unwrap();
             assert!(
-                line.contains("\"inbound\":true"),
+                line.contains("\"event\":\"inbound\""),
                 "surviving client must receive broadcast"
             );
         }

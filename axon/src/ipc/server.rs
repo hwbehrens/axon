@@ -11,10 +11,7 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{Mutex, mpsc};
 
 use super::auth;
-use super::backend::IpcBackend;
-use super::handlers::{ClientState, DispatchResult, IpcHandlers};
-use super::protocol::{CommandEvent, DaemonReply, IpcCommand};
-use super::receive_buffer::ReceiveBuffer;
+use super::protocol::{CommandEvent, DaemonReply, IpcCommand, IpcErrorCode, WhoamiInfo};
 use crate::message::Envelope;
 
 const MAX_IPC_LINE_LENGTH: usize = 64 * 1024; // 64 KB, aligned with MAX_MESSAGE_SIZE
@@ -32,8 +29,31 @@ static INVALID_COMMAND_LINE: LazyLock<Arc<str>> = LazyLock::new(|| {
     )
 });
 
-// Re-export config and types for public API
-pub use super::handlers::IpcServerConfig;
+// ---------------------------------------------------------------------------
+// IPC server config
+// ---------------------------------------------------------------------------
+
+pub struct IpcServerConfig {
+    pub agent_id: String,
+    pub public_key: String,
+    pub name: Option<String>,
+    pub version: String,
+    pub max_client_queue: usize,
+    pub uptime_secs: Arc<dyn Fn() -> u64 + Send + Sync>,
+}
+
+impl Default for IpcServerConfig {
+    fn default() -> Self {
+        Self {
+            agent_id: String::new(),
+            public_key: String::new(),
+            name: None,
+            version: "0.1.0".to_string(),
+            max_client_queue: 1024,
+            uptime_secs: Arc::new(|| 0),
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // IPC server
@@ -46,11 +66,10 @@ pub struct IpcServer {
     socket_path: PathBuf,
     max_clients: usize,
     clients: Arc<Mutex<HashMap<u64, mpsc::Sender<Arc<str>>>>>,
-    client_states: Arc<Mutex<HashMap<u64, ClientState>>>,
     next_client_id: Arc<AtomicU64>,
-    handlers: Arc<IpcHandlers>,
     owner_uid: u32,
     max_client_queue: usize,
+    config: Arc<IpcServerConfig>,
 }
 
 impl IpcServer {
@@ -106,31 +125,14 @@ impl IpcServer {
         let owner_uid = unsafe { libc::getuid() };
         let max_client_queue = config.max_client_queue;
 
-        let clients = Arc::new(Mutex::new(HashMap::new()));
-        let client_states = Arc::new(Mutex::new(HashMap::new()));
-        let mut buffer = ReceiveBuffer::new(config.buffer_size, config.buffer_ttl_secs)
-            .with_clock(config.clock.clone());
-        if let Some(byte_cap) = config.buffer_byte_cap {
-            buffer = buffer.with_byte_cap(byte_cap);
-        }
-        let receive_buffer = Arc::new(Mutex::new(buffer));
-
-        let handlers = Arc::new(IpcHandlers::new(
-            Arc::new(config),
-            client_states.clone(),
-            receive_buffer,
-            clients.clone(),
-        ));
-
         let server = Self {
             socket_path,
             max_clients,
-            clients,
-            client_states,
+            clients: Arc::new(Mutex::new(HashMap::new())),
             next_client_id: Arc::new(AtomicU64::new(1)),
-            handlers,
             owner_uid,
             max_client_queue,
+            config: Arc::new(config),
         };
 
         let (cmd_tx, cmd_rx) = mpsc::channel(256);
@@ -160,33 +162,49 @@ impl IpcServer {
     }
 
     pub async fn broadcast_inbound(&self, envelope: &Envelope) -> Result<()> {
-        self.handlers.broadcast_inbound(envelope).await
+        let event = DaemonReply::InboundEvent {
+            event: "inbound",
+            from: envelope
+                .from
+                .as_ref()
+                .map(|id| id.to_string())
+                .unwrap_or_default(),
+            envelope: envelope.clone(),
+        };
+        let line: Arc<str> = Arc::from(serde_json::to_string(&event)?);
+        let clients = self.clients.lock().await;
+        for tx in clients.values() {
+            let _ = tx.try_send(line.clone());
+        }
+        Ok(())
     }
 
     pub async fn handle_command(&self, event: CommandEvent) -> Result<DaemonReply> {
-        self.handlers
-            .handle_command(event.client_id, event.command)
-            .await
-    }
-
-    /// Dispatch a command through unified IPC policy enforcement, delegating
-    /// Send/Peers/Status effects to the provided backend.
-    pub async fn dispatch_command(
-        &self,
-        client_id: u64,
-        command: IpcCommand,
-        backend: &(impl IpcBackend + ?Sized),
-    ) -> Result<DispatchResult> {
-        self.handlers
-            .dispatch_command(client_id, command, backend)
-            .await
+        match event.command {
+            IpcCommand::Whoami { req_id } => Ok(DaemonReply::Whoami {
+                ok: true,
+                info: WhoamiInfo {
+                    agent_id: self.config.agent_id.clone(),
+                    public_key: self.config.public_key.clone(),
+                    name: self.config.name.clone(),
+                    version: self.config.version.clone(),
+                    uptime_secs: (self.config.uptime_secs)(),
+                },
+                req_id,
+            }),
+            _ => Ok(DaemonReply::Error {
+                ok: false,
+                error: IpcErrorCode::InternalError,
+                message: IpcErrorCode::InternalError.message(),
+                req_id: event.command.req_id().map(|s| s.to_string()),
+            }),
+        }
     }
 
     /// Close a client connection by removing it from the client map.
     /// The client's write loop will end when the sender is dropped.
     pub async fn close_client(&self, client_id: u64) {
         self.clients.lock().await.remove(&client_id);
-        self.client_states.lock().await.remove(&client_id);
     }
 
     pub async fn client_count(&self) -> usize {
@@ -211,7 +229,6 @@ impl IpcServer {
 
     fn start_accept_loop(&self, listener: UnixListener, cmd_tx: mpsc::Sender<CommandEvent>) {
         let clients = self.clients.clone();
-        let client_states = self.client_states.clone();
         let next_client_id = self.next_client_id.clone();
         let max_clients = self.max_clients;
         let owner_uid = self.owner_uid;
@@ -248,25 +265,22 @@ impl IpcServer {
                 } else {
                     false
                 };
+                tracing::debug!(
+                    client_id,
+                    peer_authenticated,
+                    "accepted IPC client connection"
+                );
 
                 let (out_tx, out_rx) = mpsc::channel::<Arc<str>>(max_client_queue);
                 clients.lock().await.insert(client_id, out_tx.clone());
 
-                let state = ClientState {
-                    authenticated: peer_authenticated,
-                    ..Default::default()
-                };
-                client_states.lock().await.insert(client_id, state);
-
                 let clients_for_remove = clients.clone();
-                let client_states_for_remove = client_states.clone();
                 let cmd_tx_for_client = cmd_tx.clone();
 
                 tokio::spawn(async move {
                     let _ =
                         handle_client(socket, client_id, out_tx, out_rx, cmd_tx_for_client).await;
                     clients_for_remove.lock().await.remove(&client_id);
-                    client_states_for_remove.lock().await.remove(&client_id);
                 });
             }
         });
@@ -363,7 +377,3 @@ async fn handle_client(
 
     Ok(())
 }
-
-#[cfg(test)]
-#[path = "server_tests/mod.rs"]
-mod tests;

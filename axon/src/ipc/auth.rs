@@ -40,7 +40,3 @@ pub fn peer_uid(stream: &UnixStream) -> Option<u32> {
 pub fn peer_uid(_stream: &UnixStream) -> Option<u32> {
     None
 }
-
-#[cfg(test)]
-#[path = "auth_tests.rs"]
-mod tests;

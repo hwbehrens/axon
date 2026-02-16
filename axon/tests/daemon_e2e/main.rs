@@ -22,7 +22,6 @@ use tokio_util::sync::CancellationToken;
 
 mod broadcast;
 mod connection;
-mod ipc_v2;
 
 // =========================================================================
 // Helpers

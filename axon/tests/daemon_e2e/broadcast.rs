@@ -55,7 +55,7 @@ async fn response_broadcast_to_all_sender_ipc_clients() {
     .unwrap()
     .unwrap();
     let sender_inbound: Value = serde_json::from_str(resp_line.trim()).unwrap();
-    assert_eq!(sender_inbound["inbound"], json!(true));
+    assert_eq!(sender_inbound["event"], json!("inbound"));
     assert_eq!(sender_inbound["envelope"]["kind"], "error");
 
     // Listener client (didn't send anything) also gets the error broadcast.
@@ -68,7 +68,7 @@ async fn response_broadcast_to_all_sender_ipc_clients() {
     .unwrap()
     .unwrap();
     let listener_inbound: Value = serde_json::from_str(listener_line.trim()).unwrap();
-    assert_eq!(listener_inbound["inbound"], json!(true));
+    assert_eq!(listener_inbound["event"], json!("inbound"));
     assert_eq!(listener_inbound["envelope"]["kind"], "error");
 
     td.daemon_a.shutdown().await;
@@ -119,7 +119,7 @@ async fn broadcast_fanout_to_multiple_receiver_clients() {
             .expect("read failed");
         assert!(bytes > 0, "client {i} should receive inbound");
         let inbound: Value = serde_json::from_str(line.trim()).unwrap();
-        assert_eq!(inbound["inbound"], json!(true));
+        assert_eq!(inbound["event"], json!("inbound"));
         assert_eq!(inbound["envelope"]["kind"], "message");
     }
 

@@ -215,7 +215,7 @@ async fn ipc_client_disconnect_isolation() {
     let mut line = String::new();
     let mut reader = BufReader::new(&mut client_b);
     reader.read_line(&mut line).await.unwrap();
-    assert!(line.contains("\"inbound\":true"));
+    assert!(line.contains("\"event\":\"inbound\""));
 }
 
 /// IPC broadcasts to multiple simultaneous clients.
@@ -245,8 +245,8 @@ async fn ipc_broadcast_to_all_clients() {
     let mut reader_b = BufReader::new(&mut client_b);
     reader_a.read_line(&mut line_a).await.unwrap();
     reader_b.read_line(&mut line_b).await.unwrap();
-    assert!(line_a.contains("\"inbound\":true"));
-    assert!(line_b.contains("\"inbound\":true"));
+    assert!(line_a.contains("\"event\":\"inbound\""));
+    assert!(line_b.contains("\"event\":\"inbound\""));
 }
 
 /// IPC cleanup removes socket file.
