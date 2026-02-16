@@ -16,6 +16,12 @@ struct BroadcastTarget {
 
 impl IpcHandlers {
     pub async fn broadcast_inbound(&self, envelope: &Envelope) -> Result<()> {
+        // Inbound delivery paths (IPC.md §3.5):
+        // - v1 clients (no hello): legacy broadcast to all
+        // - v2 clients without subscription: no delivery (use inbox to pull)
+        // - v2 clients with subscription: push if kind matches filter AND
+        //   seq > filter.replay_to_seq (prevents duplicate delivery with replay)
+
         // Step 1: Push to buffer (lock briefly, then release)
         let (seq, buffered_at_ms) = self.receive_buffer.lock().await.push(envelope.clone());
 
@@ -63,6 +69,10 @@ impl IpcHandlers {
 
         for target in &targets {
             if target.version.unwrap_or(1) < 2 {
+                // In hardened mode, pre-hello clients receive nothing (IPC.md §1.2)
+                if !self.config.allow_v1 && target.version.is_none() {
+                    continue;
+                }
                 // v1 client: legacy broadcast
                 if let Some(line) = &v1_line {
                     let _ = target.tx.try_send(line.clone());

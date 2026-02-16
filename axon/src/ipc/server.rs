@@ -2,8 +2,8 @@ use std::collections::HashMap;
 use std::fs;
 use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, LazyLock};
 
 use anyhow::{Context, Result};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -19,6 +19,17 @@ use crate::message::Envelope;
 
 const MAX_CLIENT_QUEUE: usize = 1024;
 const MAX_IPC_LINE_LENGTH: usize = 64 * 1024; // 64 KB, aligned with MAX_MESSAGE_SIZE
+
+static INVALID_COMMAND_LINE: LazyLock<Arc<str>> = LazyLock::new(|| {
+    Arc::from(
+        serde_json::to_string(&DaemonReply::Error {
+            ok: false,
+            error: super::protocol::IpcErrorCode::InvalidCommand,
+            req_id: None,
+        })
+        .expect("static error serialization"),
+    )
+});
 
 // Re-export config and types for public API
 pub use super::handlers::IpcServerConfig;
@@ -125,8 +136,19 @@ impl IpcServer {
     pub async fn send_reply(&self, client_id: u64, reply: &DaemonReply) -> Result<()> {
         let line: Arc<str> =
             Arc::from(serde_json::to_string(reply).context("failed to serialize daemon reply")?);
-        if let Some(tx) = self.clients.lock().await.get(&client_id).cloned() {
-            let _ = tx.try_send(line);
+        let tx = {
+            let clients = self.clients.lock().await;
+            clients.get(&client_id).cloned()
+        };
+        if let Some(tx) = tx {
+            let send_result =
+                tokio::time::timeout(std::time::Duration::from_secs(2), tx.send(line)).await;
+            match send_result {
+                Ok(Ok(())) => {}
+                Ok(Err(_)) | Err(_) => {
+                    self.close_client(client_id).await;
+                }
+            }
         }
         Ok(())
     }
@@ -269,41 +291,53 @@ async fn handle_client(
     });
 
     let mut reader = BufReader::new(read_half);
-    let mut buf = Vec::new();
+    let mut buf = Vec::with_capacity(MAX_IPC_LINE_LENGTH + 1);
     loop {
         buf.clear();
-        let n = reader
-            .read_until(b'\n', &mut buf)
-            .await
-            .context("failed reading IPC line")?;
-        if n == 0 {
+        let mut found_newline = false;
+        let mut exceeded = false;
+
+        loop {
+            let available = reader.fill_buf().await.context("failed reading IPC")?;
+            if available.is_empty() {
+                break; // EOF
+            }
+
+            if let Some(pos) = available.iter().position(|&b| b == b'\n') {
+                let needed = pos;
+                if buf.len() + needed > MAX_IPC_LINE_LENGTH {
+                    exceeded = true;
+                    reader.consume(pos + 1);
+                    break;
+                }
+                buf.extend_from_slice(&available[..pos]);
+                reader.consume(pos + 1);
+                found_newline = true;
+                break;
+            } else {
+                let len = available.len();
+                if buf.len() + len > MAX_IPC_LINE_LENGTH {
+                    exceeded = true;
+                    reader.consume(len);
+                    break;
+                }
+                buf.extend_from_slice(available);
+                reader.consume(len);
+            }
+        }
+
+        if exceeded {
+            let _ = out_tx.try_send(INVALID_COMMAND_LINE.clone());
+            break; // Close connection — can't reliably find next command boundary
+        }
+
+        if !found_newline {
             break; // EOF
-        }
-        // Strip trailing newline
-        if buf.last() == Some(&b'\n') {
-            buf.pop();
-        }
-        if buf.len() > MAX_IPC_LINE_LENGTH {
-            // Reject overlong line without parsing
-            let err_line = serde_json::to_string(&DaemonReply::Error {
-                ok: false,
-                error: super::protocol::IpcErrorCode::InvalidCommand,
-                req_id: None,
-            })
-            .context("failed to serialize IPC length error")?;
-            let _ = out_tx.try_send(Arc::from(err_line));
-            continue;
         }
         let line = match std::str::from_utf8(&buf) {
             Ok(s) => s,
             Err(_) => {
-                let err_line = serde_json::to_string(&DaemonReply::Error {
-                    ok: false,
-                    error: super::protocol::IpcErrorCode::InvalidCommand,
-                    req_id: None,
-                })
-                .context("failed to serialize IPC parse error")?;
-                let _ = out_tx.try_send(Arc::from(err_line));
+                let _ = out_tx.try_send(INVALID_COMMAND_LINE.clone());
                 continue;
             }
         };
@@ -315,13 +349,7 @@ async fn handle_client(
                     .map_err(|_| anyhow::anyhow!("daemon command channel closed"))?;
             }
             Err(_err) => {
-                let err_line = serde_json::to_string(&DaemonReply::Error {
-                    ok: false,
-                    error: super::protocol::IpcErrorCode::InvalidCommand,
-                    req_id: None,
-                })
-                .context("failed to serialize IPC parse error")?;
-                let _ = out_tx.try_send(Arc::from(err_line));
+                let _ = out_tx.try_send(INVALID_COMMAND_LINE.clone());
             }
         }
     }

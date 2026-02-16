@@ -303,7 +303,7 @@ All CLI commands (except `daemon`) connect to the Unix socket, send a command, p
 - **Forward secrecy:** Provided by QUIC's TLS 1.3. Ephemeral key exchange per connection. Compromising the static Ed25519 key does NOT decrypt past sessions.
 - **MITM on first discovery (TOFU):** mDNS is unauthenticated. First discovery trusts the pubkey advertised. Mitigations: (a) known_peers.json pins pubkeys after first contact, (b) static config with pre-shared pubkeys for high-security setups, (c) future: out-of-band verification (QR code, etc.).
 - **0-RTT replay:** QUIC 0-RTT data can be replayed. Mitigation: message IDs (UUIDs) for deduplication at application layer. Notify messages are idempotent anyway.
-- **Local IPC security:** Unix socket permissions (user-only). No authentication beyond filesystem ACLs.
+- **Local IPC security:** Unix socket permissions (`0600`, user-only) as baseline. IPC v2 adds peer-credential verification and token-based authentication as defense-in-depth. See [`IPC.md`](./IPC.md) §2 for details.
 
 ## 11. Dependencies
 

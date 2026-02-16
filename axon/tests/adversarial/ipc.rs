@@ -156,29 +156,33 @@ async fn ipc_malformed_input_resilience() {
                     "malformed input should get error reply, got: {line}"
                 );
             }
+        }
 
-            // Extremely long line (100KB of 'a' chars).
+        // --- Overlong line on a separate connection (closes connection) ---
+        // Bounded read: overlong lines close the connection since there's no
+        // reliable way to find the next command boundary in the stream.
+        {
+            let stream = UnixStream::connect(&socket_path).await.unwrap();
+            let (read_half, mut write_half) = stream.into_split();
+            let mut reader = BufReader::new(read_half);
+
             let long_line = format!("{}\n", "a".repeat(100_000));
-            write_half.write_all(long_line.as_bytes()).await.unwrap();
-            let mut line = String::new();
-            reader.read_line(&mut line).await.unwrap();
-            assert!(
-                line.contains("\"ok\":false"),
-                "long malformed input should get error reply, got: {line}"
-            );
+            // Server may close before we finish writing — ignore BrokenPipe
+            let _ = write_half.write_all(long_line.as_bytes()).await;
 
-            // Connection should still be alive — send a valid command.
-            write_half
-                .write_all(b"{\"cmd\":\"status\"}\n")
-                .await
-                .unwrap();
+            // Should get an error reply then the connection closes (EOF)
             let mut line = String::new();
-            reader.read_line(&mut line).await.unwrap();
-            let v: Value = serde_json::from_str(line.trim()).unwrap();
-            assert_eq!(
-                v["ok"], true,
-                "server must still respond after malformed input"
-            );
+            let n = reader.read_line(&mut line).await.unwrap();
+            if n > 0 {
+                assert!(
+                    line.contains("\"ok\":false"),
+                    "long malformed input should get error reply, got: {line}"
+                );
+            }
+            // Connection is closed — subsequent reads return EOF
+            let mut eof_line = String::new();
+            let eof_n = reader.read_line(&mut eof_line).await.unwrap();
+            assert_eq!(eof_n, 0, "connection should be closed after overlong line");
         }
 
         // --- Non-UTF8 binary garbage on a separate connection ---

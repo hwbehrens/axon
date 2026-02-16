@@ -43,7 +43,22 @@ impl AxonPaths {
     }
 
     pub fn ensure_root_exists(&self) -> Result<()> {
-        if !self.root.exists() {
+        if self.root.exists() {
+            // Reject symlinked root directory (security: IPC.md §2.2)
+            let meta = fs::symlink_metadata(&self.root).with_context(|| {
+                format!(
+                    "failed to read metadata for AXON root: {}",
+                    self.root.display()
+                )
+            })?;
+            if meta.file_type().is_symlink() {
+                anyhow::bail!(
+                    "AXON root directory is a symlink (security violation): {}. \
+                     Remove the symlink and restart.",
+                    self.root.display()
+                );
+            }
+        } else {
             fs::create_dir_all(&self.root).with_context(|| {
                 format!("failed to create AXON root dir: {}", self.root.display())
             })?;

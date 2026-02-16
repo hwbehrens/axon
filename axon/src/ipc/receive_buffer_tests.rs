@@ -99,18 +99,46 @@ fn ack_out_of_range_rejected() {
 }
 
 #[test]
-fn fetch_with_kind_filter() {
+fn fetch_with_kind_filter_stops_at_non_matching() {
     let mut buf = ReceiveBuffer::new(100, 86400);
     buf.push(make_envelope(MessageKind::Query));
     buf.push(make_envelope(MessageKind::Notify));
     buf.push(make_envelope(MessageKind::Query));
 
     let kinds = [MessageKind::Query];
-    let (msgs, _, _) = buf.fetch("c1", 10, Some(&kinds));
+    let (msgs, next_seq, has_more) = buf.fetch("c1", 10, Some(&kinds));
+    // Stops at seq=2 (Notify doesn't match), returns only seq=1
+    assert_eq!(msgs.len(), 1);
+    assert_eq!(msgs[0].envelope.kind, MessageKind::Query);
+    assert_eq!(next_seq, Some(1));
+    assert!(has_more, "has_more because non-matching message blocks");
+}
+
+#[test]
+fn fetch_with_kind_filter_contiguous_matching() {
+    let mut buf = ReceiveBuffer::new(100, 86400);
+    buf.push(make_envelope(MessageKind::Query));
+    buf.push(make_envelope(MessageKind::Query));
+    buf.push(make_envelope(MessageKind::Notify));
+
+    let kinds = [MessageKind::Query];
+    let (msgs, next_seq, has_more) = buf.fetch("c1", 10, Some(&kinds));
+    // Returns both contiguous Query messages, stops at Notify
     assert_eq!(msgs.len(), 2);
-    for msg in &msgs {
-        assert_eq!(msg.envelope.kind, MessageKind::Query);
-    }
+    assert_eq!(next_seq, Some(2));
+    assert!(has_more);
+}
+
+#[test]
+fn fetch_without_filter_returns_all() {
+    let mut buf = ReceiveBuffer::new(100, 86400);
+    buf.push(make_envelope(MessageKind::Query));
+    buf.push(make_envelope(MessageKind::Notify));
+    buf.push(make_envelope(MessageKind::Query));
+
+    let (msgs, _, has_more) = buf.fetch("c1", 10, None);
+    assert_eq!(msgs.len(), 3);
+    assert!(!has_more);
 }
 
 #[test]
@@ -285,14 +313,13 @@ fn consumer_gc_resets_cursor() {
 
 proptest! {
     #[test]
-    fn fetch_limit_clamps(limit in 0usize..10000) {
+    fn fetch_respects_limit(limit in 1usize..=1000) {
         let mut buf = ReceiveBuffer::new(100, 86400);
         for _ in 0..10 {
             buf.push(make_envelope(MessageKind::Notify));
         }
         let (msgs, _, _) = buf.fetch("c1", limit, None);
-        let effective_limit = limit.clamp(1, 1000);
-        prop_assert!(msgs.len() <= effective_limit);
+        prop_assert!(msgs.len() <= limit);
     }
 
     #[test]

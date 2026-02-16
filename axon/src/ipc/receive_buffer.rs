@@ -154,7 +154,6 @@ impl ReceiveBuffer {
     ) -> (Vec<BufferedMessage>, Option<u64>, bool) {
         self.evict_expired();
 
-        let limit = limit.clamp(1, 1000);
         let consumer_state = self.consumers.entry(consumer.to_string()).or_default();
         consumer_state.last_used_ms = (self.now_millis)();
         let acked_seq = consumer_state.acked_seq;
@@ -168,10 +167,14 @@ impl ReceiveBuffer {
                 continue;
             }
 
+            // When a kinds filter is active, stop at the first non-matching
+            // message rather than skipping it. This prevents the ack cursor
+            // from jumping past messages that were never delivered.
             if let Some(filter_kinds) = kinds
                 && !filter_kinds.contains(&entry.envelope.kind)
             {
-                continue;
+                has_more = true;
+                break;
             }
 
             if results.len() < limit {
@@ -229,10 +232,11 @@ impl ReceiveBuffer {
             if entry.seq > replay_to_seq {
                 break;
             }
+            // Stop at non-matching kinds to preserve ack cursor safety
             if let Some(filter_kinds) = kinds
                 && !filter_kinds.contains(&entry.envelope.kind)
             {
-                continue;
+                break;
             }
             results.push(BufferedMessage {
                 seq: entry.seq,

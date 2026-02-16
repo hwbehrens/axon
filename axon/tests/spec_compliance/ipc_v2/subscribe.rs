@@ -102,6 +102,99 @@ async fn subscribe_replay_true_replays_buffered() {
     assert!(replay_to_seq.is_some(), "replay_to_seq must be set");
 }
 
+/// IPC.md §3.5: messages arriving after replay_to_seq snapshot but before
+/// replay completes must be delivered as live events (not dropped).
+#[tokio::test]
+async fn subscribe_cutover_no_message_loss() {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::UnixStream;
+
+    let dir = tempfile::tempdir().unwrap();
+    let socket_path = dir.path().join("axon.sock");
+    let config = IpcServerConfig {
+        token: Some(TOKEN.to_string()),
+        ..Default::default()
+    };
+    let (server, mut cmd_rx) = IpcServer::bind(socket_path.clone(), 64, config)
+        .await
+        .unwrap();
+
+    // Buffer 1 message before subscribing
+    server
+        .broadcast_inbound(&make_envelope(MessageKind::Query))
+        .await
+        .unwrap();
+
+    let client = UnixStream::connect(&socket_path).await.unwrap();
+    let (read_half, mut write_half) = client.into_split();
+    let mut reader = BufReader::new(read_half);
+    let mut line = String::new();
+
+    // Hello + Auth
+    write_half
+        .write_all(b"{\"cmd\":\"hello\",\"version\":2,\"req_id\":\"h1\"}\n")
+        .await
+        .unwrap();
+    let cmd = cmd_rx.recv().await.unwrap();
+    let reply = server.handle_command(cmd).await.unwrap();
+    server.send_reply(1, &reply).await.unwrap();
+    reader.read_line(&mut line).await.unwrap();
+
+    let auth_json = format!("{{\"cmd\":\"auth\",\"token\":\"{TOKEN}\",\"req_id\":\"a1\"}}\n");
+    write_half.write_all(auth_json.as_bytes()).await.unwrap();
+    let cmd = cmd_rx.recv().await.unwrap();
+    let reply = server.handle_command(cmd).await.unwrap();
+    server.send_reply(1, &reply).await.unwrap();
+    line.clear();
+    reader.read_line(&mut line).await.unwrap();
+
+    // Subscribe with replay=true
+    write_half
+        .write_all(b"{\"cmd\":\"subscribe\",\"replay\":true,\"req_id\":\"s1\"}\n")
+        .await
+        .unwrap();
+    let cmd = cmd_rx.recv().await.unwrap();
+    let reply = server.handle_command(cmd).await.unwrap();
+    server.send_reply(1, &reply).await.unwrap();
+
+    // Now broadcast a LIVE message (after subscribe was processed)
+    server
+        .broadcast_inbound(&make_envelope(MessageKind::Notify))
+        .await
+        .unwrap();
+
+    // Read all events: should get 1 replay + subscribe reply + 1 live
+    let mut replay_count = 0;
+    let mut live_count = 0;
+    let mut got_subscribe = false;
+
+    for _ in 0..5 {
+        line.clear();
+        let read_result = tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            reader.read_line(&mut line),
+        )
+        .await;
+        if read_result.is_err() || line.trim().is_empty() {
+            break;
+        }
+        let v: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
+        if v.get("subscribed").is_some() {
+            got_subscribe = true;
+        } else if v.get("event").is_some() {
+            if v["replay"] == true {
+                replay_count += 1;
+            } else {
+                live_count += 1;
+            }
+        }
+    }
+
+    assert!(got_subscribe, "must receive subscribe response");
+    assert_eq!(replay_count, 1, "must replay 1 pre-existing message");
+    assert_eq!(live_count, 1, "must deliver 1 live message (not dropped)");
+}
+
 /// IPC.md §3.5: subscribe with replay=false skips replay → replayed=0.
 #[tokio::test]
 async fn subscribe_replay_false_skips_replay() {

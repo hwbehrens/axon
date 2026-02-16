@@ -46,6 +46,15 @@ impl IpcHandlers {
             None => None,
         };
 
+        // Validate limit range (IPC.md §3.3: 1–1000)
+        if !(1..=1000).contains(&limit) {
+            return Ok(DaemonReply::Error {
+                ok: false,
+                error: IpcErrorCode::InvalidCommand,
+                req_id,
+            });
+        }
+
         let mut buf = self.receive_buffer.lock().await;
         let (messages, next_seq, has_more) = buf.fetch(consumer, limit, kinds.as_deref());
         if let Some(seq) = next_seq {
@@ -90,6 +99,18 @@ impl IpcHandlers {
         raw_kinds: Option<Vec<String>>,
         req_id: Option<String>,
     ) -> Result<DaemonReply> {
+        // Subscribe semantics (IPC.md §3.5):
+        //
+        // 1. Take replay_to_seq snapshot from receive buffer
+        // 2. Install subscription filter BEFORE replay (prevents cutover race)
+        //    - broadcast_inbound uses filter.replay_to_seq to avoid duplicates:
+        //      live events with seq > replay_to_seq are delivered by broadcast,
+        //      replay events with seq <= replay_to_seq are sent below
+        // 3. Replay buffered messages (best-effort; may truncate under backpressure)
+        // 4. Return subscribe response with replayed count
+        //
+        // Clients use `inbox` to recover any messages missed during truncated replay.
+
         // Validate kinds
         let kinds = match raw_kinds {
             Some(ref raw) => match validate_raw_kinds(raw) {
@@ -107,6 +128,20 @@ impl IpcHandlers {
 
         let mut buf = self.receive_buffer.lock().await;
         let replay_to_seq = buf.highest_seq();
+
+        // Install subscription filter BEFORE replay to avoid cutover race:
+        // broadcast_inbound checks filter.replay_to_seq and only delivers
+        // seq > replay_to_seq, so replay and live delivery don't overlap.
+        {
+            let mut states = self.client_states.lock().await;
+            let state = states.entry(client_id).or_insert_with(ClientState::default);
+            let filter = SubscriptionFilter {
+                kinds: kinds.clone(),
+                replay_to_seq,
+            };
+            debug!(client_id, kinds = ?filter.kinds, "IPC client subscribed");
+            state.subscription = Some(filter);
+        }
 
         // Replay buffered messages if requested
         let mut replayed = 0;
@@ -147,16 +182,6 @@ impl IpcHandlers {
         } else {
             drop(buf);
         }
-
-        // Set subscription filter
-        let mut states = self.client_states.lock().await;
-        let state = states.entry(client_id).or_insert_with(ClientState::default);
-        let filter = SubscriptionFilter {
-            kinds: kinds.clone(),
-            replay_to_seq,
-        };
-        debug!(client_id, kinds = ?filter.kinds, "IPC client subscribed");
-        state.subscription = Some(filter);
 
         Ok(DaemonReply::Subscribe {
             ok: true,

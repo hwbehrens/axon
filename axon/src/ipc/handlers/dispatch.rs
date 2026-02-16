@@ -58,6 +58,12 @@ impl IpcHandlers {
         let state = states.entry(client_id).or_insert_with(ClientState::default);
 
         let req_id = command.req_id().map(|s| s.to_string());
+        // v1 connections omit req_id in responses (IPC.md §5)
+        let req_id = if state.is_v2_semantics() {
+            req_id
+        } else {
+            None
+        };
 
         tracing::debug!(
             client_id,
@@ -233,6 +239,7 @@ impl IpcHandlers {
                 ref_id,
                 req_id,
             } => {
+                let req_id = if is_v2_client { req_id } else { None };
                 let Some(backend) = backend else {
                     return Ok(DispatchResult {
                         reply: DaemonReply::Error {
@@ -288,6 +295,7 @@ impl IpcHandlers {
                 }
             }
             IpcCommand::Peers { req_id } => {
+                let req_id = if is_v2_client { req_id } else { None };
                 let Some(backend) = backend else {
                     return Ok(DispatchResult {
                         reply: DaemonReply::Error {
@@ -321,6 +329,7 @@ impl IpcHandlers {
                 }
             }
             IpcCommand::Status { req_id } => {
+                let req_id = if is_v2_client { req_id } else { None };
                 let Some(backend) = backend else {
                     return Ok(DispatchResult {
                         reply: DaemonReply::Error {

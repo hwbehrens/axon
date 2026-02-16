@@ -174,6 +174,8 @@ Located at `~/.axon/config.toml` (or `<axon_root>/config.toml`).
 | `ipc.buffer_byte_cap` | `usize` | `4194304` | Hard byte cap on receive buffer memory (default: 4 MB). Oldest messages are evicted when exceeded. |
 | `ipc.token_path` | `String` | `~/.axon/ipc-token` | Path to the IPC auth token file (used when peer credentials are unavailable). |
 
+> **⚠️ Hardened mode note:** The bundled CLI currently uses IPC v1 (no `hello` handshake). Setting `ipc.allow_v1 = false` will cause all CLI commands (`axon peers`, `axon send`, etc.) to be rejected with `hello_required`. Use raw IPC or a v2-capable client when hardened mode is enabled.
+
 #### Static peers
 
 ```toml

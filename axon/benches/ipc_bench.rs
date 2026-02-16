@@ -160,6 +160,77 @@ fn bench_daemon_reply_serialize(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_ipc_inbound_event_serialize(c: &mut Criterion) {
+    let mut group = c.benchmark_group("ipc_v2_events");
+
+    let envelope = make_envelope();
+
+    // v2 InboundEvent serialization (what broadcast_inbound produces)
+    group.bench_function("inbound_event", |b| {
+        b.iter(|| {
+            let event = json!({
+                "event": "inbound",
+                "replay": false,
+                "seq": 42u64,
+                "buffered_at_ms": 1700000000000u64,
+                "envelope": black_box(&envelope),
+            });
+            serde_json::to_string(&event).unwrap()
+        })
+    });
+
+    // v2 InboundEvent with Arc<str> fanout to 10 clients
+    group.bench_function("inbound_event_fanout_10", |b| {
+        b.iter(|| {
+            let event = json!({
+                "event": "inbound",
+                "replay": false,
+                "seq": 42u64,
+                "buffered_at_ms": 1700000000000u64,
+                "envelope": black_box(&envelope),
+            });
+            let line: std::sync::Arc<str> =
+                std::sync::Arc::from(serde_json::to_string(&event).unwrap());
+            for _ in 0..10 {
+                let _cloned = line.clone();
+            }
+        })
+    });
+
+    group.finish();
+}
+
+fn bench_inbox_reply_serialize(c: &mut Criterion) {
+    let mut group = c.benchmark_group("ipc_v2_inbox");
+
+    let envelope = make_envelope();
+
+    // Inbox reply with 50 messages (default limit)
+    let messages: Vec<serde_json::Value> = (0..50)
+        .map(|i| {
+            json!({
+                "seq": i + 1,
+                "buffered_at_ms": 1700000000000u64 + i * 1000,
+                "envelope": &envelope,
+            })
+        })
+        .collect();
+
+    let reply = json!({
+        "ok": true,
+        "messages": messages,
+        "next_seq": 50,
+        "has_more": false,
+        "req_id": "r1",
+    });
+
+    group.bench_function("inbox_50_messages", |b| {
+        b.iter(|| serde_json::to_string(black_box(&reply)).unwrap())
+    });
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_ipc_serialize_inbound,
@@ -167,5 +238,7 @@ criterion_group!(
     bench_envelope_clone_vs_arc,
     bench_ipc_command_parse,
     bench_daemon_reply_serialize,
+    bench_ipc_inbound_event_serialize,
+    bench_inbox_reply_serialize,
 );
 criterion_main!(benches);

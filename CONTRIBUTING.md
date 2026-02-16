@@ -77,6 +77,12 @@ All source files must stay **under 500 lines**. If a file approaches this limit,
 - No comments unless the code is genuinely complex. The code should be self-documenting.
 - Prefer separating mechanical refactors (file splits, renames) from functional changes into distinct commits when possible.
 
+### Commit messages
+
+- State the user-visible behavior change in the subject line, not just what code was touched.
+- Note spec impact when applicable (e.g., "IPC: reject inbox limit outside 1–1000 (IPC.md §3.3)").
+- Separate mechanical refactors from functional changes into distinct commits.
+
 ### Security
 
 - Never log or expose private keys, secrets, or sensitive data.

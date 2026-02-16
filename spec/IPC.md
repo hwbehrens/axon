@@ -53,7 +53,7 @@ After a successful `hello`, all semantics on that connection are governed by the
 
 If a client skips `hello` and sends a v2-only command (`whoami`, `inbox`, `ack`, `subscribe`), the daemon MUST reject it with `hello_required`.
 
-**Hardened mode:** When `ipc.allow_v1 = false`, the daemon MUST reject any connection that does not complete `hello` negotiating `version >= 2`. A `hello` that negotiates version 1 MUST be rejected with error code `unsupported_version`. See §8.
+**Hardened mode:** When `ipc.allow_v1 = false`, the daemon MUST reject any connection that does not complete `hello` negotiating `version >= 2`. Any command received before a successful `hello` MUST be rejected with `hello_required` and the connection closed. A `hello` that negotiates version 1 MUST be rejected with error code `unsupported_version` and the connection closed. Pre-hello connections MUST NOT receive legacy broadcast messages. See §8.
 
 ### 1.3 Request/Response Correlation (v2+)
 
@@ -199,7 +199,7 @@ Fetch buffered inbound messages for the connection's `consumer`.
 | `next_seq` | integer \| null | The highest `seq` returned in this response, or `null` if no messages were returned. |
 | `has_more` | boolean | `true` if more messages are available beyond `limit`. |
 
-**Selection rule:** `inbox` returns messages with `seq > consumer.acked_seq` that match `kinds`.
+**Selection rule:** `inbox` returns messages with `seq > consumer.acked_seq` that match `kinds`. When a `kinds` filter is active, the daemon stops at the first non-matching message rather than skipping it — this ensures the ack cursor cannot advance past messages of other kinds that were never delivered. Clients needing multiple kinds should either omit the `kinds` filter or use separate consumers.
 
 When the buffer is empty or all messages have been acknowledged, the response is `{"ok": true, "req_id": "4", "messages": [], "next_seq": null, "has_more": false}`.
 
@@ -252,7 +252,9 @@ Opens a streaming subscription on the current connection for the connection's `c
 {"event": "inbound", "replay": false, "seq": 106, "buffered_at_ms": 1771108300123, "envelope": {}}
 ```
 
-**Replay snapshot rule (normative):** When `subscribe` is received, the daemon defines a snapshot `replay_to_seq` equal to the current highest buffered `seq`. If `replay = true`, it MUST emit replay events (with `"replay": true`) in increasing `seq` order up to `replay_to_seq`, then begin emitting live events (with `"replay": false`) for newly buffered messages (`seq > replay_to_seq`). No message may be emitted twice on the same subscription.
+**Replay snapshot rule (normative):** When `subscribe` is received, the daemon defines a snapshot `replay_to_seq` equal to the current highest buffered `seq`. If `replay = true`, it emits replay events (with `"replay": true`) in increasing `seq` order up to `replay_to_seq`, then begins emitting live events (with `"replay": false`) for newly buffered messages (`seq > replay_to_seq`). No message may be emitted twice on the same subscription.
+
+The daemon MAY truncate replay under per-client backpressure (client channel full). The `replayed` field in the subscribe response indicates how many replay events were actually emitted. Clients MUST use `inbox` to recover any missed replay items if `replayed` is less than expected.
 
 **Operational note:** The replay burst is bounded by the receive buffer capacity (`ipc.buffer_size`, default 1000). Clients concerned about context budget consumption MAY set `replay = false` and use `inbox` with explicit `limit` for controlled retrieval, or configure a smaller `ipc.buffer_size`.
 

@@ -9,17 +9,17 @@ use tokio::net::UnixStream;
 
 /// Wait until the server has registered the expected number of clients.
 async fn wait_for_clients(server: &IpcServer, expected: usize) {
+    let mut last_count = 0;
     for _ in 0..100 {
-        if server.client_count().await >= expected {
+        last_count = server.client_count().await;
+        if last_count >= expected {
             return;
         }
         tokio::time::sleep(std::time::Duration::from_millis(5)).await;
     }
     panic!(
         "timed out waiting for {} clients (got {})",
-        expected,
-        // can't await here but the panic message is best-effort
-        expected
+        expected, last_count
     );
 }
 
