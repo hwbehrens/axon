@@ -1,4 +1,5 @@
 use std::collections::{HashMap, VecDeque};
+use std::sync::Arc;
 
 use crate::message::{Envelope, MessageKind};
 
@@ -10,7 +11,7 @@ use super::protocol::BufferedMessage;
 
 const DEFAULT_BYTE_CAP: usize = 4 * 1024 * 1024; // 4 MB
 
-fn now_millis() -> u64 {
+fn system_now_millis() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
@@ -43,6 +44,7 @@ struct BufferedEntry {
 pub struct ConsumerState {
     pub acked_seq: u64,
     pub highest_delivered_seq: u64,
+    pub last_used_ms: u64,
 }
 
 pub struct ReceiveBuffer {
@@ -53,6 +55,8 @@ pub struct ReceiveBuffer {
     total_bytes: usize,
     next_seq: u64,
     consumers: HashMap<String, ConsumerState>,
+    max_consumers: usize,
+    now_millis: Arc<dyn Fn() -> u64 + Send + Sync>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -70,7 +74,14 @@ impl ReceiveBuffer {
             total_bytes: 0,
             next_seq: 1,
             consumers: HashMap::new(),
+            max_consumers: 1024,
+            now_millis: Arc::new(system_now_millis),
         }
+    }
+
+    pub fn with_clock(mut self, clock: Arc<dyn Fn() -> u64 + Send + Sync>) -> Self {
+        self.now_millis = clock;
+        self
     }
 
     pub fn with_byte_cap(mut self, byte_cap: usize) -> Self {
@@ -78,10 +89,16 @@ impl ReceiveBuffer {
         self
     }
 
+    #[cfg(test)]
+    pub fn with_max_consumers(mut self, max: usize) -> Self {
+        self.max_consumers = max;
+        self
+    }
+
     pub fn push(&mut self, envelope: Envelope) -> (u64, u64) {
         self.evict_expired();
 
-        let buffered_at_ms = now_millis();
+        let buffered_at_ms = (self.now_millis)();
         let seq = self.next_seq;
         self.next_seq += 1;
 
@@ -136,6 +153,7 @@ impl ReceiveBuffer {
 
         let limit = limit.clamp(1, 1000);
         let consumer_state = self.consumers.entry(consumer.to_string()).or_default();
+        consumer_state.last_used_ms = (self.now_millis)();
         let acked_seq = consumer_state.acked_seq;
 
         let mut results = Vec::new();
@@ -166,17 +184,23 @@ impl ReceiveBuffer {
             }
         }
 
+        self.gc_consumers();
+
         (results, highest_seq, has_more)
     }
 
     pub fn ack(&mut self, consumer: &str, up_to_seq: u64) -> Result<u64, AckError> {
         let consumer_state = self.consumers.entry(consumer.to_string()).or_default();
+        consumer_state.last_used_ms = (self.now_millis)();
 
         if up_to_seq > consumer_state.highest_delivered_seq {
             return Err(AckError::OutOfRange);
         }
 
         consumer_state.acked_seq = up_to_seq;
+
+        self.gc_consumers();
+
         Ok(up_to_seq)
     }
 
@@ -191,6 +215,7 @@ impl ReceiveBuffer {
         kinds: Option<&[MessageKind]>,
     ) -> Vec<BufferedMessage> {
         let consumer_state = self.consumers.entry(consumer.to_string()).or_default();
+        consumer_state.last_used_ms = (self.now_millis)();
         let acked_seq = consumer_state.acked_seq;
         let mut results = Vec::new();
 
@@ -213,13 +238,32 @@ impl ReceiveBuffer {
             });
         }
 
+        self.gc_consumers();
+
         results
     }
 
     pub fn update_delivered_seq(&mut self, consumer: &str, seq: u64) {
         let cs = self.consumers.entry(consumer.to_string()).or_default();
+        cs.last_used_ms = (self.now_millis)();
         if seq > cs.highest_delivered_seq {
             cs.highest_delivered_seq = seq;
+        }
+    }
+
+    fn gc_consumers(&mut self) {
+        if self.max_consumers == 0 || self.consumers.len() <= self.max_consumers {
+            return;
+        }
+        let mut entries: Vec<(String, u64)> = self
+            .consumers
+            .iter()
+            .map(|(k, v)| (k.clone(), v.last_used_ms))
+            .collect();
+        entries.sort_by_key(|(_, ts)| *ts);
+        let to_remove = self.consumers.len() - self.max_consumers;
+        for (key, _) in entries.into_iter().take(to_remove) {
+            self.consumers.remove(&key);
         }
     }
 
@@ -228,7 +272,7 @@ impl ReceiveBuffer {
             return;
         }
 
-        let now_ms = now_millis();
+        let now_ms = (self.now_millis)();
         let ttl_ms = self.ttl_secs * 1000;
 
         let initial_len = self.entries.len();
