@@ -179,10 +179,15 @@ async fn ipc_malformed_input_resilience() {
                     "long malformed input should get error reply, got: {line}"
                 );
             }
-            // Connection is closed — subsequent reads return EOF
+            // Connection is closed — subsequent reads return EOF or ConnectionReset
             let mut eof_line = String::new();
-            let eof_n = reader.read_line(&mut eof_line).await.unwrap();
-            assert_eq!(eof_n, 0, "connection should be closed after overlong line");
+            let eof_result = reader.read_line(&mut eof_line).await;
+            match eof_result {
+                Ok(0) => {} // clean EOF
+                Err(e) if e.kind() == std::io::ErrorKind::ConnectionReset => {} // RST on Linux
+                Ok(n) => panic!("expected EOF after overlong line, got {n} bytes: {eof_line}"),
+                Err(e) => panic!("unexpected error after overlong line: {e}"),
+            }
         }
 
         // --- Non-UTF8 binary garbage on a separate connection ---
