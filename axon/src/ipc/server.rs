@@ -48,7 +48,7 @@ impl Default for IpcServerConfig {
             agent_id: String::new(),
             public_key: String::new(),
             name: None,
-            version: "0.1.0".to_string(),
+            version: "0.3.0".to_string(),
             max_client_queue: 1024,
             uptime_secs: Arc::new(|| 0),
         }

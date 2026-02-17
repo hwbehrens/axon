@@ -131,7 +131,7 @@ fn bench_daemon_reply_serialize(c: &mut Criterion) {
             agent_id: format!("ed25519.{}", "a".repeat(32)),
             public_key: "cHVia2V5".to_string(),
             name: Some("bench-agent".to_string()),
-            version: "0.1.0".to_string(),
+            version: "0.3.0".to_string(),
             uptime_secs: 321,
         },
         req_id: Some("req-5".to_string()),

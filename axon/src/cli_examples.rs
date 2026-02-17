@@ -95,7 +95,7 @@ All connected clients receive inbound messages as broadcast events.
 
 # 5. Daemon identity
 → {{"cmd":"whoami"}}
-← {{"ok":true,"agent_id":"ed25519.a1b2...","public_key":"<base64>","name":"my-agent","version":"0.1.0","uptime_secs":3600}}
+← {{"ok":true,"agent_id":"ed25519.a1b2...","public_key":"<base64>","name":"my-agent","version":"0.3.0","uptime_secs":3600}}
 
 # 6. Inbound message event (broadcast to all connected clients)
 ← {{"event":"inbound","from":"ed25519.f6e5d4c3...","envelope":{{"id":"880e8400-...","kind":"request","payload":{{"question":"Hello?"}}}}}}
