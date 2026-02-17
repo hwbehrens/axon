@@ -63,33 +63,76 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: gh release upload "${{ github.ref_name }}" "${{ env.ARCHIVE }}"
 
-  homebrew-tap-check:
-    name: homebrew tap check
+  homebrew-tap-update:
+    name: homebrew tap update
+    needs: build
+    if: ${{ secrets.HOMEBREW_TAP_TOKEN != '' }}
     runs-on: ubuntu-latest
     steps:
-      - name: Check if homebrew-axon tracks this release
+      - name: Update Formula/axon.rb in homebrew-axon
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
           RELEASE_TAG: ${{ github.ref_name }}
+          TAP_REPO: hwbehrens/homebrew-axon
+          FORMULA_PATH: Formula/axon.rb
         run: |
           set -euo pipefail
 
-          formula_content="$(gh api 'repos/hwbehrens/homebrew-axon/contents/Formula/axon.rb?ref=main' --jq .content | tr -d '\n' | base64 --decode)"
+          tarball_url="https://github.com/hwbehrens/axon/archive/refs/tags/${RELEASE_TAG}.tar.gz"
+          curl -fsSL "$tarball_url" -o /tmp/axon-release.tar.gz
+          sha256="$(shasum -a 256 /tmp/axon-release.tar.gz | awk '{print $1}')"
 
-          if grep -Fq "refs/tags/${RELEASE_TAG}.tar.gz" <<< "$formula_content"; then
+          response="$(gh api "repos/${TAP_REPO}/contents/${FORMULA_PATH}?ref=main")"
+          formula_sha="$(jq -r '.sha' <<<"$response")"
+          formula_content="$(jq -r '.content' <<<"$response" | tr -d '\n' | base64 --decode)"
+
+          current_url="$(grep -E '^  url "' <<<"$formula_content" | sed -E 's/^  url "([^"]+)".*/\1/')"
+          current_sha256="$(grep -E '^  sha256 "' <<<"$formula_content" | sed -E 's/^  sha256 "([^"]+)".*/\1/')"
+
+          if [[ "$current_url" == "$tarball_url" && "$current_sha256" == "$sha256" ]]; then
             {
               echo "### Homebrew Tap Status"
               echo ""
-              echo "- \`homebrew-axon\` already references \`${RELEASE_TAG}\`."
+              echo "- \`${TAP_REPO}\` is already up to date for \`${RELEASE_TAG}\`."
+              echo "- URL: \`${current_url}\`"
+              echo "- SHA256: \`${current_sha256}\`"
             } >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
 
+          updated_formula="$(printf '%s\n' "$formula_content" \
+            | sed -E "s|^  url \".*\"$|  url \"${tarball_url}\"|" \
+            | sed -E "s|^  sha256 \".*\"$|  sha256 \"${sha256}\"|")"
+          updated_content="$(printf '%s' "$updated_formula" | base64 | tr -d '\n')"
+
+          commit_url="$(gh api "repos/${TAP_REPO}/contents/${FORMULA_PATH}" \
+            --method PUT \
+            -f message="axon ${RELEASE_TAG}" \
+            -f content="$updated_content" \
+            -f sha="$formula_sha" \
+            -f branch="main" \
+            --jq '.commit.html_url')"
+
           {
             echo "### Homebrew Tap Status"
             echo ""
-            echo "- \`homebrew-axon\` does not yet reference \`${RELEASE_TAG}\`."
-            echo "- Update: https://github.com/hwbehrens/homebrew-axon/blob/main/Formula/axon.rb"
+            echo "- Updated \`${TAP_REPO}\` to \`${RELEASE_TAG}\`."
+            echo "- URL: \`${tarball_url}\`"
+            echo "- SHA256: \`${sha256}\`"
+            echo "- Commit: ${commit_url}"
           } >> "$GITHUB_STEP_SUMMARY"
 
-          echo "::warning title=Homebrew tap update needed::Update hwbehrens/homebrew-axon to ${RELEASE_TAG}."
+  homebrew-tap-update-missing-secret:
+    name: homebrew tap update (missing token)
+    needs: build
+    if: ${{ secrets.HOMEBREW_TAP_TOKEN == '' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Warn when HOMEBREW_TAP_TOKEN is not configured
+        run: |
+          {
+            echo "### Homebrew Tap Status"
+            echo ""
+            echo "- Skipped automatic tap update: \`HOMEBREW_TAP_TOKEN\` is not configured."
+            echo "- Configure this repository secret to enable automatic updates to \`hwbehrens/homebrew-axon\`."
+          } >> "$GITHUB_STEP_SUMMARY"
