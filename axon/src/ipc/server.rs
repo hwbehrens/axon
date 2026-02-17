@@ -259,17 +259,22 @@ impl IpcServer {
                     }
                 }
 
-                // Check peer credentials for implicit authentication
-                let peer_authenticated = if let Some(peer_uid) = auth::peer_uid(&socket) {
-                    peer_uid == owner_uid
-                } else {
-                    false
-                };
-                tracing::debug!(
-                    client_id,
-                    peer_authenticated,
-                    "accepted IPC client connection"
-                );
+                // Check peer credentials for implicit authentication.
+                // Reject clients that do not match the daemon owner's UID.
+                let peer_uid = auth::peer_uid(&socket);
+                let is_owner_uid = matches!(peer_uid, Some(uid) if uid == owner_uid);
+                if !is_owner_uid {
+                    tracing::warn!(
+                        client_id,
+                        owner_uid,
+                        peer_uid = ?peer_uid,
+                        "rejecting IPC connection: peer UID mismatch"
+                    );
+                    drop(socket);
+                    continue;
+                }
+
+                tracing::debug!(client_id, peer_uid = ?peer_uid, "accepted IPC client connection");
 
                 let (out_tx, out_rx) = mpsc::channel::<Arc<str>>(max_client_queue);
                 clients.lock().await.insert(client_id, out_tx.clone());

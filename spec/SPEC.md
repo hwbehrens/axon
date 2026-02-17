@@ -174,8 +174,10 @@ Unix socket permissions (`0600`, user-only) as baseline. Peer UID credential che
 ## 6. CLI
 
 ```
-axon daemon [--port 7100]
+axon daemon [--port 7100] [--disable-mdns] [--axon-root <dir>]
     Start the daemon. Runs in foreground (use systemd/launchd for background).
+    --disable-mdns uses static peers only.
+    --axon-root sets the AXON state root (socket/identity/config), enabling multi-agent-per-host layouts.
 
 axon send <agent_id> <message>
     Send a request to a peer.

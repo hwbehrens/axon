@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -16,9 +17,6 @@ use axon::identity::Identity;
 
 mod cli_examples;
 
-#[cfg(feature = "generate-docs")]
-use std::path::PathBuf;
-
 #[derive(Debug, Parser)]
 #[command(name = "axon", about = "AXON — Agent eXchange Over Network")]
 struct Cli {
@@ -35,6 +33,9 @@ enum Commands {
         /// Disable mDNS discovery (use static peers only).
         #[arg(long)]
         disable_mdns: bool,
+        /// AXON root directory (for multi-agent-per-host layouts).
+        #[arg(long, value_name = "DIR")]
+        axon_root: Option<PathBuf>,
     },
     /// Send a request to another agent and wait for a response.
     Send { agent_id: String, message: String },
@@ -64,11 +65,15 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Daemon { port, disable_mdns } => {
+        Commands::Daemon {
+            port,
+            disable_mdns,
+            axon_root,
+        } => {
             run_daemon(DaemonOptions {
                 port,
                 disable_mdns,
-                axon_root: None,
+                axon_root,
                 cancel: None,
             })
             .await?;
