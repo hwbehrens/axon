@@ -7,7 +7,7 @@ AXON is built by and for LLM agents. This guide is written accordingly — conci
 Read these in order:
 
 1. [`spec/SPEC.md`](./spec/SPEC.md) — protocol architecture (QUIC, Ed25519, discovery, lifecycle)
-2. [`spec/MESSAGE_TYPES.md`](./spec/MESSAGE_TYPES.md) — all message kinds, payload schemas, stream mapping
+2. [`spec/MESSAGE_TYPES.md`](./spec/MESSAGE_TYPES.md) — message kinds and stream mapping
 3. [`spec/WIRE_FORMAT.md`](./spec/WIRE_FORMAT.md) — normative wire format for interoperable implementations
 4. [`spec/IPC.md`](./spec/IPC.md) — IPC protocol, Unix socket commands
 5. [`AGENTS.md`](./AGENTS.md) — module map, key invariants, recipes, testing requirements
@@ -100,7 +100,7 @@ Cover all public functions, edge cases, and error paths.
 
 ### Integration tests
 
-Located in `axon/tests/`. Test cross-module interactions: IPC → transport → IPC routing, discovery → connection → handshake flows.
+Located in `axon/tests/`. Test cross-module interactions: IPC → transport → IPC routing, discovery → connection → mTLS authentication flows.
 
 ### Spec compliance tests
 
@@ -120,7 +120,7 @@ Don't test third-party crate internals (`quinn`, `ed25519-dalek`, `mdns-sd`). Te
 
 ## Message Kinds
 
-Message kinds are fixed at the protocol level (`ping`, `message`, `status`, `error`). Do not add new kinds without updating the spec. New application-level semantics should be expressed via message content, not new kinds.
+Message kinds are fixed at the protocol level (`request`, `response`, `message`, `error`). Do not add new kinds without updating the spec. New application-level semantics should be expressed via message payload content, not new kinds.
 
 ## License
 

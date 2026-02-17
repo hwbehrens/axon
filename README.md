@@ -144,7 +144,7 @@ axon examples    # prints a full annotated example interaction
 | `message` | Unidirectional | Fire-and-forget |
 | `error` | Bidirectional or Unidirectional | Error reply or unsolicited error |
 
-See [`spec/MESSAGE_TYPES.md`](./spec/MESSAGE_TYPES.md) for full payload schemas and [`spec/WIRE_FORMAT.md`](./spec/WIRE_FORMAT.md) for the normative wire format.
+See [`spec/MESSAGE_TYPES.md`](./spec/MESSAGE_TYPES.md) for message kinds and stream mapping, and [`spec/WIRE_FORMAT.md`](./spec/WIRE_FORMAT.md) for the normative wire format.
 
 ## Configuration Reference
 
@@ -195,7 +195,7 @@ These are compile-time constants and cannot be changed via configuration.
 | Document | Description |
 |----------|-------------|
 | [`spec/SPEC.md`](./spec/SPEC.md) | Protocol architecture — QUIC, Ed25519, discovery, lifecycle |
-| [`spec/MESSAGE_TYPES.md`](./spec/MESSAGE_TYPES.md) | All message kinds, payload schemas, stream mapping |
+| [`spec/MESSAGE_TYPES.md`](./spec/MESSAGE_TYPES.md) | Message kinds and stream mapping |
 | [`spec/WIRE_FORMAT.md`](./spec/WIRE_FORMAT.md) | Normative wire format for interoperable implementations |
 | [`spec/IPC.md`](./spec/IPC.md) | IPC protocol — Unix socket commands |
 | [`CONTRIBUTING.md`](./CONTRIBUTING.md) | Development guide, module map, testing requirements |
