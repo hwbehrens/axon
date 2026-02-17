@@ -47,7 +47,7 @@ fn id_is_uuid_v4() {
     assert_eq!(env.id.get_version_num(), 4, "id is not UUID v4");
 }
 
-/// spec.md §4: unknown fields MUST be ignored (forward compatibility).
+/// `spec/WIRE_FORMAT.md`: unknown fields must be ignored (forward compatibility).
 #[test]
 fn unknown_envelope_fields_ignored() {
     let raw = r#"{

@@ -4,7 +4,7 @@ use super::*;
 // §10 Protocol Violation — Message Kind Classification
 // =========================================================================
 
-/// spec.md §10: Unknown kind deserialized from wire uses #[serde(other)].
+/// `spec/WIRE_FORMAT.md` unknown-kind compatibility: deserialization uses `#[serde(other)]`.
 #[test]
 fn unknown_kind_from_wire() {
     let raw = r#"{
@@ -16,7 +16,7 @@ fn unknown_kind_from_wire() {
     assert_eq!(env.kind, MessageKind::Unknown);
 }
 
-/// spec.md §10: Request kinds (expects_response=true) on uni stream should be dropped.
+/// `spec/WIRE_FORMAT.md` stream mapping: request kinds on uni stream should be dropped.
 #[test]
 fn request_kinds_classified_for_uni_drop() {
     assert!(
@@ -25,7 +25,7 @@ fn request_kinds_classified_for_uni_drop() {
     );
 }
 
-/// spec.md §10: Fire-and-forget kinds should NOT expect a response.
+/// `spec/WIRE_FORMAT.md` stream mapping: fire-and-forget kinds should not expect a response.
 #[test]
 fn fire_and_forget_kinds_classified() {
     let faf_kinds = [
@@ -41,7 +41,7 @@ fn fire_and_forget_kinds_classified() {
     }
 }
 
-/// spec.md §10: Malformed JSON on any stream should be dropped.
+/// `spec/WIRE_FORMAT.md` decoding: malformed JSON on any stream should be dropped.
 #[test]
 fn malformed_json_fails_deserialization() {
     let bad_json = b"this is not json{{{";
@@ -49,7 +49,7 @@ fn malformed_json_fails_deserialization() {
     assert!(result.is_err());
 }
 
-/// spec.md §10: Oversized messages (>64KB) should be rejected.
+/// `spec/WIRE_FORMAT.md` limits: oversized messages (>64KB) should be rejected.
 #[test]
 fn oversized_message_rejected_by_encode() {
     let big = "x".repeat(MAX_MESSAGE_SIZE as usize);
@@ -62,7 +62,7 @@ fn oversized_message_rejected_by_encode() {
     assert!(encode(&env).is_err());
 }
 
-/// spec.md §10: Duplicate message IDs should be unique (UUID v4 guarantee).
+/// `spec/WIRE_FORMAT.md` envelope ids are UUID v4 and should be unique in practice.
 #[test]
 fn message_ids_are_unique() {
     let env1 = Envelope::new(agent_a(), agent_b(), MessageKind::Request, json!({}));

@@ -96,7 +96,7 @@ async fn connection_bidi_unknown_kind_returns_error() {
 
     let peer_b = make_peer_record(&id_b, addr_b);
 
-    // Establish connection (hello completes automatically)
+    // Establish connection (QUIC + mTLS complete automatically)
     let conn = transport_a.ensure_connection(&peer_b).await.unwrap();
 
     // Craft an envelope with a kind the receiver won't recognize
@@ -121,7 +121,7 @@ async fn connection_bidi_unknown_kind_returns_error() {
     assert_eq!(response.kind, MessageKind::Error);
 }
 
-/// Invariant: after hello completes, bidi requests get error responses
+/// Invariant: after connection establishment, bidi requests get error responses
 /// (default_error_response). Exercises the full handle_bidi_stream →
 /// handle_authenticated_bidi → default_error_response pipeline through the wire.
 #[tokio::test]

@@ -45,7 +45,7 @@ async fn reconnect_after_peer_restart() {
         "daemon B socket did not appear"
     );
 
-    // Wait for initial connection + hello handshake.
+    // Wait for initial QUIC connection establishment.
     assert!(
         wait_for_peer_connected(&paths_a.socket, id_b.agent_id(), Duration::from_secs(10)).await,
         "daemon A did not connect to B"

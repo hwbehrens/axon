@@ -3,13 +3,13 @@ use crate::*;
 mod connection;
 
 // =========================================================================
-// §10 Protocol Violation Handling
+// Protocol Violation Handling
 // =========================================================================
 
-/// spec.md §10: After hello, connection is authenticated and subsequent
-/// messages are accepted. Verifies the hello-first invariant holds.
+/// `spec/SPEC.md` connection lifecycle + `spec/WIRE_FORMAT.md` identity model:
+/// once a QUIC/mTLS connection is established, subsequent messages are accepted.
 #[tokio::test]
-async fn violation_hello_first_invariant() {
+async fn violation_connection_authenticated_on_connect() {
     let (id_a, _dir_a) = make_identity();
     let (id_b, _dir_b) = make_identity();
 
@@ -18,17 +18,17 @@ async fn violation_hello_first_invariant() {
 
     let peer_b = make_peer_record(&id_b, addr_b);
 
-    // ensure_connection performs hello automatically; connection should succeed.
+    // ensure_connection performs QUIC + mTLS setup; connection should succeed.
     let conn = transport_a.ensure_connection(&peer_b).await.unwrap();
     assert!(transport_a.has_connection(id_b.agent_id()).await);
     assert!(conn.close_reason().is_none());
 
-    // After hello, a request should succeed (proves post-hello messages are accepted).
+    // After connection establishment, a request should succeed.
     let request = Envelope::new(
         id_a.agent_id().to_string(),
         id_b.agent_id().to_string(),
         MessageKind::Request,
-        json!({"question": "post-hello test"}),
+        json!({"question": "post-connect test"}),
     );
     let result = transport_a.send(&peer_b, request).await.unwrap();
     assert!(result.is_some());
@@ -52,7 +52,7 @@ async fn violation_default_error_response_returns_error() {
     assert_eq!(payload["retryable"], false);
 }
 
-/// spec.md §10: Unknown kind on bidi stream returns error.
+/// `spec/WIRE_FORMAT.md` unknown-kind handling: unknown kind on bidi returns error.
 /// Tested via default_error_response since we cannot inject raw wire bytes from
 /// integration tests (framing is pub(crate)).
 #[tokio::test]
@@ -72,7 +72,7 @@ async fn violation_unknown_kind_on_bidi_returns_error() {
     assert_eq!(payload["code"], "unhandled");
 }
 
-/// spec.md §10: Fire-and-forget messages (Message kind) delivered via uni stream
+/// `spec/WIRE_FORMAT.md` stream mapping: fire-and-forget Message kind delivered via uni stream
 /// return no response. Verifies transport drops no valid fire-and-forget.
 #[tokio::test]
 async fn violation_fire_and_forget_no_response() {
@@ -106,7 +106,7 @@ async fn violation_fire_and_forget_no_response() {
     assert_eq!(received.kind, MessageKind::Message);
 }
 
-/// spec.md §10: Request on bidi gets error response (default_error_response
+/// `spec/WIRE_FORMAT.md` stream mapping: Request on bidi gets error response (default_error_response
 /// since no application handler is registered).
 #[tokio::test]
 async fn violation_request_gets_error_response() {
@@ -131,7 +131,7 @@ async fn violation_request_gets_error_response() {
     assert_eq!(resp.ref_id, Some(request.id));
 }
 
-/// spec.md §10: Invalid envelope on bidi request returns error.
+/// `spec/WIRE_FORMAT.md` validation rules: invalid envelope on bidi request returns error.
 #[tokio::test]
 async fn violation_invalid_envelope_returns_error() {
     // An envelope with nil UUID should fail validate().
@@ -145,7 +145,7 @@ async fn violation_invalid_envelope_returns_error() {
     assert!(invalid.validate().is_err());
 }
 
-/// spec.md §10: Multiple requests after hello all get error responses.
+/// After connection establishment, multiple requests all get error responses.
 /// Verifies the connection stays open and handles multiple requests.
 #[tokio::test]
 async fn violation_connection_survives_multiple_requests() {

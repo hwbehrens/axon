@@ -1,13 +1,13 @@
 use super::*;
 
-mod ipc_v2_shapes;
+mod ipc_shapes;
 mod violations;
 
 // =========================================================================
 // §4 Wire format — FIN-delimited framing
 // =========================================================================
 
-/// spec.md §3: wire format is raw JSON bytes (FIN-delimited, no length prefix).
+/// `spec/WIRE_FORMAT.md` wire framing: raw JSON bytes (FIN-delimited, no length prefix).
 #[test]
 fn wire_format_is_raw_json() {
     let env = Envelope::new(agent_a(), agent_b(), MessageKind::Request, json!({}));
@@ -33,13 +33,13 @@ fn wire_encoding_omits_from_and_to_fields() {
     assert!(decoded.get("to").is_none());
 }
 
-/// spec.md §3: max message size is 64KB.
+/// `spec/WIRE_FORMAT.md` limits: max message size is 64KB.
 #[test]
 fn max_message_size_is_64kb() {
     assert_eq!(MAX_MESSAGE_SIZE, 65536);
 }
 
-/// spec.md §3: messages > 64KB are rejected.
+/// `spec/WIRE_FORMAT.md` limits: messages >64KB are rejected.
 #[test]
 fn oversized_message_rejected() {
     let big = "x".repeat(MAX_MESSAGE_SIZE as usize);
@@ -75,7 +75,7 @@ fn encode_decode_full_roundtrip() {
 // §1 Identity — agent ID derivation
 // =========================================================================
 
-/// spec.md §1: Agent ID = "ed25519." + first 16 bytes of SHA-256(public key),
+/// `spec/SPEC.md` identity: Agent ID = "ed25519." + first 16 bytes of SHA-256(public key),
 /// hex-encoded (40 chars total).
 #[test]
 fn agent_id_is_40_chars_with_prefix() {
@@ -89,7 +89,7 @@ fn agent_id_is_40_chars_with_prefix() {
     assert!(id[8..].chars().all(|c| c.is_ascii_hexdigit()));
 }
 
-/// spec.md §1: agent ID is deterministic from the same keypair.
+/// `spec/SPEC.md` identity: agent ID is deterministic from the same keypair.
 #[test]
 fn agent_id_deterministic_from_keypair() {
     let dir = tempfile::tempdir().unwrap();
@@ -103,21 +103,21 @@ fn agent_id_deterministic_from_keypair() {
 // §5 IPC — protocol shapes
 // =========================================================================
 
-/// spec.md §5: `{"cmd":"peers"}` is a valid IPC command.
+/// `spec/IPC.md` command schema: `{"cmd":"peers"}` is valid.
 #[test]
 fn ipc_peers_command_shape() {
     let cmd: axon::ipc::IpcCommand = serde_json::from_str(r#"{"cmd":"peers"}"#).unwrap();
     assert!(matches!(cmd, axon::ipc::IpcCommand::Peers { .. }));
 }
 
-/// spec.md §5: `{"cmd":"status"}` is a valid IPC command.
+/// `spec/IPC.md` command schema: `{"cmd":"status"}` is valid.
 #[test]
 fn ipc_status_command_shape() {
     let cmd: axon::ipc::IpcCommand = serde_json::from_str(r#"{"cmd":"status"}"#).unwrap();
     assert!(matches!(cmd, axon::ipc::IpcCommand::Status { .. }));
 }
 
-/// spec.md §5: send command includes to, kind, and payload.
+/// `spec/IPC.md` send command includes to, kind, and payload.
 #[test]
 fn ipc_send_command_shape() {
     let cmd: axon::ipc::IpcCommand = serde_json::from_value(json!({
@@ -136,7 +136,7 @@ fn ipc_send_command_shape() {
     }
 }
 
-/// spec.md §5: daemon error response has ok=false and error string.
+/// `spec/IPC.md` error response has ok=false and an error code string.
 #[test]
 fn ipc_error_response_shape() {
     let reply = axon::ipc::DaemonReply::Error {
@@ -150,7 +150,7 @@ fn ipc_error_response_shape() {
     assert_eq!(j["error"], "peer_not_found");
 }
 
-/// spec.md §5: inbound messages forwarded with envelope.
+/// `spec/IPC.md` inbound events include `event`, `from`, and `envelope`.
 #[test]
 fn ipc_inbound_shape() {
     let envelope = Envelope::new(
@@ -173,7 +173,7 @@ fn ipc_inbound_shape() {
 // Config — static peers per spec §2
 // =========================================================================
 
-/// spec.md §2: static peers from config.toml with agent_id, addr, pubkey.
+/// `spec/SPEC.md` static peer config includes agent_id, addr, pubkey.
 #[test]
 fn config_static_peers_match_spec() {
     let dir = tempfile::tempdir().unwrap();

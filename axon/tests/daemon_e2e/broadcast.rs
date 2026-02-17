@@ -129,7 +129,7 @@ async fn broadcast_fanout_to_multiple_receiver_clients() {
         .await
         .unwrap();
     let received = status["messages_received"].as_u64().unwrap();
-    // received includes hellos from connection setup + this notify.
+    // received includes connection-setup/control traffic + this notify.
     // Just verify it's a sane number (not 3x inflated).
     assert!(
         received < 10,
