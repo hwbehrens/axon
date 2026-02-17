@@ -309,6 +309,7 @@ pub(crate) async fn run_connection(
         inbound_read_timeout,
     };
 
+    let my_stable_id = ctx.connection.stable_id();
     ctx.connections
         .write()
         .await
@@ -337,7 +338,15 @@ pub(crate) async fn run_connection(
         }
     }
 
-    ctx.connections.write().await.remove(&peer_id);
+    // Only remove our entry if we're still the registered connection.
+    // Another connection loop (from a simultaneous dial) may have replaced us.
+    let mut conns = ctx.connections.write().await;
+    if conns
+        .get(&peer_id)
+        .is_some_and(|c| c.stable_id() == my_stable_id)
+    {
+        conns.remove(&peer_id);
+    }
 }
 
 #[cfg(test)]

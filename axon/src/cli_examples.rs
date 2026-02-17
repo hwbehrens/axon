@@ -105,7 +105,7 @@ All examples below are newline-delimited JSON sent over ~/.axon/axon.sock.
 ──────────────────────────────────────────────
 Notes
 ──────────────────────────────────────────────
-- The lower agent_id always initiates the QUIC connection (initiator rule).
+- Either side can initiate the QUIC connection; duplicates are resolved automatically.
 - Messages are framed by QUIC stream FIN (no length prefix).
 - Bidirectional streams are used for request/response patterns (kind: "request").
 - Unidirectional streams are used for fire-and-forget messages (kind: "message").

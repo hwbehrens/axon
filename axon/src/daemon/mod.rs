@@ -4,7 +4,7 @@ mod reconnect;
 
 use command_handler::{Counters, DaemonContext, handle_command};
 use peer_events::handle_peer_event;
-use reconnect::{ReconnectState, attempt_reconnects};
+use reconnect::{ReconnectState, attempt_reconnects, handle_reconnect_outcome, reconnect_channel};
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -185,10 +185,11 @@ pub async fn run_daemon(opts: DaemonOptions) -> Result<()> {
     // --- Reconnection tracking ---
     let mut reconnect_map = HashMap::<AgentId, ReconnectState>::new();
     for peer in peer_table.list().await {
-        if *local_agent_id < *peer.agent_id {
-            reconnect_map.insert(peer.agent_id, ReconnectState::immediate(Instant::now()));
-        }
+        reconnect_map.insert(peer.agent_id, ReconnectState::immediate(Instant::now()));
     }
+
+    // --- Reconnect outcome channel ---
+    let (reconnect_tx, mut reconnect_rx) = reconnect_channel();
 
     // --- Timers ---
     let mut save_interval = tokio::time::interval(Duration::from_secs(60));
@@ -223,7 +224,6 @@ pub async fn run_daemon(opts: DaemonOptions) -> Result<()> {
                     handle_peer_event(
                         event,
                         &peer_table,
-                        &local_agent_id,
                         &mut reconnect_map,
                     ).await;
                     if let Err(err) = save_known_peers(&paths.known_peers, &peer_table.to_known_peers().await).await {
@@ -243,14 +243,23 @@ pub async fn run_daemon(opts: DaemonOptions) -> Result<()> {
                     }
                 }
             }
+            maybe_outcome = reconnect_rx.recv() => {
+                if let Some(outcome) = maybe_outcome {
+                    handle_reconnect_outcome(
+                        outcome,
+                        &peer_table,
+                        &mut reconnect_map,
+                        RECONNECT_MAX_BACKOFF,
+                    ).await;
+                }
+            }
             _ = reconnect_interval.tick() => {
                 attempt_reconnects(
                     &peer_table,
                     &transport,
-                    &local_agent_id,
                     &mut reconnect_map,
-                    RECONNECT_MAX_BACKOFF,
                     &cancel,
+                    &reconnect_tx,
                 ).await;
             }
             _ = save_interval.tick() => {

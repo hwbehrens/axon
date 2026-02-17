@@ -2,8 +2,8 @@
 //!
 //! These tests require the full daemon stack (IPC ↔ daemon ↔ transport ↔ QUIC)
 //! and cover scenarios that unit tests cannot catch: IPC broadcast fanout,
-//! initiator-rule timing, pubkey pinning at the QUIC layer, concurrent sends,
-//! and shutdown under active traffic.
+//! pubkey pinning at the QUIC layer, concurrent sends, and shutdown under
+//! active traffic.
 //!
 //! These are longer-running e2e tests (~10s).
 
@@ -133,6 +133,14 @@ pub(crate) async fn ipc_command(
     socket_path: &std::path::Path,
     command: Value,
 ) -> anyhow::Result<Value> {
+    ipc_command_timeout(socket_path, command, Duration::from_secs(5)).await
+}
+
+pub(crate) async fn ipc_command_timeout(
+    socket_path: &std::path::Path,
+    command: Value,
+    read_timeout: Duration,
+) -> anyhow::Result<Value> {
     let mut stream = UnixStream::connect(socket_path).await?;
     let line = serde_json::to_string(&command)?;
     stream.write_all(line.as_bytes()).await?;
@@ -140,7 +148,7 @@ pub(crate) async fn ipc_command(
 
     let mut reader = BufReader::new(stream);
     let mut response = String::new();
-    let bytes = timeout(Duration::from_secs(5), reader.read_line(&mut response)).await??;
+    let bytes = timeout(read_timeout, reader.read_line(&mut response)).await??;
     if bytes == 0 {
         anyhow::bail!("daemon closed connection");
     }

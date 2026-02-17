@@ -11,7 +11,6 @@ use crate::peer_table::{PeerSource, PeerTable};
 pub(crate) async fn handle_peer_event(
     event: PeerEvent,
     peer_table: &PeerTable,
-    local_agent_id: &AgentId,
     reconnect_state: &mut HashMap<AgentId, ReconnectState>,
 ) {
     let now = Instant::now();
@@ -31,11 +30,9 @@ pub(crate) async fn handle_peer_event(
                     source = ?existing.source,
                     "ignoring discovered pubkey change for pinned peer"
                 );
-                if local_agent_id < &agent_id {
-                    reconnect_state
-                        .entry(agent_id)
-                        .or_insert_with(|| ReconnectState::immediate(now));
-                }
+                reconnect_state
+                    .entry(agent_id)
+                    .or_insert_with(|| ReconnectState::immediate(now));
                 return;
             }
 
@@ -43,9 +40,7 @@ pub(crate) async fn handle_peer_event(
                 .upsert_discovered(agent_id.clone(), addr, pubkey)
                 .await;
 
-            if local_agent_id < &agent_id {
-                reconnect_state.insert(agent_id, ReconnectState::immediate(now));
-            }
+            reconnect_state.insert(agent_id, ReconnectState::immediate(now));
         }
         PeerEvent::Lost { agent_id } => {
             peer_table.set_disconnected(&agent_id).await;

@@ -78,58 +78,48 @@ async fn wrong_pubkey_prevents_connection() {
     daemon_b.shutdown().await;
 }
 
-/// Initiator-rule timeout: when the higher-ID daemon sends and the
-/// lower-ID peer is not running, the send should fail with an
-/// explanatory error after ~2s.
+/// Send to unreachable peer: when a peer is known but unreachable,
+/// the send should fail with peer_unreachable.
 #[tokio::test]
 
-async fn initiator_rule_timeout_returns_error() {
-    let dir_hi = tempdir().unwrap();
-    let dir_lo = tempdir().unwrap();
+async fn send_to_unreachable_peer_returns_error() {
+    let dir_a = tempdir().unwrap();
+    let dir_b = tempdir().unwrap();
 
-    // Generate identities and ensure we know which is higher.
-    let paths_hi = AxonPaths::from_root(PathBuf::from(dir_hi.path()));
-    paths_hi.ensure_root_exists().unwrap();
-    let id_hi = Identity::load_or_generate(&paths_hi).unwrap();
+    let paths_a = AxonPaths::from_root(PathBuf::from(dir_a.path()));
+    paths_a.ensure_root_exists().unwrap();
+    Identity::load_or_generate(&paths_a).unwrap();
 
-    let paths_lo = AxonPaths::from_root(PathBuf::from(dir_lo.path()));
-    paths_lo.ensure_root_exists().unwrap();
-    let id_lo = Identity::load_or_generate(&paths_lo).unwrap();
+    let paths_b = AxonPaths::from_root(PathBuf::from(dir_b.path()));
+    paths_b.ensure_root_exists().unwrap();
+    let id_b = Identity::load_or_generate(&paths_b).unwrap();
 
-    // Determine which is higher/lower and set up accordingly.
-    let (_hi_id, lo_id, hi_dir, _lo_dir) = if id_hi.agent_id() > id_lo.agent_id() {
-        (id_hi, id_lo, dir_hi, dir_lo)
-    } else {
-        (id_lo, id_hi, dir_lo, dir_hi)
-    };
+    let port_a = pick_free_port();
+    let port_b = pick_free_port();
 
-    let port_hi = pick_free_port();
-    let port_lo = pick_free_port();
-
-    // Start ONLY the higher-ID daemon with a static peer entry for the lower.
-    let peers_for_hi = vec![StaticPeerConfig {
-        agent_id: lo_id.agent_id().into(),
-        addr: format!("127.0.0.1:{port_lo}").parse().unwrap(),
-        pubkey: lo_id.public_key_base64().to_string(),
+    // Start ONLY daemon A with a static peer entry for B (which is not running).
+    let peers_for_a = vec![StaticPeerConfig {
+        agent_id: id_b.agent_id().into(),
+        addr: format!("127.0.0.1:{port_b}").parse().unwrap(),
+        pubkey: id_b.public_key_base64().to_string(),
     }];
-    let daemon_hi = spawn_daemon(hi_dir.path(), port_hi, peers_for_hi);
-    assert!(wait_for_socket(&daemon_hi.paths, Duration::from_secs(5)).await);
+    let daemon_a = spawn_daemon(dir_a.path(), port_a, peers_for_a);
+    assert!(wait_for_socket(&daemon_a.paths, Duration::from_secs(5)).await);
 
-    // The lower-ID peer is NOT running. Send from HI → LO should fail
-    // with the initiator-rule error after ~2s.
-    let start = tokio::time::Instant::now();
-    let reply = ipc_command(
-        &daemon_hi.paths.socket,
+    // B is NOT running. Send from A → B should fail with peer_unreachable.
+    // Use a longer timeout since the QUIC connect attempt may take time to fail.
+    let reply = ipc_command_timeout(
+        &daemon_a.paths.socket,
         json!({
             "cmd": "send",
-            "to": lo_id.agent_id(),
+            "to": id_b.agent_id(),
             "kind": "request",
             "payload": {}
         }),
+        Duration::from_secs(20),
     )
     .await
     .unwrap();
-    let elapsed = start.elapsed();
 
     assert_eq!(reply["ok"], json!(false));
     let error = reply["error"].as_str().unwrap();
@@ -137,14 +127,9 @@ async fn initiator_rule_timeout_returns_error() {
         error, "peer_unreachable",
         "error should be peer_unreachable, got: {error}"
     );
-    assert!(
-        elapsed >= Duration::from_secs(1),
-        "should have waited ~2s, but returned in {:?}",
-        elapsed
-    );
 
     // Status counters should not increment.
-    let status = ipc_command(&daemon_hi.paths.socket, json!({"cmd": "status"}))
+    let status = ipc_command(&daemon_a.paths.socket, json!({"cmd": "status"}))
         .await
         .unwrap();
     assert_eq!(
@@ -153,7 +138,7 @@ async fn initiator_rule_timeout_returns_error() {
         "messages_sent should not increment on failed send"
     );
 
-    daemon_hi.shutdown().await;
+    daemon_a.shutdown().await;
 }
 
 /// Shutdown during active reconnect churn: daemon has a static peer that

@@ -176,15 +176,6 @@ async fn handle_send(
         .await
         .ok_or_else(|| anyhow::anyhow!(DaemonIpcError::PeerNotFound))?;
 
-    // Initiator rule: lower agent_id initiates. If we are higher,
-    // wait briefly for the peer to connect, then error if still absent.
-    if ctx.local_agent_id.as_str() > to.as_str() && !ctx.transport.has_connection(&to).await {
-        tokio::time::sleep(Duration::from_secs(2)).await;
-        if !ctx.transport.has_connection(&to).await {
-            anyhow::bail!(DaemonIpcError::PeerUnreachable);
-        }
-    }
-
     let mut envelope = Envelope::new((*ctx.local_agent_id).clone(), to.clone(), kind, payload);
     envelope.ref_id = ref_id;
     envelope
@@ -193,18 +184,29 @@ async fn handle_send(
 
     let msg_id = envelope.id;
 
-    match ctx.transport.send(&peer, envelope).await {
-        Ok(response) => {
-            ctx.counters.sent.fetch_add(1, Ordering::Relaxed);
-            ctx.peer_table.set_connected(&to, None).await;
-            if response.is_some() {
-                ctx.counters.received.fetch_add(1, Ordering::Relaxed);
-            }
-            Ok((msg_id, response))
-        }
-        Err(_err) => {
+    // Timeout the send (including connection attempt) so IPC clients don't
+    // block indefinitely when the peer is unreachable over UDP/QUIC.
+    const SEND_TIMEOUT: Duration = Duration::from_secs(10);
+    let send_result = tokio::time::timeout(SEND_TIMEOUT, ctx.transport.send(&peer, envelope)).await;
+
+    match send_result {
+        Err(_elapsed) => {
             ctx.peer_table.set_disconnected(&to).await;
             anyhow::bail!(DaemonIpcError::PeerUnreachable)
         }
+        Ok(inner) => match inner {
+            Ok(response) => {
+                ctx.counters.sent.fetch_add(1, Ordering::Relaxed);
+                ctx.peer_table.set_connected(&to, None).await;
+                if response.is_some() {
+                    ctx.counters.received.fetch_add(1, Ordering::Relaxed);
+                }
+                Ok((msg_id, response))
+            }
+            Err(_err) => {
+                ctx.peer_table.set_disconnected(&to).await;
+                anyhow::bail!(DaemonIpcError::PeerUnreachable)
+            }
+        },
     }
 }

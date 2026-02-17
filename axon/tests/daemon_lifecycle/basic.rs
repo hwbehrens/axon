@@ -44,15 +44,14 @@ async fn graceful_shutdown_cleans_up() {
     );
 }
 
-/// Initiator rule: the daemon with the lower agent_id initiates.
-/// Start two daemons and verify the lower-ID one establishes the connection.
+/// Both daemons connect: either side can dial. Start two daemons and
+/// verify both see each other as connected.
 #[tokio::test]
 
-async fn initiator_rule_lower_id_connects() {
+async fn both_sides_connect() {
     let dir_a = tempdir().unwrap();
     let dir_b = tempdir().unwrap();
 
-    // Generate identities and determine which is lower.
     let paths_a = AxonPaths::from_root(PathBuf::from(dir_a.path()));
     paths_a.ensure_root_exists().unwrap();
     let id_a = Identity::load_or_generate(&paths_a).unwrap();
@@ -60,12 +59,6 @@ async fn initiator_rule_lower_id_connects() {
     let paths_b = AxonPaths::from_root(PathBuf::from(dir_b.path()));
     paths_b.ensure_root_exists().unwrap();
     let id_b = Identity::load_or_generate(&paths_b).unwrap();
-
-    let (_lower_id, _higher_id) = if id_a.agent_id() < id_b.agent_id() {
-        (id_a.agent_id().to_string(), id_b.agent_id().to_string())
-    } else {
-        (id_b.agent_id().to_string(), id_a.agent_id().to_string())
-    };
 
     let port_a = pick_free_port();
     let port_b = pick_free_port();
