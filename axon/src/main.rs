@@ -18,8 +18,23 @@ use axon::identity::Identity;
 mod cli_examples;
 
 #[derive(Debug, Parser)]
-#[command(name = "axon", about = "AXON — Agent eXchange Over Network")]
+#[command(
+    name = "axon",
+    about = "AXON — Agent eXchange Over Network",
+    version = env!("CARGO_PKG_VERSION"),
+    propagate_version = true
+)]
 struct Cli {
+    /// AXON state root directory (socket/identity/config/known_peers).
+    /// Falls back to AXON_ROOT, then ~/.axon.
+    #[arg(
+        long = "state-root",
+        visible_aliases = ["state", "root"],
+        global = true,
+        value_name = "DIR"
+    )]
+    state_root: Option<PathBuf>,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -33,9 +48,6 @@ enum Commands {
         /// Disable mDNS discovery (use static peers only).
         #[arg(long)]
         disable_mdns: bool,
-        /// AXON root directory (for multi-agent-per-host layouts).
-        #[arg(long, value_name = "DIR")]
-        axon_root: Option<PathBuf>,
     },
     /// Send a request to another agent and wait for a response.
     Send { agent_id: String, message: String },
@@ -47,6 +59,8 @@ enum Commands {
     Status,
     /// Print this agent's identity.
     Identity,
+    /// Print running daemon identity and metadata via IPC.
+    Whoami,
     /// Print example interactions.
     Examples,
     /// Generate shell completions and man page (internal, for packaging).
@@ -62,25 +76,28 @@ enum Commands {
 #[tokio::main]
 async fn main() -> Result<()> {
     init_tracing();
-    let cli = Cli::parse();
+    let Cli {
+        state_root,
+        command,
+    } = Cli::parse();
+    let resolve_paths = || AxonPaths::discover_with_override(state_root.as_deref());
 
-    match cli.command {
-        Commands::Daemon {
-            port,
-            disable_mdns,
-            axon_root,
-        } => {
+    match command {
+        Commands::Daemon { port, disable_mdns } => {
+            let paths = resolve_paths()?;
             run_daemon(DaemonOptions {
                 port,
                 disable_mdns,
-                axon_root,
+                axon_root: Some(paths.root.clone()),
                 cancel: None,
             })
             .await?;
         }
         Commands::Send { agent_id, message } => {
+            let paths = resolve_paths()?;
             let payload = json!({ "message": message });
             let line = send_ipc(
+                &paths,
                 json!({"cmd": "send", "to": agent_id, "kind": "request", "payload": payload}),
                 false,
             )
@@ -88,9 +105,11 @@ async fn main() -> Result<()> {
             println!("{line}");
         }
         Commands::Notify { agent_id, data } => {
+            let paths = resolve_paths()?;
             let parsed_data = serde_json::from_str::<Value>(&data).unwrap_or_else(|_| json!(data));
             let payload = json!({ "data": parsed_data });
             let line = send_ipc(
+                &paths,
                 json!({"cmd": "send", "to": agent_id, "kind": "message", "payload": payload}),
                 false,
             )
@@ -98,15 +117,17 @@ async fn main() -> Result<()> {
             println!("{line}");
         }
         Commands::Peers => {
-            let line = send_ipc(json!({"cmd": "peers"}), false).await?;
+            let paths = resolve_paths()?;
+            let line = send_ipc(&paths, json!({"cmd": "peers"}), false).await?;
             println!("{line}");
         }
         Commands::Status => {
-            let line = send_ipc(json!({"cmd": "status"}), false).await?;
+            let paths = resolve_paths()?;
+            let line = send_ipc(&paths, json!({"cmd": "status"}), false).await?;
             println!("{line}");
         }
         Commands::Identity => {
-            let paths = AxonPaths::discover()?;
+            let paths = resolve_paths()?;
             let identity = Identity::load_or_generate(&paths)?;
             println!(
                 "{}",
@@ -116,6 +137,11 @@ async fn main() -> Result<()> {
                 }))
                 .context("failed to encode identity output")?
             );
+        }
+        Commands::Whoami => {
+            let paths = resolve_paths()?;
+            let line = send_ipc(&paths, json!({"cmd": "whoami"}), false).await?;
+            println!("{line}");
         }
         #[cfg(feature = "generate-docs")]
         Commands::GenDocs { out_dir } => {
@@ -171,8 +197,11 @@ fn init_tracing() {
     let _ = tracing_subscriber::fmt().with_env_filter(filter).try_init();
 }
 
-async fn send_ipc(command: Value, wait_for_correlated_inbound: bool) -> Result<String> {
-    let paths = AxonPaths::discover()?;
+async fn send_ipc(
+    paths: &AxonPaths,
+    command: Value,
+    wait_for_correlated_inbound: bool,
+) -> Result<String> {
     let mut stream = UnixStream::connect(&paths.socket).await.with_context(|| {
         format!(
             "failed to connect to daemon socket: {}. Is the daemon running?",

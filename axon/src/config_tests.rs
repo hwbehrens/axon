@@ -104,6 +104,14 @@ fn discover_paths_from_root() {
 }
 
 #[test]
+fn discover_with_override_uses_override_root() {
+    let root = PathBuf::from("/tmp/axon-override");
+    let paths = AxonPaths::discover_with_override(Some(root.as_path())).expect("discover");
+    assert_eq!(paths.root, root);
+    assert_eq!(paths.socket, PathBuf::from("/tmp/axon-override/axon.sock"));
+}
+
+#[test]
 fn ensure_root_creates_and_sets_perms() {
     let dir = tempdir().expect("temp dir");
     let root = dir.path().join("axon-subdir");

@@ -21,6 +21,20 @@ pub struct AxonPaths {
 }
 
 impl AxonPaths {
+    pub fn discover_with_override(override_root: Option<&Path>) -> Result<Self> {
+        if let Some(root) = override_root {
+            return Ok(Self::from_root(root.to_path_buf()));
+        }
+
+        if let Ok(root) = env::var("AXON_ROOT")
+            && !root.trim().is_empty()
+        {
+            return Ok(Self::from_root(PathBuf::from(root)));
+        }
+
+        Self::discover()
+    }
+
     pub fn discover() -> Result<Self> {
         let home = env::var("HOME").context("HOME is not set")?;
         let root = Path::new(&home).join(".axon");
