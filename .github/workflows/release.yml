@@ -62,3 +62,34 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release upload "${{ github.ref_name }}" "${{ env.ARCHIVE }}"
+
+  homebrew-tap-check:
+    name: homebrew tap check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check if homebrew-axon tracks this release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+
+          formula_content="$(gh api 'repos/hwbehrens/homebrew-axon/contents/Formula/axon.rb?ref=main' --jq .content | tr -d '\n' | base64 --decode)"
+
+          if grep -Fq "refs/tags/${RELEASE_TAG}.tar.gz" <<< "$formula_content"; then
+            {
+              echo "### Homebrew Tap Status"
+              echo ""
+              echo "- \`homebrew-axon\` already references \`${RELEASE_TAG}\`."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          {
+            echo "### Homebrew Tap Status"
+            echo ""
+            echo "- \`homebrew-axon\` does not yet reference \`${RELEASE_TAG}\`."
+            echo "- Update: https://github.com/hwbehrens/homebrew-axon/blob/main/Formula/axon.rb"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          echo "::warning title=Homebrew tap update needed::Update hwbehrens/homebrew-axon to ${RELEASE_TAG}."
