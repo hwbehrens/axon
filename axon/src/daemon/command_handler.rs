@@ -2,10 +2,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use tracing::warn;
 
-use super::replay_cache::ReplayCache;
-use crate::ipc::{CommandEvent, IpcBackend, IpcServer, PeerSummary, SendResult, StatusResult};
+use crate::ipc::{
+    CommandEvent, DaemonReply, IpcCommand, IpcErrorCode, IpcSendKind, IpcServer, PeerSummary,
+};
 use crate::message::{AgentId, Envelope};
 use crate::peer_table::{ConnectionStatus, PeerSource, PeerTable};
 use crate::transport::QuicTransport;
@@ -41,7 +41,6 @@ pub(crate) struct DaemonContext<'a> {
     pub(crate) transport: &'a QuicTransport,
     pub(crate) local_agent_id: &'a AgentId,
     pub(crate) counters: &'a Counters,
-    pub(crate) replay_cache: &'a ReplayCache,
     pub(crate) start: Instant,
 }
 
@@ -63,143 +62,158 @@ pub(crate) fn source_str(source: &PeerSource) -> &'static str {
 }
 
 // ---------------------------------------------------------------------------
-// DaemonIpcBackend — implements IpcBackend using daemon resources
-// ---------------------------------------------------------------------------
-
-pub(crate) struct DaemonIpcBackend<'a> {
-    pub(crate) peer_table: &'a PeerTable,
-    pub(crate) transport: &'a QuicTransport,
-    pub(crate) local_agent_id: &'a AgentId,
-    pub(crate) counters: &'a Counters,
-    pub(crate) replay_cache: &'a ReplayCache,
-    pub(crate) start: Instant,
-}
-
-impl IpcBackend for DaemonIpcBackend<'_> {
-    async fn send_message(
-        &self,
-        to: String,
-        kind: crate::message::MessageKind,
-        payload: serde_json::Value,
-        ref_id: Option<uuid::Uuid>,
-    ) -> Result<SendResult> {
-        let peer = self
-            .peer_table
-            .get(&to)
-            .await
-            .ok_or_else(|| anyhow::anyhow!(DaemonIpcError::PeerNotFound))?;
-
-        // Initiator rule: lower agent_id initiates. If we are higher,
-        // wait briefly for the peer to connect, then error if still absent.
-        if self.local_agent_id.as_str() > to.as_str() && !self.transport.has_connection(&to).await {
-            tokio::time::sleep(Duration::from_secs(2)).await;
-            if !self.transport.has_connection(&to).await {
-                anyhow::bail!(DaemonIpcError::PeerUnreachable);
-            }
-        }
-
-        let mut envelope = Envelope::new((*self.local_agent_id).clone(), to.clone(), kind, payload);
-        envelope.ref_id = ref_id;
-
-        envelope
-            .validate()
-            .map_err(|e| anyhow::anyhow!(DaemonIpcError::InvalidCommand(e.to_string())))?;
-
-        let msg_id = envelope.id;
-
-        match self.transport.send(&peer, envelope).await {
-            Ok(response) => {
-                self.counters.sent.fetch_add(1, Ordering::Relaxed);
-                self.peer_table.set_connected(&to, None).await;
-
-                let response = if let Some(response_envelope) = response {
-                    if self
-                        .replay_cache
-                        .is_replay(response_envelope.id, Instant::now())
-                        .await
-                    {
-                        warn!(msg_id = %response_envelope.id, "dropping replayed response");
-                        None
-                    } else {
-                        self.counters.received.fetch_add(1, Ordering::Relaxed);
-                        Some(response_envelope)
-                    }
-                } else {
-                    None
-                };
-
-                Ok(SendResult { msg_id, response })
-            }
-            Err(_err) => {
-                self.peer_table.set_disconnected(&to).await;
-                anyhow::bail!(DaemonIpcError::PeerUnreachable)
-            }
-        }
-    }
-
-    async fn peers(&self) -> Result<Vec<PeerSummary>> {
-        Ok(self
-            .peer_table
-            .list()
-            .await
-            .into_iter()
-            .map(|p| PeerSummary {
-                id: p.agent_id.to_string(),
-                addr: p.addr.to_string(),
-                status: status_str(&p.status).to_string(),
-                rtt_ms: p.rtt_ms,
-                source: source_str(&p.source).to_string(),
-            })
-            .collect())
-    }
-
-    async fn status(&self) -> Result<StatusResult> {
-        let peers_connected = self
-            .peer_table
-            .list()
-            .await
-            .iter()
-            .filter(|p| p.status == ConnectionStatus::Connected)
-            .count();
-
-        Ok(StatusResult {
-            uptime_secs: self.start.elapsed().as_secs(),
-            peers_connected,
-            messages_sent: self.counters.sent.load(Ordering::Relaxed),
-            messages_received: self.counters.received.load(Ordering::Relaxed),
-        })
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Command dispatch — routes all IPC commands through the IPC handler layer
+// Command dispatch — directly handles all IPC commands
 // ---------------------------------------------------------------------------
 
 pub(crate) async fn handle_command(cmd: CommandEvent, ctx: &DaemonContext<'_>) -> Result<()> {
-    let backend = DaemonIpcBackend {
-        peer_table: ctx.peer_table,
-        transport: ctx.transport,
-        local_agent_id: ctx.local_agent_id,
-        counters: ctx.counters,
-        replay_cache: ctx.replay_cache,
-        start: ctx.start,
+    let client_id = cmd.client_id;
+
+    let reply = match cmd.command {
+        IpcCommand::Send {
+            to,
+            kind,
+            payload,
+            ref_id,
+            req_id,
+        } => match handle_send(ctx, to, kind, payload, ref_id).await {
+            Ok((msg_id, response)) => {
+                let broadcast_envelope = response.clone();
+                let reply = DaemonReply::SendOk {
+                    ok: true,
+                    msg_id,
+                    req_id,
+                    response,
+                };
+                // Send reply first, then broadcast (so sender gets ack before broadcast)
+                ctx.ipc.send_reply(client_id, &reply).await?;
+                if let Some(envelope) = broadcast_envelope {
+                    let _ = ctx.ipc.broadcast_inbound(&envelope).await;
+                }
+                return Ok(());
+            }
+            Err(e) => {
+                let error_code = if let Some(e) = e.downcast_ref::<DaemonIpcError>() {
+                    match e {
+                        DaemonIpcError::PeerNotFound => IpcErrorCode::PeerNotFound,
+                        DaemonIpcError::PeerUnreachable => IpcErrorCode::PeerUnreachable,
+                        DaemonIpcError::InvalidCommand(_) => IpcErrorCode::InvalidCommand,
+                    }
+                } else {
+                    IpcErrorCode::InternalError
+                };
+                DaemonReply::Error {
+                    ok: false,
+                    message: error_code.message(),
+                    error: error_code,
+                    req_id,
+                }
+            }
+        },
+        IpcCommand::Peers { req_id } => {
+            let peers: Vec<PeerSummary> = ctx
+                .peer_table
+                .list()
+                .await
+                .into_iter()
+                .map(|p| PeerSummary {
+                    id: p.agent_id.to_string(),
+                    addr: p.addr.to_string(),
+                    status: status_str(&p.status).to_string(),
+                    rtt_ms: p.rtt_ms,
+                    source: source_str(&p.source).to_string(),
+                })
+                .collect();
+            DaemonReply::Peers {
+                ok: true,
+                peers,
+                req_id,
+            }
+        }
+        IpcCommand::Status { req_id } => {
+            let peers_connected = ctx
+                .peer_table
+                .list()
+                .await
+                .iter()
+                .filter(|p| p.status == ConnectionStatus::Connected)
+                .count();
+            DaemonReply::Status {
+                ok: true,
+                uptime_secs: ctx.start.elapsed().as_secs(),
+                peers_connected,
+                messages_sent: ctx.counters.sent.load(Ordering::Relaxed),
+                messages_received: ctx.counters.received.load(Ordering::Relaxed),
+                req_id,
+            }
+        }
+        IpcCommand::Whoami { req_id } => {
+            // Forward to IPC server which has the config info
+            ctx.ipc
+                .handle_command(CommandEvent {
+                    client_id,
+                    command: IpcCommand::Whoami { req_id },
+                })
+                .await?
+        }
     };
 
-    let result = ctx
-        .ipc
-        .dispatch_command(cmd.client_id, cmd.command, &backend)
-        .await?;
-    ctx.ipc.send_reply(cmd.client_id, &result.reply).await?;
-
-    // If send produced a response envelope, broadcast it to IPC clients
-    if let Some(envelope) = result.response_envelope {
-        ctx.ipc.broadcast_inbound(&envelope).await?;
-    }
-
-    // If the handler requested closing this client, do so
-    if result.close {
-        ctx.ipc.close_client(cmd.client_id).await;
-    }
-
+    ctx.ipc.send_reply(client_id, &reply).await?;
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Send helper
+// ---------------------------------------------------------------------------
+
+async fn handle_send(
+    ctx: &DaemonContext<'_>,
+    to: String,
+    kind: IpcSendKind,
+    payload: serde_json::Value,
+    ref_id: Option<uuid::Uuid>,
+) -> Result<(uuid::Uuid, Option<crate::message::Envelope>)> {
+    let peer = ctx
+        .peer_table
+        .get(&to)
+        .await
+        .ok_or_else(|| anyhow::anyhow!(DaemonIpcError::PeerNotFound))?;
+
+    let mut envelope = Envelope::new(
+        (*ctx.local_agent_id).clone(),
+        to.clone(),
+        kind.as_message_kind(),
+        payload,
+    );
+    envelope.ref_id = ref_id;
+    envelope
+        .validate()
+        .map_err(|e| anyhow::anyhow!(DaemonIpcError::InvalidCommand(e.to_string())))?;
+
+    let msg_id = envelope.id;
+
+    // Timeout the send (including connection attempt) so IPC clients don't
+    // block indefinitely when the peer is unreachable over UDP/QUIC.
+    const SEND_TIMEOUT: Duration = Duration::from_secs(10);
+    let send_result = tokio::time::timeout(SEND_TIMEOUT, ctx.transport.send(&peer, envelope)).await;
+
+    match send_result {
+        Err(_elapsed) => {
+            ctx.peer_table.set_disconnected(&to).await;
+            anyhow::bail!(DaemonIpcError::PeerUnreachable)
+        }
+        Ok(inner) => match inner {
+            Ok(response) => {
+                ctx.counters.sent.fetch_add(1, Ordering::Relaxed);
+                ctx.peer_table.set_connected(&to, None).await;
+                if response.is_some() {
+                    ctx.counters.received.fetch_add(1, Ordering::Relaxed);
+                }
+                Ok((msg_id, response))
+            }
+            Err(_err) => {
+                ctx.peer_table.set_disconnected(&to).await;
+                anyhow::bail!(DaemonIpcError::PeerUnreachable)
+            }
+        },
+    }
 }

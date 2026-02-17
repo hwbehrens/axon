@@ -4,7 +4,7 @@ use crate::*;
 // Discovery → PeerTable integration
 // =========================================================================
 
-/// StaticDiscovery emits PeerEvents that feed PeerTable correctly.
+/// run_static_discovery emits PeerEvents that feed PeerTable correctly.
 #[tokio::test]
 async fn static_discovery_feeds_peer_table() {
     let peers = vec![
@@ -20,11 +20,10 @@ async fn static_discovery_feeds_peer_table() {
         },
     ];
 
-    let discovery = StaticDiscovery::new(peers);
     let (tx, mut rx) = mpsc::channel(16);
 
     tokio::spawn(async move {
-        let _ = discovery.run(tx, CancellationToken::new()).await;
+        let _ = run_static_discovery(peers, tx, CancellationToken::new()).await;
     });
 
     let table = PeerTable::new();

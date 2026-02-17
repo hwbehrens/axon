@@ -2,6 +2,8 @@
 Total: **100 points** across 7 categories.
 
 This rubric evaluates **engineering quality**: correctness, safety, tests, performance, reliability, and maintainability.
+
+Spec files are authoritative: `spec/SPEC.md`, `spec/WIRE_FORMAT.md`, `spec/MESSAGE_TYPES.md`, `spec/IPC.md`.
 Use alongside:
 - `ALIGNMENT.md` (LLM-first / project philosophy fit)
 - `DOCUMENTATION.md` (spec/README/docs quality)
@@ -10,14 +12,14 @@ Use alongside:
 
 You are an impartial, rigorous technical reviewer. Follow these principles:
 
-- **Fair and evidence-based.** Every deduction must cite a concrete, verifiable signal in the diff, code, spec, or documentation — never penalize on vague intuition. Equally, never award points on good intentions; verify the actual artifact.
+- **Fair and evidence-based.** Every deduction must cite a concrete, verifiable signal in the diff, code, spec, or documentation; never penalize on vague intuition. Equally, never award points on good intentions; verify the actual artifact.
 - **First-principles thinking.** Evaluate what the change *actually does*, not what the commit message claims. Read the code; read the spec; check that they agree. If they disagree, that is a finding.
-- **100 means flawless.** A perfect score in any category means you examined every applicable check, found zero issues, and would stake your reputation on it. Do not round up. If in doubt, deduct — the author can rebut.
-- **This is not a rubber stamp.** Assume the change has defects until proven otherwise. Actively look for: correctness bugs, missing edge-case tests, security regressions, resource leaks, unbounded allocations, panic paths, protocol violations, and dead code.
-- **Thorough, not cursory.** Read the actual files — not just the diff summary. Trace error paths. Check that test assertions match spec requirements. Verify resource bounds are enforced. Look for concurrency issues.
+- **100 means flawless.** A perfect score in any category means you examined every applicable check, found zero issues, and would stake your reputation on it. Do not round up. If in doubt, deduct; the author can rebut.
+- **This is not a rubber stamp.** Assume the change has defects until proven otherwise. Actively look for correctness bugs, missing edge-case tests, security regressions, resource leaks, unbounded allocations, panic paths, protocol violations, and dead code.
+- **Thorough, not cursory.** Read the actual files, not just the diff summary. Trace error paths. Check that test assertions match spec requirements. Verify resource bounds are enforced. Look for concurrency issues.
 - **Deductions are cumulative and specific.** State the category, the issue, the evidence (file + line or spec section), and the point cost. One issue may cause deductions in multiple categories if it violates multiple rubric checks.
 - **Proportional severity.** A correctness bug or security regression warrants a larger deduction than a style nit. Use judgment, but always explain the reasoning.
-- **Substance over preference.** Focus on issues that affect correctness, safety, interoperability, or maintainability — not stylistic preferences or alternative-design bikeshedding. A finding is substantive if ignoring it could cause a bug, a spec violation, a security hole, a resource leak, or measurable confusion for implementers. A finding is a nit if it reflects a reviewer preference that reasonable engineers would disagree on (naming taste, comment density, module granularity). Deduct for substantive issues; do not deduct for nits. Small issues ARE worth flagging when they have concrete downstream consequences (e.g., a missing constant in a spec table that another implementation would need).
+- **Substance over preference.** Focus on issues that affect correctness, safety, interoperability, or maintainability, not stylistic preferences or alternative-design bikeshedding. A finding is substantive if ignoring it could cause a bug, a spec violation, a security hole, a resource leak, or measurable confusion for implementers. A finding is a nit if it reflects a reviewer preference that reasonable engineers would disagree on (naming taste, comment density, module granularity). Deduct for substantive issues; do not deduct for nits. Small issues are worth flagging when they have concrete downstream consequences.
 
 ## Scoring method
 - **Start each category at max points and deduct** for missing items, regressions, or unaddressed risks.
@@ -31,21 +33,19 @@ Does the change do the right thing, including edge cases, without breaking requi
 
 **Check (deduct if missing/regressed):**
 - **Spec-defined invariants remain correct**
-  - *Hello gating*: before successful QUIC `hello`:
-    - unauthenticated **uni** messages are dropped (not forwarded to IPC)
-    - unauthenticated **bidi** non-`hello` requests get `error(not_authorized)`
-  - *Agent ID binding*: `hello.from` matches ID derived from the peer certificate public key.
-  - *Initiator rule*: lower lexicographic `agent_id` initiates; higher-ID waits briefly then errors as implemented.
-  - *Replay dedup*: duplicates (same envelope UUID) are dropped within TTL; cache stays bounded.
+  - Consult `spec/` plus invariant summaries in `AGENTS.md` and `CONTRIBUTING.md` for the current invariant list.
 - **Wire-level rules remain correct**
-  - One-message-per-QUIC-stream, FIN delimits message (no length prefix).
-  - Max message size enforcement remains correct (64KiB baseline).
-  - Envelope parsing/validation happens before forwarding to IPC/handlers.
+  - Envelope fields, framing, limits, and validation order match `spec/WIRE_FORMAT.md`.
+  - One-message-per-stream behavior remains correct where specified.
+- **Message behavior remains correct**
+  - Message kinds and stream mapping match `spec/MESSAGE_TYPES.md`.
+- **IPC behavior remains correct**
+  - Command semantics and transport guarantees match `spec/IPC.md`.
 - **Forward compatibility behavior preserved**
-  - Unknown JSON fields are ignored where required (envelope/payload tolerance).
+  - Unknown JSON fields are ignored where required by the spec.
 
 **Typical deductions**
-- Behavior differs from spec without deliberate spec update; broken hello gating; incorrect ID derivation/binding; replay loopholes; message forwarded before validation.
+- Behavior differs from spec without deliberate spec update; identity or routing invariants broken; malformed data forwarded before validation.
 
 ---
 
@@ -58,18 +58,18 @@ Does the change preserve or improve the security posture under realistic threat 
   - Unknown inbound peers are rejected during TLS verification unless in expected peer table.
   - Expected-pubkey match is enforced when pinned.
 - **Input validation + safe failure**
-  - Malformed frames/JSON do not panic; invalid envelopes are rejected/dropped per spec.
-  - No forwarding of malformed/unvalidated envelopes to IPC subscribers.
+  - Malformed frames/JSON do not panic; invalid envelopes are rejected or dropped per spec.
+  - Unvalidated envelopes are not forwarded to IPC subscribers.
 - **Resource/DoS controls preserved**
   - Bounded queues, bounded buffers, explicit drop/backpressure behavior.
-  - Connection caps and handshake deadlines preserved.
+  - Connection lifecycle limits and timeouts remain aligned with spec and code constants.
 - **Sensitive data protection**
   - No logging of private keys, raw key material, tokens, or sensitive payloads by default.
   - File/socket permissions remain strict (`0600` key/token/socket, `0700` dirs as applicable).
-  - No "debug bypass" (accept-any-peer, disable verification) left enabled.
+  - No debug bypass left enabled.
 
 **Typical deductions**
-- Weakening TLS verification/pinning; unbounded buffers; leaking secrets to logs; new attack surface without tests.
+- Weakening TLS verification or pinning; unbounded buffers; leaking secrets to logs; new attack surface without tests.
 
 ---
 
@@ -81,17 +81,17 @@ Do tests *meaningfully verify behavior* and protect against regression?
   - Unit tests cover new/changed functions and error paths.
   - Integration tests cover cross-module flows (IPC ↔ daemon ↔ transport, discovery ↔ pinning ↔ connect, reconnect loops).
 - **Invariant-driven assertions**
-  - Tests explicitly assert: hello gating, agent-id binding, initiator rule behavior, replay dedup, size limits.
+  - Tests explicitly assert invariants defined in `AGENTS.md`, `CONTRIBUTING.md`, and the spec files.
 - **Spec compliance tests updated when relevant**
-  - If message kinds, schemas, or wire behavior change: update `axon/tests/spec_compliance.rs`.
+  - If wire behavior, message behavior, or IPC behavior changes, update spec-compliance coverage.
 - **Property testing where it pays off**
-  - Parsing/validation/state machines: add or extend `proptest` coverage.
-  - Commit any generated `proptest-regressions/`.
+  - Parsing, validation, and state-machine paths add or extend `proptest` coverage.
+  - Commit generated `proptest-regressions/` when created.
 - **No flakiness**
-  - Avoid "sleep and pray"; use signals/events; deterministic time control if available.
+  - Avoid timing-only assertions; use signals/events and deterministic control where available.
 
 **Typical deductions**
-- Missing regression tests; tests that only assert "no crash"; timing-dependent flakes; no spec compliance updates when needed.
+- Missing regression tests; tests that only assert "no crash"; timing-dependent flakes; no spec-compliance updates when needed.
 
 ---
 
@@ -99,13 +99,13 @@ Do tests *meaningfully verify behavior* and protect against regression?
 Does the change preserve AXON's "fast and light" goals (<5MB RSS, negligible idle CPU), without premature micro-optimization?
 
 **Check:**
-- No obvious hot-path regressions (framing, envelope encode/decode, routing, replay cache).
-- No blocking operations on async runtime (use `tokio::fs` / `spawn_blocking` when warranted).
-- Resource limits remain bounded (buffers/queues, connection limits).
+- No obvious hot-path regressions (framing, envelope encode/decode, routing).
+- No blocking operations on async runtime (`tokio::fs` / `spawn_blocking` where warranted).
+- Resource limits remain bounded (buffers/queues, connection limits, in-memory tracking maps).
 - Add/update benchmarks in `axon/benches/` when changing known hot paths (where practical).
 
 **Typical deductions**
-- Blocking I/O in async paths; unbounded allocations; noisy per-message logging; removing caps/timeouts.
+- Blocking I/O in async paths; unbounded allocations; noisy per-message logging; removing caps or timeouts.
 
 ---
 
@@ -116,7 +116,7 @@ Does the daemon behave predictably under failures and malformed inputs?
 - Errors are actionable and consistent (use established patterns; preserve context).
 - Connection lifecycle remains robust (reconnect/backoff behavior not broken).
 - Protocol-violation handling matches spec (drop vs respond with `error` depending on stream type).
-- No panics in normal "bad input" conditions.
+- No panics in normal bad-input conditions.
 
 **Typical deductions**
 - Panics on malformed input; swallowed errors; inconsistent drop/respond behavior; unreliable reconnect.
@@ -127,11 +127,11 @@ Does the daemon behave predictably under failures and malformed inputs?
 Will the code remain easy to change safely?
 
 **Check:**
-- Clear, idiomatic Rust; avoids "clever" patterns that reduce auditability.
+- Clear, idiomatic Rust; avoids clever patterns that reduce auditability.
 - Consistent error types/contexts.
 - Minimal duplication; shared logic centralized appropriately.
 - Changes fit existing module boundaries (message/transport/daemon/ipc/discovery/etc.).
-- **File size constraint honored**: Rust source files stay ≤ 500 lines; split modules when approaching.
+- **File size constraint honored**: Rust source files stay <= 500 lines; split modules when approaching.
 
 **Typical deductions**
 - Oversized files; ad-hoc JSON construction where typed structs prevent mistakes; broad refactors mixed with functional changes.
@@ -144,7 +144,7 @@ Does the change integrate cleanly with the repo workflow?
 **Check:**
 - `cargo fmt`, `cargo clippy -- -D warnings`, and full tests pass (or `make verify` in `axon/`).
 - No new warnings; no ignored tests without explicit justification.
-- No accidental debug artifacts; no dead code; no "TODO left behind" in critical paths.
+- No accidental debug artifacts; no dead code; no TODO left behind in critical paths.
 
 **Typical deductions**
 - CI failures; lint warnings; partial changes without corresponding tests/docs.

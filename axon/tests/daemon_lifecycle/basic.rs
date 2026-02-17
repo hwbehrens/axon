@@ -7,7 +7,7 @@ use super::*;
 async fn graceful_shutdown_cleans_up() {
     let dir = tempdir().unwrap();
     let port = pick_free_port();
-    let (cancel, paths, handle) = spawn_daemon(dir.path(), port, true, vec![], None);
+    let (cancel, paths, handle) = spawn_daemon(dir.path(), port, true, vec![]);
 
     // Wait for daemon to be ready.
     assert!(
@@ -44,15 +44,14 @@ async fn graceful_shutdown_cleans_up() {
     );
 }
 
-/// Initiator rule: the daemon with the lower agent_id initiates.
-/// Start two daemons and verify the lower-ID one establishes the connection.
+/// Both daemons connect: either side can dial. Start two daemons and
+/// verify both see each other as connected.
 #[tokio::test]
 
-async fn initiator_rule_lower_id_connects() {
+async fn both_sides_connect() {
     let dir_a = tempdir().unwrap();
     let dir_b = tempdir().unwrap();
 
-    // Generate identities and determine which is lower.
     let paths_a = AxonPaths::from_root(PathBuf::from(dir_a.path()));
     paths_a.ensure_root_exists().unwrap();
     let id_a = Identity::load_or_generate(&paths_a).unwrap();
@@ -60,12 +59,6 @@ async fn initiator_rule_lower_id_connects() {
     let paths_b = AxonPaths::from_root(PathBuf::from(dir_b.path()));
     paths_b.ensure_root_exists().unwrap();
     let id_b = Identity::load_or_generate(&paths_b).unwrap();
-
-    let (_lower_id, _higher_id) = if id_a.agent_id() < id_b.agent_id() {
-        (id_a.agent_id().to_string(), id_b.agent_id().to_string())
-    } else {
-        (id_b.agent_id().to_string(), id_a.agent_id().to_string())
-    };
 
     let port_a = pick_free_port();
     let port_b = pick_free_port();
@@ -81,8 +74,8 @@ async fn initiator_rule_lower_id_connects() {
         pubkey: id_a.public_key_base64().to_string(),
     }];
 
-    let (cancel_a, paths_a, handle_a) = spawn_daemon(dir_a.path(), port_a, true, peers_for_a, None);
-    let (cancel_b, paths_b, handle_b) = spawn_daemon(dir_b.path(), port_b, true, peers_for_b, None);
+    let (cancel_a, paths_a, handle_a) = spawn_daemon(dir_a.path(), port_a, true, peers_for_a);
+    let (cancel_b, paths_b, handle_b) = spawn_daemon(dir_b.path(), port_b, true, peers_for_b);
 
     assert!(
         wait_for_socket(&paths_a, Duration::from_secs(5)).await,
@@ -93,32 +86,15 @@ async fn initiator_rule_lower_id_connects() {
         "daemon B socket did not appear"
     );
 
-    // Wait for connection between the two daemons.
+    // Wait for both daemons to see each other as connected.
     assert!(
         wait_for_peer_connected(&paths_a.socket, id_b.agent_id(), Duration::from_secs(10)).await,
         "daemon A did not connect to B"
     );
-
-    // Both should see each other. The lower-ID daemon should have initiated.
-    let peers_a = ipc_command(&paths_a.socket, json!({"cmd": "peers"}))
-        .await
-        .expect("peers from A");
-    let peers_b = ipc_command(&paths_b.socket, json!({"cmd": "peers"}))
-        .await
-        .expect("peers from B");
-
-    let list_a = peers_a["peers"].as_array().unwrap();
-    let list_b = peers_b["peers"].as_array().unwrap();
-
-    let a_sees_b = list_a.iter().any(|p| {
-        p["id"].as_str() == Some(id_b.agent_id()) && p["status"].as_str() == Some("connected")
-    });
-    let b_sees_a = list_b.iter().any(|p| {
-        p["id"].as_str() == Some(id_a.agent_id()) && p["status"].as_str() == Some("connected")
-    });
-
-    assert!(a_sees_b, "daemon A should see daemon B as connected");
-    assert!(b_sees_a, "daemon B should see daemon A as connected");
+    assert!(
+        wait_for_peer_connected(&paths_b.socket, id_a.agent_id(), Duration::from_secs(10)).await,
+        "daemon B did not connect to A"
+    );
 
     // Clean up.
     cancel_a.cancel();
@@ -134,14 +110,14 @@ async fn initiator_rule_lower_id_connects() {
 async fn send_to_unknown_peer_returns_error() {
     let dir = tempdir().unwrap();
     let port = pick_free_port();
-    let (cancel, paths, handle) = spawn_daemon(dir.path(), port, true, vec![], None);
+    let (cancel, paths, handle) = spawn_daemon(dir.path(), port, true, vec![]);
 
     assert!(wait_for_socket(&paths, Duration::from_secs(5)).await);
 
     let send_cmd = json!({
         "cmd": "send",
         "to": "ed25519.deadbeefdeadbeefdeadbeefdeadbeef",
-        "kind": "ping",
+        "kind": "request",
         "payload": {}
     });
     let reply = ipc_command(&paths.socket, send_cmd)
@@ -187,8 +163,8 @@ async fn peers_command_shows_connected_peer() {
         pubkey: id_a.public_key_base64().to_string(),
     }];
 
-    let (cancel_a, paths_a, handle_a) = spawn_daemon(dir_a.path(), port_a, true, peers_for_a, None);
-    let (cancel_b, paths_b, handle_b) = spawn_daemon(dir_b.path(), port_b, true, peers_for_b, None);
+    let (cancel_a, paths_a, handle_a) = spawn_daemon(dir_a.path(), port_a, true, peers_for_a);
+    let (cancel_b, paths_b, handle_b) = spawn_daemon(dir_b.path(), port_b, true, peers_for_b);
 
     assert!(wait_for_socket(&paths_a, Duration::from_secs(5)).await);
     assert!(wait_for_socket(&paths_b, Duration::from_secs(5)).await);

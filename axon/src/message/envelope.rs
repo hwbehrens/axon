@@ -1,13 +1,51 @@
+use std::fmt;
+use std::time::{SystemTime, UNIX_EPOCH};
+
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use serde_json::value::RawValue;
 use uuid::Uuid;
 
-use super::kind::MessageKind;
-use super::wire::now_millis;
+/// AXON message kind — determines stream mapping.
+///
+/// - `Request` → bidirectional stream (expects a `Response` or `Error`)
+/// - `Response` → bidirectional stream (reply to a `Request`)
+/// - `Message` → unidirectional stream (fire-and-forget)
+/// - `Error` → bidirectional stream (error reply to a `Request`)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MessageKind {
+    Request,
+    Response,
+    Message,
+    Error,
+    #[serde(other)]
+    Unknown,
+}
 
-pub const PROTOCOL_VERSION: u8 = 1;
+impl MessageKind {
+    pub fn expects_response(self) -> bool {
+        matches!(self, MessageKind::Request)
+    }
+
+    pub fn is_response(self) -> bool {
+        matches!(self, MessageKind::Response | MessageKind::Error)
+    }
+}
+
+impl fmt::Display for MessageKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let s = match self {
+            MessageKind::Request => "request",
+            MessageKind::Response => "response",
+            MessageKind::Message => "message",
+            MessageKind::Error => "error",
+            MessageKind::Unknown => "unknown",
+        };
+        f.write_str(s)
+    }
+}
 
 /// Typed agent identity string (e.g. `ed25519.<32 hex chars>`).
 ///
@@ -99,32 +137,30 @@ impl<'de> serde::Deserialize<'de> for AgentId {
 
 /// AXON wire envelope — the top-level JSON object for every QUIC message.
 ///
-/// See `spec/MESSAGE_TYPES.md` §Envelope and `spec/WIRE_FORMAT.md` §4 for the
-/// normative schema. The `kind` field selects the payload schema; `payload`
-/// carries kind-specific data (see `spec/MESSAGE_TYPES.md` §Payload Schemas).
+/// The wire format carries only `id`, `kind`, `payload`, and optionally `ref`.
+/// The `from` and `to` fields are populated by the daemon layer (not on wire)
+/// for IPC client consumption.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Envelope {
-    pub v: u8,
     pub id: Uuid,
-    pub from: AgentId,
-    pub to: AgentId,
-    pub ts: u64,
     pub kind: MessageKind,
     #[serde(rename = "ref", default, skip_serializing_if = "Option::is_none")]
     pub ref_id: Option<Uuid>,
     pub payload: Box<RawValue>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<AgentId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to: Option<AgentId>,
 }
 
 impl PartialEq for Envelope {
     fn eq(&self, other: &Self) -> bool {
-        self.v == other.v
-            && self.id == other.id
-            && self.from == other.from
-            && self.to == other.to
-            && self.ts == other.ts
+        self.id == other.id
             && self.kind == other.kind
             && self.ref_id == other.ref_id
             && self.payload.get() == other.payload.get()
+            && self.from == other.from
+            && self.to == other.to
     }
 }
 
@@ -152,14 +188,12 @@ impl Envelope {
         payload: Value,
     ) -> Self {
         Self {
-            v: PROTOCOL_VERSION,
             id: Uuid::new_v4(),
-            from: from.into(),
-            to: to.into(),
-            ts: now_millis(),
             kind,
             ref_id: None,
             payload: Self::raw_json(&payload),
+            from: Some(from.into()),
+            to: Some(to.into()),
         }
     }
 
@@ -170,36 +204,69 @@ impl Envelope {
         payload: Value,
     ) -> Self {
         Self {
-            v: request.v,
             id: Uuid::new_v4(),
-            from: from.into(),
-            to: request.from.clone(),
-            ts: now_millis(),
             kind,
             ref_id: Some(request.id),
             payload: Self::raw_json(&payload),
+            from: Some(from.into()),
+            to: request.from.clone(),
         }
     }
 
     pub fn validate(&self) -> Result<()> {
-        if self.v == 0 {
-            bail!("protocol version must be non-zero");
+        if self.id.is_nil() {
+            bail!("message id must be non-nil");
         }
-        if !Self::is_valid_agent_id(&self.from) || !Self::is_valid_agent_id(&self.to) {
-            bail!("agent IDs must be in the format ed25519.<32 hex chars>");
+        if self.id.get_version() != Some(uuid::Version::Random) {
+            bail!("message id must be UUID v4");
         }
-        if self.ts == 0 {
-            bail!("timestamp must be non-zero");
+        if !self.payload.get().trim_start().starts_with('{') {
+            bail!("payload must be a JSON object");
         }
         Ok(())
     }
 
-    fn is_valid_agent_id(id: &str) -> bool {
-        let Some(hex) = id.strip_prefix("ed25519.") else {
-            return false;
-        };
-        hex.len() == 32 && hex.chars().all(|c| c.is_ascii_hexdigit())
+    /// Serialize for QUIC wire transport.
+    ///
+    /// The wire format carries only `id`, `kind`, `payload`, and optional
+    /// `ref`; daemon-local routing fields (`from`, `to`) are stripped.
+    pub fn wire_encode(&self) -> Result<Vec<u8>> {
+        let mut wire = self.clone();
+        wire.from = None;
+        wire.to = None;
+        encode(&wire)
     }
+}
+
+pub const MAX_MESSAGE_SIZE: u32 = 65536;
+
+pub fn encode(envelope: &Envelope) -> Result<Vec<u8>> {
+    let json = serde_json::to_vec(envelope)?;
+    if json.len() > MAX_MESSAGE_SIZE as usize {
+        bail!(
+            "message size {} exceeds maximum {MAX_MESSAGE_SIZE}",
+            json.len()
+        );
+    }
+    Ok(json)
+}
+
+pub fn decode(data: &[u8]) -> Result<Envelope> {
+    if data.len() > MAX_MESSAGE_SIZE as usize {
+        bail!(
+            "message size {} exceeds maximum {MAX_MESSAGE_SIZE}",
+            data.len()
+        );
+    }
+    let envelope: Envelope = serde_json::from_slice(data)?;
+    Ok(envelope)
+}
+
+pub fn now_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
 }
 
 #[cfg(test)]

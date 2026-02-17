@@ -2,28 +2,24 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::net::SocketAddr;
 use std::pin::Pin;
-use std::sync::{Arc, RwLock as StdRwLock};
+use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result};
 use tokio::sync::{Mutex, RwLock, Semaphore, broadcast};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 use crate::identity::Identity;
-use crate::message::{AgentId, Envelope, HelloPayload, MessageKind, hello_features};
-use crate::peer_table::PeerRecord;
+use crate::message::{AgentId, Envelope};
+use crate::peer_table::{PeerRecord, PubkeyMap};
 
 use super::connection::run_connection;
-use super::framing::{send_request, send_unidirectional};
+use super::connection::{send_request, send_unidirectional};
 use super::tls::build_endpoint;
 
-/// Optional callback to check if a message is a replay. Returns true if replay (should drop).
-pub type ReplayCheckFn =
-    Arc<dyn Fn(uuid::Uuid) -> Pin<Box<dyn Future<Output = bool> + Send>> + Send + Sync>;
-
 /// Optional callback to produce a response for a bidirectional request.
-/// If `None` is returned, the default `auto_response` is used.
+/// If `None` is returned, the default error response is used.
 pub type ResponseHandlerFn = Arc<
     dyn Fn(Arc<Envelope>) -> Pin<Box<dyn Future<Output = Option<Envelope>> + Send>> + Send + Sync,
 >;
@@ -36,20 +32,10 @@ pub struct QuicTransport {
     connections: Arc<RwLock<HashMap<String, quinn::Connection>>>,
     /// Per-peer lock to prevent concurrent connection attempts to the same peer.
     connecting_locks: Arc<RwLock<HashMap<String, Arc<Mutex<()>>>>>,
-    /// Peer public key map shared with TLS verifier callbacks.
-    ///
-    /// Uses `std::sync::RwLock` (not `tokio::sync`) because rustls `ServerCertVerifier`
-    /// and `ClientCertVerifier` callbacks are synchronous — they cannot `.await`.
-    /// All access is non-blocking: short inserts/removes via `set_expected_peer` /
-    /// `remove_expected_peer`, and short reads inside TLS verification.
-    /// Do NOT hold this lock across `.await` points.
-    expected_pubkeys: Arc<StdRwLock<HashMap<String, String>>>,
     inbound_tx: broadcast::Sender<Arc<Envelope>>,
     inbound_semaphore: Arc<Semaphore>,
     cancel: CancellationToken,
-    replay_check: Option<ReplayCheckFn>,
     response_handler: Option<ResponseHandlerFn>,
-    handshake_timeout: Duration,
     inbound_read_timeout: Duration,
 }
 
@@ -58,6 +44,7 @@ impl QuicTransport {
         bind_addr: SocketAddr,
         identity: &Identity,
         max_connections: usize,
+        pubkey_map: PubkeyMap,
     ) -> Result<Self> {
         Self::bind_cancellable(
             bind_addr,
@@ -67,9 +54,8 @@ impl QuicTransport {
             Duration::from_secs(15),
             Duration::from_secs(60),
             None,
-            None,
-            Duration::from_secs(5),
             Duration::from_secs(10),
+            pubkey_map,
         )
         .await
     }
@@ -82,20 +68,13 @@ impl QuicTransport {
         max_connections: usize,
         keepalive: Duration,
         idle_timeout: Duration,
-        replay_check: Option<ReplayCheckFn>,
         response_handler: Option<ResponseHandlerFn>,
-        handshake_timeout: Duration,
         inbound_read_timeout: Duration,
+        pubkey_map: PubkeyMap,
     ) -> Result<Self> {
         let cert = identity.make_quic_certificate()?;
-        let expected_pubkeys = Arc::new(StdRwLock::new(HashMap::new()));
-        let (endpoint, inbound_tx) = build_endpoint(
-            bind_addr,
-            &cert,
-            expected_pubkeys.clone(),
-            keepalive,
-            idle_timeout,
-        )?;
+        let (endpoint, inbound_tx) =
+            build_endpoint(bind_addr, &cert, pubkey_map, keepalive, idle_timeout)?;
 
         let transport = Self {
             endpoint,
@@ -103,13 +82,10 @@ impl QuicTransport {
             max_connections,
             connections: Arc::new(RwLock::new(HashMap::new())),
             connecting_locks: Arc::new(RwLock::new(HashMap::new())),
-            expected_pubkeys,
             inbound_tx,
             inbound_semaphore: Arc::new(Semaphore::new(max_connections)),
             cancel,
-            replay_check,
             response_handler,
-            handshake_timeout,
             inbound_read_timeout,
         };
         transport.spawn_accept_loop();
@@ -120,38 +96,11 @@ impl QuicTransport {
         self.inbound_tx.subscribe()
     }
 
-    pub fn set_expected_peer(&self, agent_id: String, pubkey: String) {
-        if let Ok(mut map) = self.expected_pubkeys.write() {
-            map.insert(agent_id, pubkey);
-        }
-    }
-
-    pub fn remove_expected_peer(&self, agent_id: &str) {
-        if let Ok(mut map) = self.expected_pubkeys.write() {
-            map.remove(agent_id);
-        }
-    }
-
-    /// Remove stale per-peer connecting lock entries for peers that are no
-    /// longer expected (not in `expected_pubkeys`). Called periodically to
-    /// prevent unbounded growth from transient mDNS peers.
-    pub async fn gc_connecting_locks(&self) {
-        let expected: Vec<String> = self
-            .expected_pubkeys
-            .read()
-            .map(|m| m.keys().cloned().collect())
-            .unwrap_or_default();
-        let mut locks = self.connecting_locks.write().await;
-        locks.retain(|k, _| expected.contains(k));
-    }
-
     pub async fn has_connection(&self, agent_id: &str) -> bool {
         self.connections.read().await.contains_key(agent_id)
     }
 
     pub async fn ensure_connection(&self, peer: &PeerRecord) -> Result<quinn::Connection> {
-        self.set_expected_peer(peer.agent_id.to_string(), peer.pubkey.clone());
-
         // Fast path: already connected.
         if let Some(existing) = self
             .connections
@@ -189,17 +138,15 @@ impl QuicTransport {
             .connect(peer.addr, &peer.agent_id)
             .with_context(|| format!("failed to begin QUIC connect to {}", peer.addr))?;
 
-        let connection = tokio::time::timeout(self.handshake_timeout, connecting)
+        let connection = connecting
             .await
-            .map_err(|_| anyhow!("QUIC connect to {} timed out", peer.addr))?
             .with_context(|| format!("QUIC handshake failed with {}", peer.addr))?;
 
-        self.perform_hello(&connection, &peer.agent_id).await?;
-        self.spawn_connection_loop(connection.clone(), Some(peer.agent_id.to_string()));
         self.connections
             .write()
             .await
             .insert(peer.agent_id.to_string(), connection.clone());
+        self.spawn_connection_loop(connection.clone());
 
         Ok(connection)
     }
@@ -208,7 +155,8 @@ impl QuicTransport {
         let connection = self.ensure_connection(peer).await?;
 
         if envelope.kind.expects_response() {
-            let response = send_request(&connection, envelope).await?;
+            let response =
+                send_request(&connection, envelope, self.local_agent_id.as_str()).await?;
             Ok(Some(response))
         } else {
             send_unidirectional(&connection, envelope).await?;
@@ -228,77 +176,15 @@ impl QuicTransport {
             .context("failed to get local address")
     }
 
-    async fn perform_hello(
-        &self,
-        connection: &quinn::Connection,
-        remote_agent_id: &str,
-    ) -> Result<()> {
-        let hello_payload = HelloPayload {
-            protocol_versions: vec![1],
-            selected_version: None,
-            agent_name: None,
-            features: hello_features(),
-        };
-
-        let hello = Envelope::new(
-            self.local_agent_id.clone(),
-            remote_agent_id,
-            MessageKind::Hello,
-            serde_json::to_value(hello_payload).context("failed to encode hello payload")?,
-        );
-
-        let response = send_request(connection, hello).await?;
-        match response.kind {
-            MessageKind::Hello => {
-                let payload = response.payload_value().unwrap_or_default();
-                let selected = payload.get("selected_version").and_then(|v| v.as_u64());
-                if selected != Some(1) {
-                    return Err(anyhow!(
-                        "peer {} did not negotiate protocol version 1. \
-                         Local agent supports: [1]. Peer selected: {:?}. \
-                         Check that the peer is running a compatible AXON version.",
-                        remote_agent_id,
-                        selected,
-                    ));
-                }
-            }
-            MessageKind::Error => {
-                let payload = response.payload_value().unwrap_or_default();
-                let code = payload
-                    .get("code")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("unknown_error");
-                let message = payload
-                    .get("message")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("peer rejected hello");
-                return Err(anyhow!(
-                    "peer {remote_agent_id} rejected hello: {code}: {message}. \
-                     Check that the peer accepts connections from this agent."
-                ));
-            }
-            other => {
-                return Err(anyhow!(
-                    "unexpected response kind '{other}' during hello handshake with {remote_agent_id}. \
-                     Expected 'hello' or 'error'."
-                ));
-            }
-        }
-        Ok(())
-    }
-
     fn spawn_accept_loop(&self) {
         let endpoint = self.endpoint.clone();
         let inbound_tx = self.inbound_tx.clone();
         let local_id = self.local_agent_id.clone();
         let connections = self.connections.clone();
-        let expected_pubkeys = self.expected_pubkeys.clone();
         let cancel = self.cancel.clone();
         let max_connections = self.max_connections;
         let inbound_semaphore = self.inbound_semaphore.clone();
-        let replay_check = self.replay_check.clone();
         let response_handler = self.response_handler.clone();
-        let handshake_timeout = self.handshake_timeout;
         let inbound_read_timeout = self.inbound_read_timeout;
 
         tokio::spawn(async move {
@@ -327,22 +213,16 @@ impl QuicTransport {
                                 let inbound_tx = inbound_tx.clone();
                                 let local_id = local_id.clone();
                                 let connections = connections.clone();
-                                let expected_pubkeys = expected_pubkeys.clone();
                                 let cancel = cancel.clone();
-                                let replay_check = replay_check.clone();
                                 let response_handler = response_handler.clone();
                                 tokio::spawn(async move {
                                     run_connection(
                                         connection,
                                         local_id.to_string(),
-                                        None,
                                         inbound_tx,
                                         connections,
-                                        expected_pubkeys,
                                         cancel,
-                                        replay_check,
                                         response_handler,
-                                        handshake_timeout,
                                         inbound_read_timeout,
                                     )
                                     .await;
@@ -357,33 +237,22 @@ impl QuicTransport {
         });
     }
 
-    fn spawn_connection_loop(
-        &self,
-        connection: quinn::Connection,
-        initial_authenticated_peer_id: Option<String>,
-    ) {
+    fn spawn_connection_loop(&self, connection: quinn::Connection) {
         let inbound_tx = self.inbound_tx.clone();
         let local_id = self.local_agent_id.clone();
         let connections = self.connections.clone();
-        let expected_pubkeys = self.expected_pubkeys.clone();
         let cancel = self.cancel.clone();
-        let replay_check = self.replay_check.clone();
         let response_handler = self.response_handler.clone();
-        let handshake_timeout = self.handshake_timeout;
         let inbound_read_timeout = self.inbound_read_timeout;
 
         tokio::spawn(async move {
             run_connection(
                 connection,
                 local_id.to_string(),
-                initial_authenticated_peer_id,
                 inbound_tx,
                 connections,
-                expected_pubkeys,
                 cancel,
-                replay_check,
                 response_handler,
-                handshake_timeout,
                 inbound_read_timeout,
             )
             .await;

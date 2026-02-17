@@ -2,8 +2,8 @@
 //!
 //! These tests require the full daemon stack (IPC ↔ daemon ↔ transport ↔ QUIC)
 //! and cover scenarios that unit tests cannot catch: IPC broadcast fanout,
-//! initiator-rule timing, pubkey pinning at the QUIC layer, concurrent sends,
-//! and shutdown under active traffic.
+//! pubkey pinning at the QUIC layer, concurrent sends, and shutdown under
+//! active traffic.
 //!
 //! These are longer-running e2e tests (~10s).
 
@@ -22,7 +22,6 @@ use tokio_util::sync::CancellationToken;
 
 mod broadcast;
 mod connection;
-mod ipc_v2;
 
 // =========================================================================
 // Helpers
@@ -50,7 +49,6 @@ pub(crate) fn spawn_daemon_with_config(
     dir: &std::path::Path,
     port: u16,
     config: Config,
-    agent_id_override: Option<String>,
 ) -> DaemonHandle {
     let cancel = CancellationToken::new();
     let paths = AxonPaths::from_root(PathBuf::from(dir));
@@ -63,7 +61,6 @@ pub(crate) fn spawn_daemon_with_config(
         port: Some(port),
         disable_mdns: true,
         axon_root: Some(PathBuf::from(dir)),
-        agent_id: agent_id_override,
         cancel: Some(cancel.clone()),
     };
 
@@ -88,7 +85,6 @@ pub(crate) fn spawn_daemon(
             peers,
             ..Default::default()
         },
-        None,
     )
 }
 
@@ -134,6 +130,14 @@ pub(crate) async fn ipc_command(
     socket_path: &std::path::Path,
     command: Value,
 ) -> anyhow::Result<Value> {
+    ipc_command_timeout(socket_path, command, Duration::from_secs(5)).await
+}
+
+pub(crate) async fn ipc_command_timeout(
+    socket_path: &std::path::Path,
+    command: Value,
+    read_timeout: Duration,
+) -> anyhow::Result<Value> {
     let mut stream = UnixStream::connect(socket_path).await?;
     let line = serde_json::to_string(&command)?;
     stream.write_all(line.as_bytes()).await?;
@@ -141,7 +145,7 @@ pub(crate) async fn ipc_command(
 
     let mut reader = BufReader::new(stream);
     let mut response = String::new();
-    let bytes = timeout(Duration::from_secs(5), reader.read_line(&mut response)).await??;
+    let bytes = timeout(read_timeout, reader.read_line(&mut response)).await??;
     if bytes == 0 {
         anyhow::bail!("daemon closed connection");
     }

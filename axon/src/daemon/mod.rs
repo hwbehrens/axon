@@ -1,13 +1,10 @@
 pub(crate) mod command_handler;
 mod peer_events;
 mod reconnect;
-mod replay_cache;
-mod token;
 
 use command_handler::{Counters, DaemonContext, handle_command};
 use peer_events::handle_peer_event;
-use reconnect::{ReconnectState, attempt_reconnects};
-use replay_cache::ReplayCache;
+use reconnect::{ReconnectState, attempt_reconnects, handle_reconnect_outcome, reconnect_channel};
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -15,16 +12,25 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
+// Hardcoded defaults (previously configurable; see Phase 9).
+const MAX_CONNECTIONS: usize = 128;
+const KEEPALIVE: Duration = Duration::from_secs(15);
+const IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+const INBOUND_READ_TIMEOUT: Duration = Duration::from_secs(10);
+const MAX_IPC_CLIENTS: usize = 64;
+const MAX_CLIENT_QUEUE: usize = 1024;
+const RECONNECT_MAX_BACKOFF: Duration = Duration::from_secs(30);
+
 use anyhow::{Context, Result};
-use tokio::sync::{mpsc, watch};
+use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
 use crate::config::{AxonPaths, Config, load_known_peers, save_known_peers};
-use crate::discovery::{Discovery, MdnsDiscovery, StaticDiscovery};
+use crate::discovery::{run_mdns_discovery, run_static_discovery};
 use crate::identity::Identity;
 use crate::ipc::IpcServer;
-use crate::message::{AgentId, MessageKind};
+use crate::message::AgentId;
 use crate::peer_table::PeerTable;
 use crate::transport::QuicTransport;
 
@@ -37,7 +43,6 @@ pub struct DaemonOptions {
     pub port: Option<u16>,
     pub disable_mdns: bool,
     pub axon_root: Option<PathBuf>,
-    pub agent_id: Option<String>,
     pub cancel: Option<CancellationToken>,
 }
 
@@ -52,14 +57,11 @@ pub async fn run_daemon(opts: DaemonOptions) -> Result<()> {
     };
     paths.ensure_root_exists()?;
 
-    let config = Config::load(&paths.config)?;
+    let config = Config::load(&paths.config).await?;
     let port = config.effective_port(opts.port);
 
     let identity = Identity::load_or_generate(&paths)?;
-    let local_agent_id: AgentId = opts
-        .agent_id
-        .map(AgentId::from)
-        .unwrap_or_else(|| AgentId::from(identity.agent_id()));
+    let local_agent_id: AgentId = AgentId::from(identity.agent_id());
 
     info!(agent_id = %local_agent_id, port, "starting AXON daemon");
 
@@ -81,93 +83,45 @@ pub async fn run_daemon(opts: DaemonOptions) -> Result<()> {
     for peer in &config.peers {
         peer_table.upsert_static(peer).await;
     }
-    for peer in load_known_peers(&paths.known_peers)? {
+    for peer in load_known_peers(&paths.known_peers).await? {
         peer_table.upsert_cached(&peer).await;
     }
 
-    // --- Counters & replay cache ---
+    // --- Counters ---
     let counters = Arc::new(Counters::default());
-    let replay_cache = Arc::new(ReplayCache::load(
-        &paths.replay_cache,
-        Duration::from_secs(300),
-        100_000,
-    ));
 
     // --- Transport ---
     let bind_addr = format!("0.0.0.0:{port}")
         .parse()
         .context("invalid bind address")?;
-    let replay_cache_for_transport = replay_cache.clone();
-    let replay_check: Option<crate::transport::ReplayCheckFn> =
-        Some(Arc::new(move |id: uuid::Uuid| {
-            let cache = replay_cache_for_transport.clone();
-            Box::pin(async move { cache.is_replay(id, Instant::now()).await })
-        }));
     let transport = QuicTransport::bind_cancellable(
         bind_addr,
         &identity,
         cancel.clone(),
-        config.effective_max_connections(),
-        config.effective_keepalive(),
-        config.effective_idle_timeout(),
-        replay_check,
+        MAX_CONNECTIONS,
+        KEEPALIVE,
+        IDLE_TIMEOUT,
         None,
-        config.effective_handshake_timeout(),
-        config.effective_inbound_read_timeout(),
+        INBOUND_READ_TIMEOUT,
+        peer_table.pubkey_map(),
     )
     .await?;
-    // Eagerly populate expected_pubkeys from peer table so inbound connections are pinned
-    for peer in peer_table.list().await {
-        transport.set_expected_peer(peer.agent_id.to_string(), peer.pubkey.clone());
-    }
 
     // --- IPC ---
-    // Generate IPC token if it doesn't exist, then load it
-    let token_path = config.effective_token_path(&paths.root);
-    let ipc_token = token::load_or_generate(&token_path).await?;
-
     let start = Instant::now();
-    let (token_tx, token_rx) = watch::channel(ipc_token);
     let ipc_config = crate::ipc::IpcServerConfig {
         agent_id: local_agent_id.to_string(),
         public_key: identity.public_key_base64().to_string(),
         name: config.name.clone(),
         version: env!("CARGO_PKG_VERSION").to_string(),
-        token: token_rx,
-        allow_v1: config.effective_allow_v1(),
-        max_client_queue: config.effective_max_client_queue(),
-        buffer_size: config
-            .ipc
-            .as_ref()
-            .and_then(|c| c.buffer_size)
-            .unwrap_or(1000),
-        buffer_ttl_secs: config
-            .ipc
-            .as_ref()
-            .and_then(|c| c.buffer_ttl_secs)
-            .unwrap_or(86400),
-        buffer_byte_cap: Some(config.effective_buffer_byte_cap()),
+        max_client_queue: MAX_CLIENT_QUEUE,
         uptime_secs: Arc::new(move || start.elapsed().as_secs()),
-        clock: Arc::new(|| {
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_millis() as u64
-        }),
     };
 
-    let (ipc, mut cmd_rx) = IpcServer::bind(
-        paths.socket.clone(),
-        config.effective_max_ipc_clients(),
-        ipc_config,
-    )
-    .await?;
+    let (ipc, mut cmd_rx) =
+        IpcServer::bind(paths.socket.clone(), MAX_IPC_CLIENTS, ipc_config).await?;
 
     // --- Inbound message forwarder (transport → IPC clients) ---
-    // Replay protection is already performed by the transport layer (connection.rs)
-    // before messages are broadcast to inbound_tx. No second check here — the
-    // transport and forwarder share the same ReplayCache, so a redundant call to
-    // is_replay() would always return true and drop every legitimate message.
     let mut inbound_rx = transport.subscribe_inbound();
     let ipc_for_inbound = ipc.clone();
     let counters_for_inbound = counters.clone();
@@ -181,9 +135,9 @@ pub async fn run_daemon(opts: DaemonOptions) -> Result<()> {
                     match msg {
                         Ok(envelope) => {
                             counters_for_inbound.received.fetch_add(1, Ordering::Relaxed);
-                            if envelope.kind == MessageKind::Hello {
+                            if let Some(ref from) = envelope.from {
                                 peer_table_for_inbound
-                                    .set_connected(&envelope.from, None)
+                                    .set_connected(from.as_str(), None)
                                     .await;
                             }
                             if let Err(err) = ipc_for_inbound.broadcast_inbound(&envelope).await {
@@ -204,24 +158,21 @@ pub async fn run_daemon(opts: DaemonOptions) -> Result<()> {
     let (peer_event_tx, mut peer_event_rx) = mpsc::channel(256);
     {
         let tx = peer_event_tx.clone();
-        let static_discovery = StaticDiscovery::new(config.peers.clone());
+        let peers = config.peers.clone();
         let cancel_clone = cancel.clone();
         tokio::spawn(async move {
-            if let Err(err) = static_discovery.run(tx, cancel_clone).await {
+            if let Err(err) = run_static_discovery(peers, tx, cancel_clone).await {
                 warn!(error = %err, "static discovery failed");
             }
         });
     }
     if !opts.disable_mdns {
         let tx = peer_event_tx.clone();
-        let mdns = MdnsDiscovery::new(
-            local_agent_id.clone(),
-            identity.public_key_base64().to_string(),
-            port,
-        );
+        let agent_id = local_agent_id.clone();
+        let pubkey = identity.public_key_base64().to_string();
         let cancel_clone = cancel.clone();
         tokio::spawn(async move {
-            if let Err(err) = mdns.run(tx, cancel_clone).await {
+            if let Err(err) = run_mdns_discovery(agent_id, pubkey, port, tx, cancel_clone).await {
                 warn!(error = %err, "mDNS discovery failed");
             }
         });
@@ -230,14 +181,11 @@ pub async fn run_daemon(opts: DaemonOptions) -> Result<()> {
     // --- Reconnection tracking ---
     let mut reconnect_map = HashMap::<AgentId, ReconnectState>::new();
     for peer in peer_table.list().await {
-        if *local_agent_id < *peer.agent_id {
-            reconnect_map.insert(peer.agent_id, ReconnectState::immediate(Instant::now()));
-        }
+        reconnect_map.insert(peer.agent_id, ReconnectState::immediate(Instant::now()));
     }
 
-    // --- SIGHUP handler for token rotation (IPC.md §2.2) ---
-    let mut sighup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
-        .context("failed to register SIGHUP handler")?;
+    // --- Reconnect outcome channel ---
+    let (reconnect_tx, mut reconnect_rx) = reconnect_channel();
 
     // --- Timers ---
     let mut save_interval = tokio::time::interval(Duration::from_secs(60));
@@ -250,7 +198,6 @@ pub async fn run_daemon(opts: DaemonOptions) -> Result<()> {
         transport: &transport,
         local_agent_id: &local_agent_id,
         counters: &counters,
-        replay_cache: &replay_cache,
         start,
     };
 
@@ -273,8 +220,6 @@ pub async fn run_daemon(opts: DaemonOptions) -> Result<()> {
                     handle_peer_event(
                         event,
                         &peer_table,
-                        &transport,
-                        &local_agent_id,
                         &mut reconnect_map,
                     ).await;
                     if let Err(err) = save_known_peers(&paths.known_peers, &peer_table.to_known_peers().await).await {
@@ -287,40 +232,35 @@ pub async fn run_daemon(opts: DaemonOptions) -> Result<()> {
                 if !removed.is_empty() {
                     for id in &removed {
                         reconnect_map.remove(id);
-                        transport.remove_expected_peer(id);
                     }
                     info!(count = removed.len(), "removed stale discovered peers");
                     if let Err(err) = save_known_peers(&paths.known_peers, &peer_table.to_known_peers().await).await {
                         warn!(error = %err, "failed to persist known peers after stale cleanup");
                     }
                 }
-                transport.gc_connecting_locks().await;
+            }
+            maybe_outcome = reconnect_rx.recv() => {
+                if let Some(outcome) = maybe_outcome {
+                    handle_reconnect_outcome(
+                        outcome,
+                        &peer_table,
+                        &mut reconnect_map,
+                        RECONNECT_MAX_BACKOFF,
+                    ).await;
+                }
             }
             _ = reconnect_interval.tick() => {
                 attempt_reconnects(
                     &peer_table,
                     &transport,
-                    &local_agent_id,
                     &mut reconnect_map,
-                    config.effective_reconnect_max_backoff(),
                     &cancel,
+                    &reconnect_tx,
                 ).await;
             }
             _ = save_interval.tick() => {
                 if let Err(err) = save_known_peers(&paths.known_peers, &peer_table.to_known_peers().await).await {
                     warn!(error = %err, "failed to persist known peers");
-                }
-            }
-            _ = sighup.recv() => {
-                info!("SIGHUP received, reloading IPC token");
-                match token::reload(&token_path).await {
-                    Ok(new_token) => {
-                        let _ = token_tx.send(Some(new_token));
-                        info!(path = %token_path.display(), "IPC token reloaded");
-                    }
-                    Err(err) => {
-                        error!(error = %err, "failed to reload IPC token on SIGHUP");
-                    }
                 }
             }
         }
@@ -340,9 +280,6 @@ pub async fn run_daemon(opts: DaemonOptions) -> Result<()> {
     if let Err(err) = save_known_peers(&paths.known_peers, &peer_table.to_known_peers().await).await
     {
         warn!(error = %err, "failed to save known peers during shutdown");
-    }
-    if let Err(err) = replay_cache.save(&paths.replay_cache).await {
-        warn!(error = %err, "failed to save replay cache during shutdown");
     }
     ipc.cleanup_socket()?;
     info!("shutdown complete");

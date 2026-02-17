@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -16,9 +17,6 @@ use axon::identity::Identity;
 
 mod cli_examples;
 
-#[cfg(feature = "generate-docs")]
-use std::path::PathBuf;
-
 #[derive(Debug, Parser)]
 #[command(name = "axon", about = "AXON — Agent eXchange Over Network")]
 struct Cli {
@@ -35,32 +33,14 @@ enum Commands {
         /// Disable mDNS discovery (use static peers only).
         #[arg(long)]
         disable_mdns: bool,
-        /// Override the derived agent_id (for testing/aliasing).
-        #[arg(long)]
-        agent_id: Option<String>,
+        /// AXON root directory (for multi-agent-per-host layouts).
+        #[arg(long, value_name = "DIR")]
+        axon_root: Option<PathBuf>,
     },
-    /// Send a query to another agent.
+    /// Send a request to another agent and wait for a response.
     Send { agent_id: String, message: String },
-    /// Delegate a task to another agent.
-    Delegate { agent_id: String, task: String },
-    /// Send a notification (fire-and-forget).
-    Notify {
-        agent_id: String,
-        topic: String,
-        data: String,
-    },
-    /// Send a ping to another agent.
-    Ping { agent_id: String },
-    /// Discover another agent's capabilities.
-    Discover { agent_id: String },
-    /// Cancel a previously delegated task.
-    Cancel {
-        agent_id: String,
-        #[arg(long, name = "ref")]
-        ref_id: String,
-        #[arg(long)]
-        reason: String,
-    },
+    /// Send a fire-and-forget message to another agent.
+    Notify { agent_id: String, data: String },
     /// List discovered and connected peers.
     Peers,
     /// Show daemon status.
@@ -88,88 +68,31 @@ async fn main() -> Result<()> {
         Commands::Daemon {
             port,
             disable_mdns,
-            agent_id,
+            axon_root,
         } => {
             run_daemon(DaemonOptions {
                 port,
                 disable_mdns,
-                axon_root: None,
-                agent_id,
+                axon_root,
                 cancel: None,
             })
             .await?;
         }
         Commands::Send { agent_id, message } => {
-            let payload = json!({
-                "question": message,
-                "domain": "meta.query",
-                "max_tokens": 200,
-                "deadline_ms": 30000
-            });
+            let payload = json!({ "message": message });
             let line = send_ipc(
-                json!({"cmd": "send", "to": agent_id, "kind": "query", "payload": payload}),
-                true,
-            )
-            .await?;
-            println!("{line}");
-        }
-        Commands::Delegate { agent_id, task } => {
-            let payload = json!({
-                "task": task,
-                "priority": "normal",
-                "report_back": true,
-                "deadline_ms": 60000
-            });
-            let line = send_ipc(
-                json!({"cmd": "send", "to": agent_id, "kind": "delegate", "payload": payload}),
-                true,
-            )
-            .await?;
-            println!("{line}");
-        }
-        Commands::Notify {
-            agent_id,
-            topic,
-            data,
-        } => {
-            let parsed_data = serde_json::from_str::<Value>(&data).unwrap_or_else(|_| json!(data));
-            let payload = json!({
-                "topic": topic,
-                "data": parsed_data,
-                "importance": "low"
-            });
-            let line = send_ipc(
-                json!({"cmd": "send", "to": agent_id, "kind": "notify", "payload": payload}),
+                json!({"cmd": "send", "to": agent_id, "kind": "request", "payload": payload}),
                 false,
             )
             .await?;
             println!("{line}");
         }
-        Commands::Ping { agent_id } => {
+        Commands::Notify { agent_id, data } => {
+            let parsed_data = serde_json::from_str::<Value>(&data).unwrap_or_else(|_| json!(data));
+            let payload = json!({ "data": parsed_data });
             let line = send_ipc(
-                json!({"cmd": "send", "to": agent_id, "kind": "ping", "payload": {}}),
-                true,
-            )
-            .await?;
-            println!("{line}");
-        }
-        Commands::Discover { agent_id } => {
-            let line = send_ipc(
-                json!({"cmd": "send", "to": agent_id, "kind": "discover", "payload": {}}),
-                true,
-            )
-            .await?;
-            println!("{line}");
-        }
-        Commands::Cancel {
-            agent_id,
-            ref_id,
-            reason,
-        } => {
-            let payload = json!({"reason": reason});
-            let line = send_ipc(
-                json!({"cmd": "send", "to": agent_id, "kind": "cancel", "payload": payload, "ref": ref_id}),
-                true,
+                json!({"cmd": "send", "to": agent_id, "kind": "message", "payload": payload}),
+                false,
             )
             .await?;
             println!("{line}");
@@ -316,7 +239,7 @@ async fn send_ipc(command: Value, wait_for_correlated_inbound: bool) -> Result<S
 
         let value: Value =
             serde_json::from_str(trimmed).context("failed decoding inbound IPC line")?;
-        let is_match = value.get("inbound") == Some(&json!(true))
+        let is_match = value.get("event") == Some(&json!("inbound"))
             && value
                 .get("envelope")
                 .and_then(|e| e.get("ref"))

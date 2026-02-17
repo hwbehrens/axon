@@ -158,14 +158,14 @@ async fn ipc_invalid_command_returns_error() {
 /// IPC send command with ref field deserializes correctly.
 #[test]
 fn ipc_send_with_ref_deserializes() {
-    let input = r#"{"cmd":"send","to":"ed25519.deadbeef01234567deadbeef01234567","kind":"cancel","payload":{"reason":"changed plans"},"ref":"550e8400-e29b-41d4-a716-446655440000"}"#;
+    let input = r#"{"cmd":"send","to":"ed25519.deadbeef01234567deadbeef01234567","kind":"request","payload":{"reason":"changed plans"},"ref":"550e8400-e29b-41d4-a716-446655440000"}"#;
     let cmd: IpcCommand = serde_json::from_str(input).unwrap();
     match cmd {
         IpcCommand::Send {
             to, kind, ref_id, ..
         } => {
             assert_eq!(to, "ed25519.deadbeef01234567deadbeef01234567");
-            assert_eq!(kind, MessageKind::Cancel);
+            assert_eq!(kind, axon::ipc::IpcSendKind::Request);
             assert!(ref_id.is_some());
         }
         _ => panic!("expected Send"),
@@ -175,13 +175,54 @@ fn ipc_send_with_ref_deserializes() {
 /// IPC send without ref defaults to None.
 #[test]
 fn ipc_send_without_ref_defaults_to_none() {
-    let input = r#"{"cmd":"send","to":"ed25519.deadbeef01234567deadbeef01234567","kind":"query","payload":{"question":"hello?"}}"#;
+    let input = r#"{"cmd":"send","to":"ed25519.deadbeef01234567deadbeef01234567","kind":"request","payload":{"question":"hello?"}}"#;
     let cmd: IpcCommand = serde_json::from_str(input).unwrap();
     match cmd {
         IpcCommand::Send { ref_id, .. } => {
             assert!(ref_id.is_none());
         }
         _ => panic!("expected Send"),
+    }
+}
+
+/// IPC send kind is restricted to request|message.
+#[test]
+fn ipc_send_rejects_non_sendable_kinds() {
+    for kind in ["response", "error", "totally_unknown_kind"] {
+        let input = format!(
+            r#"{{"cmd":"send","to":"ed25519.deadbeef01234567deadbeef01234567","kind":"{kind}","payload":{{}}}}"#
+        );
+        let parsed = serde_json::from_str::<IpcCommand>(&input);
+        assert!(
+            parsed.is_err(),
+            "kind={kind} should be rejected at IPC parse boundary"
+        );
+    }
+}
+
+/// Invalid send.kind values return invalid_command.
+#[tokio::test]
+async fn ipc_send_invalid_kind_returns_invalid_command() {
+    let dir = tempdir().unwrap();
+    let socket_path = dir.path().join("axon.sock");
+    let (_server, _cmd_rx) = IpcServer::bind(socket_path.clone(), 64, IpcServerConfig::default())
+        .await
+        .unwrap();
+
+    for kind in ["response", "error", "totally_unknown_kind"] {
+        let mut client = UnixStream::connect(&socket_path).await.unwrap();
+        let cmd = format!(
+            r#"{{"cmd":"send","to":"ed25519.deadbeef01234567deadbeef01234567","kind":"{kind}","payload":{{}}}}"#
+        ) + "\n";
+        client.write_all(cmd.as_bytes()).await.unwrap();
+        let mut line = String::new();
+        let mut reader = BufReader::new(client);
+        reader.read_line(&mut line).await.unwrap();
+        assert!(line.contains("\"ok\":false"));
+        assert!(
+            line.contains("invalid_command"),
+            "expected invalid_command for kind={kind}, got {line}"
+        );
     }
 }
 
@@ -207,7 +248,7 @@ async fn ipc_client_disconnect_isolation() {
     let envelope = Envelope::new(
         "ed25519.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
         "ed25519.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string(),
-        MessageKind::Notify,
+        MessageKind::Message,
         json!({"topic": "meta.status", "data": {}}),
     );
     server.broadcast_inbound(&envelope).await.unwrap();
@@ -215,7 +256,7 @@ async fn ipc_client_disconnect_isolation() {
     let mut line = String::new();
     let mut reader = BufReader::new(&mut client_b);
     reader.read_line(&mut line).await.unwrap();
-    assert!(line.contains("\"inbound\":true"));
+    assert!(line.contains("\"event\":\"inbound\""));
 }
 
 /// IPC broadcasts to multiple simultaneous clients.
@@ -234,7 +275,7 @@ async fn ipc_broadcast_to_all_clients() {
     let envelope = Envelope::new(
         "ed25519.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
         "ed25519.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string(),
-        MessageKind::Ping,
+        MessageKind::Request,
         json!({}),
     );
     server.broadcast_inbound(&envelope).await.unwrap();
@@ -245,8 +286,8 @@ async fn ipc_broadcast_to_all_clients() {
     let mut reader_b = BufReader::new(&mut client_b);
     reader_a.read_line(&mut line_a).await.unwrap();
     reader_b.read_line(&mut line_b).await.unwrap();
-    assert!(line_a.contains("\"inbound\":true"));
-    assert!(line_b.contains("\"inbound\":true"));
+    assert!(line_a.contains("\"event\":\"inbound\""));
+    assert!(line_b.contains("\"event\":\"inbound\""));
 }
 
 /// IPC cleanup removes socket file.

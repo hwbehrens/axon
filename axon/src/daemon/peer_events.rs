@@ -7,13 +7,10 @@ use super::reconnect::ReconnectState;
 use crate::discovery::PeerEvent;
 use crate::message::AgentId;
 use crate::peer_table::{PeerSource, PeerTable};
-use crate::transport::QuicTransport;
 
 pub(crate) async fn handle_peer_event(
     event: PeerEvent,
     peer_table: &PeerTable,
-    transport: &QuicTransport,
-    local_agent_id: &AgentId,
     reconnect_state: &mut HashMap<AgentId, ReconnectState>,
 ) {
     let now = Instant::now();
@@ -33,22 +30,17 @@ pub(crate) async fn handle_peer_event(
                     source = ?existing.source,
                     "ignoring discovered pubkey change for pinned peer"
                 );
-                if local_agent_id < &agent_id {
-                    reconnect_state
-                        .entry(agent_id)
-                        .or_insert_with(|| ReconnectState::immediate(now));
-                }
+                reconnect_state
+                    .entry(agent_id)
+                    .or_insert_with(|| ReconnectState::immediate(now));
                 return;
             }
 
-            transport.set_expected_peer(agent_id.to_string(), pubkey.clone());
             peer_table
                 .upsert_discovered(agent_id.clone(), addr, pubkey)
                 .await;
 
-            if local_agent_id < &agent_id {
-                reconnect_state.insert(agent_id, ReconnectState::immediate(now));
-            }
+            reconnect_state.insert(agent_id, ReconnectState::immediate(now));
         }
         PeerEvent::Lost { agent_id } => {
             peer_table.set_disconnected(&agent_id).await;

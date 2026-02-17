@@ -7,9 +7,9 @@ AXON is built by and for LLM agents. This guide is written accordingly — conci
 Read these in order:
 
 1. [`spec/SPEC.md`](./spec/SPEC.md) — protocol architecture (QUIC, Ed25519, discovery, lifecycle)
-2. [`spec/MESSAGE_TYPES.md`](./spec/MESSAGE_TYPES.md) — all message kinds, payload schemas, stream mapping
+2. [`spec/MESSAGE_TYPES.md`](./spec/MESSAGE_TYPES.md) — message kinds and stream mapping
 3. [`spec/WIRE_FORMAT.md`](./spec/WIRE_FORMAT.md) — normative wire format for interoperable implementations
-4. [`spec/IPC.md`](./spec/IPC.md) — IPC protocol, Unix socket commands, auth, receive buffer
+4. [`spec/IPC.md`](./spec/IPC.md) — IPC protocol, Unix socket commands
 5. [`AGENTS.md`](./AGENTS.md) — module map, key invariants, recipes, testing requirements
 
 The spec is authoritative. If the implementation disagrees with the spec, the spec wins.
@@ -20,26 +20,21 @@ Know where to make changes before you start editing:
 
 | Change | File(s) |
 |--------|---------|
-| Envelope schema / payloads | `axon/src/message/envelope.rs`, `axon/src/message/payloads.rs` |
-| Add/change a message kind | See [recipe](#adding-a-new-message-kind) |
-| QUIC framing / max message size | `axon/src/message/wire.rs`, `axon/src/transport/framing.rs` |
-| TLS peer verification | `axon/src/transport/tls.rs` |
-| Hello handshake / version negotiation | `axon/src/transport/handshake.rs` |
+| Envelope schema / message kinds | `axon/src/message/envelope.rs` |
+| TLS peer verification / cert parsing | `axon/src/transport/tls.rs` |
+| QUIC bind / connect / send | `axon/src/transport/quic_transport.rs` |
+| Connection loop / framing | `axon/src/transport/connection.rs` |
 | IPC command/reply schema | `axon/src/ipc/protocol.rs` |
-| IPC server behavior | `axon/src/ipc/server.rs` |
-| IPC dispatch + hello/auth/req_id gating | `axon/src/ipc/handlers/mod.rs` |
-| IPC hello + auth handlers | `axon/src/ipc/handlers/hello_auth.rs` |
-| IPC v2 commands (whoami/inbox/ack/subscribe) | `axon/src/ipc/handlers/commands.rs` |
-| IPC inbound broadcast fanout | `axon/src/ipc/handlers/broadcast.rs` |
-| IPC receive buffer | `axon/src/ipc/receive_buffer.rs` |
+| IPC server behavior / broadcast | `axon/src/ipc/server.rs` |
 | IPC peer credential auth | `axon/src/ipc/auth.rs` |
-| IPC backend trait | `axon/src/ipc/backend.rs` |
-| Peer table operations | `axon/src/peer_table.rs` |
+| Peer table / pinning / PubkeyMap | `axon/src/peer_table.rs` |
 | mDNS / static discovery | `axon/src/discovery.rs` |
-| Daemon orchestration | `axon/src/daemon/mod.rs` |
-| IPC token lifecycle (generate, validate, reload) | `axon/src/daemon/token.rs` |
+| Daemon event loop / startup / shutdown | `axon/src/daemon/mod.rs` |
+| Command dispatch | `axon/src/daemon/command_handler.rs` |
+| Discovery event handling | `axon/src/daemon/peer_events.rs` |
 | Reconnection logic | `axon/src/daemon/reconnect.rs` |
 | CLI commands | `axon/src/main.rs` |
+| CLI example output | `axon/src/cli_examples.rs` |
 | Ed25519 identity / agent ID | `axon/src/identity.rs` |
 | Config file parsing | `axon/src/config.rs` |
 
@@ -47,11 +42,9 @@ Know where to make changes before you start editing:
 
 Do not break these. They are load-bearing:
 
-- **Hello must be first** — no messages sent or accepted until the `hello` handshake completes on a QUIC connection.
 - **Agent ID = SHA-256(pubkey)** — the `from` field must match the public key in the peer's TLS certificate. Reject on mismatch.
-- **Peer pinning** — `set_expected_peer()` must be called before a peer can connect. Unknown peers are rejected at TLS.
-- **Lower agent_id initiates** — the peer with the lexicographically lower agent_id opens the QUIC connection. Prevents duplicates.
-- **Replay protection** — inbound message UUIDs are tracked in a TTL cache. Duplicates are dropped.
+- **Peer pinning** — unknown peers must not be accepted at TLS/transport; peers must be in the peer table before connection.
+- **PeerTable owns the pubkey map** — TLS verifiers read from PeerTable's shared PubkeyMap. No manual sync needed.
 
 ## Verification
 
@@ -107,11 +100,11 @@ Cover all public functions, edge cases, and error paths.
 
 ### Integration tests
 
-Located in `axon/tests/`. Test cross-module interactions: IPC → transport → IPC routing, discovery → connection → handshake flows.
+Located in `axon/tests/`. Test cross-module interactions: IPC → transport → IPC routing, discovery → connection → mTLS authentication flows.
 
 ### Spec compliance tests
 
-In `axon/tests/spec_compliance.rs`. Every message kind must have a round-trip serialization test validating against the spec.
+In `axon/tests/spec_compliance.rs`. Message envelope round-trip serialization tests validating against the spec.
 
 ### Property-based tests
 
@@ -125,19 +118,9 @@ In `axon/fuzz/fuzz_targets/`. When adding a new deserialization entry point, add
 
 Don't test third-party crate internals (`quinn`, `ed25519-dalek`, `mdns-sd`). Test your integration with them, not their correctness.
 
-## Adding a New Message Kind
+## Message Kinds
 
-Follow this recipe exactly:
-
-1. **Add variant to `MessageKind`** in `axon/src/message/kind.rs`
-   - Update `expects_response()`, `is_response()`, `is_required()`, and `Display`
-2. **Add payload struct** in `axon/src/message/payloads.rs` with serde derives
-3. **Update `hello_features()`** in `axon/src/message/kind.rs` if the kind is optional
-4. **Update `auto_response()`** in `axon/src/transport/handshake.rs` if the daemon should auto-reply
-5. **Add CLI command** in `axon/src/main.rs` if exposed to users
-6. **Add serde round-trip test** in `axon/src/message/payloads.rs`
-7. **Add spec compliance test** in `axon/tests/spec_compliance.rs`
-8. **Update `spec/MESSAGE_TYPES.md`** with the new kind's schema
+Message kinds are fixed at the protocol level (`request`, `response`, `message`, `error`). Do not add new kinds without updating the spec. New application-level semantics should be expressed via message payload content, not new kinds.
 
 ## License
 

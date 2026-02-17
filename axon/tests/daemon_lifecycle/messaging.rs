@@ -31,28 +31,10 @@ async fn reconnect_after_peer_restart() {
         pubkey: id_a.public_key_base64().to_string(),
     }];
 
-    // Write configs with aggressive keepalive/idle timeouts so A detects B's
-    // disconnection within a few seconds instead of the default 60s idle timeout.
-    // We write configs manually (with peers included) and pass empty peers to
-    // spawn_daemon so it doesn't overwrite them with default timeouts.
-    for (dir, port, peers) in [
-        (dir_a.path(), port_a, &peers_for_a),
-        (dir_b.path(), port_b, &peers_for_b),
-    ] {
-        let config = axon::config::Config {
-            port: Some(port),
-            peers: peers.clone(),
-            keepalive_secs: Some(1),
-            idle_timeout_secs: Some(3),
-            ..Default::default()
-        };
-        let paths = AxonPaths::from_root(PathBuf::from(dir));
-        std::fs::write(&paths.config, toml::to_string_pretty(&config).unwrap()).unwrap();
-    }
-
-    // Start both daemons (empty peers vec so spawn_daemon doesn't overwrite our config).
-    let (cancel_a, paths_a, handle_a) = spawn_daemon(dir_a.path(), port_a, true, vec![], None);
-    let (cancel_b, paths_b, handle_b) = spawn_daemon(dir_b.path(), port_b, true, vec![], None);
+    // Start both daemons with static peer config.
+    let (cancel_a, paths_a, handle_a) = spawn_daemon(dir_a.path(), port_a, true, peers_for_a);
+    let (cancel_b, paths_b, handle_b) =
+        spawn_daemon(dir_b.path(), port_b, true, peers_for_b.clone());
 
     assert!(
         wait_for_socket(&paths_a, Duration::from_secs(5)).await,
@@ -63,7 +45,7 @@ async fn reconnect_after_peer_restart() {
         "daemon B socket did not appear"
     );
 
-    // Wait for initial connection + hello handshake.
+    // Wait for initial QUIC connection establishment.
     assert!(
         wait_for_peer_connected(&paths_a.socket, id_b.agent_id(), Duration::from_secs(10)).await,
         "daemon A did not connect to B"
@@ -94,8 +76,8 @@ async fn reconnect_after_peer_restart() {
         "daemon A did not notice B disconnected"
     );
 
-    // Restart daemon B on the same port (config already on disk with fast timeouts).
-    let (cancel_b2, paths_b2, handle_b2) = spawn_daemon(dir_b.path(), port_b, true, vec![], None);
+    // Restart daemon B on the same port.
+    let (cancel_b2, paths_b2, handle_b2) = spawn_daemon(dir_b.path(), port_b, true, peers_for_b);
     assert!(
         wait_for_socket(&paths_b2, Duration::from_secs(5)).await,
         "daemon B2 socket did not appear"
@@ -159,8 +141,8 @@ async fn ipc_send_delivers_message_e2e() {
         pubkey: id_a.public_key_base64().to_string(),
     }];
 
-    let (cancel_a, paths_a, handle_a) = spawn_daemon(dir_a.path(), port_a, true, peers_for_a, None);
-    let (cancel_b, paths_b, handle_b) = spawn_daemon(dir_b.path(), port_b, true, peers_for_b, None);
+    let (cancel_a, paths_a, handle_a) = spawn_daemon(dir_a.path(), port_a, true, peers_for_a);
+    let (cancel_b, paths_b, handle_b) = spawn_daemon(dir_b.path(), port_b, true, peers_for_b);
 
     assert!(wait_for_socket(&paths_a, Duration::from_secs(5)).await);
     assert!(wait_for_socket(&paths_b, Duration::from_secs(5)).await);
@@ -180,7 +162,7 @@ async fn ipc_send_delivers_message_e2e() {
     let send_cmd = json!({
         "cmd": "send",
         "to": id_b.agent_id(),
-        "kind": "query",
+        "kind": "request",
         "payload": {"question": "What is 2+2?", "domain": "math"}
     });
     let ack = ipc_command(&paths_a.socket, send_cmd)
@@ -200,8 +182,8 @@ async fn ipc_send_delivers_message_e2e() {
         .expect("read failed");
     assert!(bytes > 0, "B should receive inbound message");
     let inbound: Value = serde_json::from_str(line.trim()).unwrap();
-    assert_eq!(inbound["inbound"], json!(true));
-    assert_eq!(inbound["envelope"]["kind"], "query");
+    assert_eq!(inbound["event"], json!("inbound"));
+    assert_eq!(inbound["envelope"]["kind"], "request");
     assert_eq!(inbound["envelope"]["from"], id_a.agent_id());
 
     cancel_a.cancel();
@@ -240,8 +222,8 @@ async fn status_counters_increment_after_send() {
         pubkey: id_a.public_key_base64().to_string(),
     }];
 
-    let (cancel_a, paths_a, handle_a) = spawn_daemon(dir_a.path(), port_a, true, peers_for_a, None);
-    let (cancel_b, paths_b, handle_b) = spawn_daemon(dir_b.path(), port_b, true, peers_for_b, None);
+    let (cancel_a, paths_a, handle_a) = spawn_daemon(dir_a.path(), port_a, true, peers_for_a);
+    let (cancel_b, paths_b, handle_b) = spawn_daemon(dir_b.path(), port_b, true, peers_for_b);
 
     assert!(wait_for_socket(&paths_a, Duration::from_secs(5)).await);
     assert!(wait_for_socket(&paths_b, Duration::from_secs(5)).await);
@@ -260,7 +242,7 @@ async fn status_counters_increment_after_send() {
     let send_cmd = json!({
         "cmd": "send",
         "to": id_b.agent_id(),
-        "kind": "ping",
+        "kind": "request",
         "payload": {}
     });
     let ack = ipc_command(&paths_a.socket, send_cmd).await.unwrap();
@@ -315,8 +297,8 @@ async fn notify_delivered_through_daemon_e2e() {
         pubkey: id_a.public_key_base64().to_string(),
     }];
 
-    let (cancel_a, paths_a, handle_a) = spawn_daemon(dir_a.path(), port_a, true, peers_for_a, None);
-    let (cancel_b, paths_b, handle_b) = spawn_daemon(dir_b.path(), port_b, true, peers_for_b, None);
+    let (cancel_a, paths_a, handle_a) = spawn_daemon(dir_a.path(), port_a, true, peers_for_a);
+    let (cancel_b, paths_b, handle_b) = spawn_daemon(dir_b.path(), port_b, true, peers_for_b);
 
     assert!(wait_for_socket(&paths_a, Duration::from_secs(5)).await);
     assert!(wait_for_socket(&paths_b, Duration::from_secs(5)).await);
@@ -334,7 +316,7 @@ async fn notify_delivered_through_daemon_e2e() {
     let send_cmd = json!({
         "cmd": "send",
         "to": id_b.agent_id(),
-        "kind": "notify",
+        "kind": "message",
         "payload": {"topic": "test.event", "data": {"value": 42}, "importance": "high"}
     });
     let ack = ipc_command(&paths_a.socket, send_cmd).await.unwrap();
@@ -348,8 +330,8 @@ async fn notify_delivered_through_daemon_e2e() {
         .expect("read failed");
     assert!(bytes > 0);
     let inbound: Value = serde_json::from_str(line.trim()).unwrap();
-    assert_eq!(inbound["inbound"], json!(true));
-    assert_eq!(inbound["envelope"]["kind"], "notify");
+    assert_eq!(inbound["event"], json!("inbound"));
+    assert_eq!(inbound["envelope"]["kind"], "message");
     assert_eq!(inbound["envelope"]["from"], id_a.agent_id());
 
     cancel_a.cancel();
@@ -388,9 +370,8 @@ async fn known_peers_persisted_after_connection() {
         pubkey: id_a.public_key_base64().to_string(),
     }];
 
-    let (cancel_a, paths_a, handle_a) = spawn_daemon(dir_a.path(), port_a, true, peers_for_a, None);
-    let (cancel_b, _paths_b, handle_b) =
-        spawn_daemon(dir_b.path(), port_b, true, peers_for_b, None);
+    let (cancel_a, paths_a, handle_a) = spawn_daemon(dir_a.path(), port_a, true, peers_for_a);
+    let (cancel_b, _paths_b, handle_b) = spawn_daemon(dir_b.path(), port_b, true, peers_for_b);
 
     assert!(wait_for_socket(&paths_a, Duration::from_secs(5)).await);
     assert!(

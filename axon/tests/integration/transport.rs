@@ -11,21 +11,10 @@ fn envelope_roundtrip_all_kinds() {
     let b = "ed25519.f6e5d4c3b2a1f6e5d4c3b2a1f6e5d4c3".to_string();
 
     let payloads = vec![
-        (MessageKind::Ping, json!({})),
-        (
-            MessageKind::Query,
-            json!({"question": "test?", "domain": "meta"}),
-        ),
-        (
-            MessageKind::Notify,
-            json!({"topic": "t", "data": {}, "importance": "high"}),
-        ),
-        (
-            MessageKind::Delegate,
-            json!({"task": "do it", "priority": "urgent", "report_back": true}),
-        ),
-        (MessageKind::Discover, json!({})),
-        (MessageKind::Cancel, json!({"reason": "changed mind"})),
+        (MessageKind::Request, json!({"question": "test?"})),
+        (MessageKind::Message, json!({"topic": "t", "data": {}})),
+        (MessageKind::Response, json!({"answer": "42"})),
+        (MessageKind::Error, json!({"code": "fail"})),
     ];
 
     for (kind, payload) in payloads {
@@ -33,8 +22,8 @@ fn envelope_roundtrip_all_kinds() {
         let encoded = encode(&env).unwrap();
         let decoded = decode(&encoded).unwrap();
         assert_eq!(decoded.kind, kind, "kind mismatch for {kind}");
-        assert_eq!(decoded.from, a);
-        assert_eq!(decoded.to, b);
+        assert_eq!(decoded.from, Some(AgentId::from(a.as_str())));
+        assert_eq!(decoded.to, Some(AgentId::from(b.as_str())));
     }
 }
 
@@ -42,29 +31,14 @@ fn envelope_roundtrip_all_kinds() {
 // Transport integration — QUIC peer-to-peer
 // =========================================================================
 
-/// Two transports connect and complete hello exchange.
+/// Two transports connect via QUIC (TLS handshake authenticates).
 #[tokio::test]
-async fn transport_hello_exchange() {
+async fn transport_connect() {
     let (id_a, _dir_a) = make_identity();
     let (id_b, _dir_b) = make_identity();
 
-    let transport_b = QuicTransport::bind("127.0.0.1:0".parse().unwrap(), &id_b, 128)
-        .await
-        .unwrap();
+    let (transport_a, transport_b, _, _) = make_transport_pair(&id_a, &id_b).await;
     let addr_b = transport_b.local_addr().unwrap();
-
-    let transport_a = QuicTransport::bind("127.0.0.1:0".parse().unwrap(), &id_a, 128)
-        .await
-        .unwrap();
-
-    transport_a.set_expected_peer(
-        id_b.agent_id().to_string(),
-        id_b.public_key_base64().to_string(),
-    );
-    transport_b.set_expected_peer(
-        id_a.agent_id().to_string(),
-        id_a.public_key_base64().to_string(),
-    );
 
     let peer_b = make_peer_record(&id_b, addr_b);
     let conn = transport_a.ensure_connection(&peer_b).await.unwrap();
@@ -72,209 +46,56 @@ async fn transport_hello_exchange() {
     assert!(transport_a.has_connection(id_b.agent_id()).await);
 }
 
-/// Bidirectional query gets a response.
+/// Bidirectional request gets an error response (default_error_response).
 #[tokio::test]
-async fn transport_query_gets_response() {
+async fn transport_request_gets_error_response() {
     let (id_a, _dir_a) = make_identity();
     let (id_b, _dir_b) = make_identity();
 
-    let transport_b = QuicTransport::bind("127.0.0.1:0".parse().unwrap(), &id_b, 128)
-        .await
-        .unwrap();
-    let addr_b = transport_b.local_addr().unwrap();
-
-    let transport_a = QuicTransport::bind("127.0.0.1:0".parse().unwrap(), &id_a, 128)
-        .await
-        .unwrap();
-
-    transport_a.set_expected_peer(
-        id_b.agent_id().to_string(),
-        id_b.public_key_base64().to_string(),
-    );
-    transport_b.set_expected_peer(
-        id_a.agent_id().to_string(),
-        id_a.public_key_base64().to_string(),
-    );
+    let (transport_a, _transport_b, _, _) = make_transport_pair(&id_a, &id_b).await;
+    let addr_b = _transport_b.local_addr().unwrap();
 
     let peer_b = make_peer_record(&id_b, addr_b);
 
-    let query = Envelope::new(
+    let request = Envelope::new(
         id_a.agent_id().to_string(),
         id_b.agent_id().to_string(),
-        MessageKind::Query,
-        json!({"question": "What is 2+2?", "domain": "math"}),
+        MessageKind::Request,
+        json!({"question": "What is 2+2?"}),
     );
 
-    let result = transport_a.send(&peer_b, query.clone()).await.unwrap();
-    let response = result.expect("expected response for query");
-    assert_eq!(response.kind, MessageKind::Response);
-    assert_eq!(response.ref_id, Some(query.id));
+    let result = transport_a.send(&peer_b, request.clone()).await.unwrap();
+    let response = result.expect("expected response for request");
+    assert_eq!(response.kind, MessageKind::Error);
+    assert_eq!(response.ref_id, Some(request.id));
 }
 
-/// Bidirectional discover gets capabilities.
+/// Unidirectional message delivered without response.
 #[tokio::test]
-async fn transport_discover_gets_capabilities() {
+async fn transport_message_fire_and_forget() {
     let (id_a, _dir_a) = make_identity();
     let (id_b, _dir_b) = make_identity();
 
-    let transport_b = QuicTransport::bind("127.0.0.1:0".parse().unwrap(), &id_b, 128)
-        .await
-        .unwrap();
-    let addr_b = transport_b.local_addr().unwrap();
-
-    let transport_a = QuicTransport::bind("127.0.0.1:0".parse().unwrap(), &id_a, 128)
-        .await
-        .unwrap();
-
-    transport_a.set_expected_peer(
-        id_b.agent_id().to_string(),
-        id_b.public_key_base64().to_string(),
-    );
-    transport_b.set_expected_peer(
-        id_a.agent_id().to_string(),
-        id_a.public_key_base64().to_string(),
-    );
-
-    let peer_b = make_peer_record(&id_b, addr_b);
-
-    let discover = Envelope::new(
-        id_a.agent_id().to_string(),
-        id_b.agent_id().to_string(),
-        MessageKind::Discover,
-        json!({}),
-    );
-
-    let result = transport_a.send(&peer_b, discover.clone()).await.unwrap();
-    let response = result.expect("expected response for discover");
-    assert_eq!(response.kind, MessageKind::Capabilities);
-    assert_eq!(response.ref_id, Some(discover.id));
-}
-
-/// Bidirectional delegate gets ack.
-#[tokio::test]
-async fn transport_delegate_gets_ack() {
-    let (id_a, _dir_a) = make_identity();
-    let (id_b, _dir_b) = make_identity();
-
-    let transport_b = QuicTransport::bind("127.0.0.1:0".parse().unwrap(), &id_b, 128)
-        .await
-        .unwrap();
-    let addr_b = transport_b.local_addr().unwrap();
-
-    let transport_a = QuicTransport::bind("127.0.0.1:0".parse().unwrap(), &id_a, 128)
-        .await
-        .unwrap();
-
-    transport_a.set_expected_peer(
-        id_b.agent_id().to_string(),
-        id_b.public_key_base64().to_string(),
-    );
-    transport_b.set_expected_peer(
-        id_a.agent_id().to_string(),
-        id_a.public_key_base64().to_string(),
-    );
-
-    let peer_b = make_peer_record(&id_b, addr_b);
-
-    let delegate = Envelope::new(
-        id_a.agent_id().to_string(),
-        id_b.agent_id().to_string(),
-        MessageKind::Delegate,
-        json!({"task": "do something", "priority": "normal", "report_back": true}),
-    );
-
-    let result = transport_a.send(&peer_b, delegate.clone()).await.unwrap();
-    let response = result.expect("expected ack for delegate");
-    assert_eq!(response.kind, MessageKind::Ack);
-    assert_eq!(response.ref_id, Some(delegate.id));
-}
-
-/// Cancel gets ack.
-#[tokio::test]
-async fn transport_cancel_gets_ack() {
-    let (id_a, _dir_a) = make_identity();
-    let (id_b, _dir_b) = make_identity();
-
-    let transport_b = QuicTransport::bind("127.0.0.1:0".parse().unwrap(), &id_b, 128)
-        .await
-        .unwrap();
-    let addr_b = transport_b.local_addr().unwrap();
-
-    let transport_a = QuicTransport::bind("127.0.0.1:0".parse().unwrap(), &id_a, 128)
-        .await
-        .unwrap();
-
-    transport_a.set_expected_peer(
-        id_b.agent_id().to_string(),
-        id_b.public_key_base64().to_string(),
-    );
-    transport_b.set_expected_peer(
-        id_a.agent_id().to_string(),
-        id_a.public_key_base64().to_string(),
-    );
-
-    let peer_b = make_peer_record(&id_b, addr_b);
-
-    let cancel = Envelope::new(
-        id_a.agent_id().to_string(),
-        id_b.agent_id().to_string(),
-        MessageKind::Cancel,
-        json!({"reason": "plans changed"}),
-    );
-
-    let result = transport_a.send(&peer_b, cancel.clone()).await.unwrap();
-    let response = result.expect("expected ack for cancel");
-    assert_eq!(response.kind, MessageKind::Ack);
-    assert_eq!(response.ref_id, Some(cancel.id));
-}
-
-/// Unidirectional notify delivered without response.
-#[tokio::test]
-async fn transport_notify_fire_and_forget() {
-    let (id_a, _dir_a) = make_identity();
-    let (id_b, _dir_b) = make_identity();
-
-    let transport_b = QuicTransport::bind("127.0.0.1:0".parse().unwrap(), &id_b, 128)
-        .await
-        .unwrap();
+    let (transport_a, transport_b, _, _) = make_transport_pair(&id_a, &id_b).await;
     let addr_b = transport_b.local_addr().unwrap();
     let mut rx_b = transport_b.subscribe_inbound();
 
-    let transport_a = QuicTransport::bind("127.0.0.1:0".parse().unwrap(), &id_a, 128)
-        .await
-        .unwrap();
-
-    transport_a.set_expected_peer(
-        id_b.agent_id().to_string(),
-        id_b.public_key_base64().to_string(),
-    );
-    transport_b.set_expected_peer(
-        id_a.agent_id().to_string(),
-        id_a.public_key_base64().to_string(),
-    );
-
     let peer_b = make_peer_record(&id_b, addr_b);
 
-    let notify = Envelope::new(
+    let message = Envelope::new(
         id_a.agent_id().to_string(),
         id_b.agent_id().to_string(),
-        MessageKind::Notify,
-        json!({"topic": "test.topic", "data": {"key": "value"}, "importance": "low"}),
+        MessageKind::Message,
+        json!({"topic": "test.topic", "data": {"key": "value"}}),
     );
 
-    let result = transport_a.send(&peer_b, notify).await.unwrap();
-    assert!(result.is_none(), "notify should not return a response");
+    let result = transport_a.send(&peer_b, message).await.unwrap();
+    assert!(result.is_none(), "message should not return a response");
 
-    // Drain until we find the notify (hello is also broadcast).
-    let received = loop {
-        let msg = tokio::time::timeout(Duration::from_secs(5), rx_b.recv())
-            .await
-            .expect("timeout")
-            .expect("recv");
-        if msg.kind != MessageKind::Hello {
-            break msg;
-        }
-    };
-    assert_eq!(received.kind, MessageKind::Notify);
-    assert_eq!(received.from, id_a.agent_id());
+    let received = tokio::time::timeout(Duration::from_secs(5), rx_b.recv())
+        .await
+        .expect("timeout")
+        .expect("recv");
+    assert_eq!(received.kind, MessageKind::Message);
+    assert_eq!(received.from, Some(AgentId::from(id_a.agent_id())));
 }

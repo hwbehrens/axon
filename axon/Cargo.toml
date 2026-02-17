@@ -1,6 +1,6 @@
 [package]
 name = "axon"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 description = "AXON — Agent eXchange Over Network, LLM-first local messaging daemon"
 license = "MIT"
@@ -15,7 +15,6 @@ quinn = "0.11"
 rustls = { version = "0.23", features = ["ring"] }
 rcgen = "0.13"
 ed25519-dalek = { version = "2", features = ["rand_core"] }
-rand = "0.8"
 mdns-sd = "0.11"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }
@@ -27,13 +26,9 @@ sha2 = "0.10"
 base64 = "0.22"
 uuid = { version = "1", features = ["v4", "serde"] }
 anyhow = "1"
-thiserror = "2"
-async-trait = "0.1"
 x509-parser = "0.16"
 getrandom = "0.2"
 libc = "0.2" # Required for Unix peer credentials (Linux SO_PEERCRED, macOS getpeereid) — no std-only API
-subtle = "2.6.1"
-hex = "0.4.3"
 clap_complete = { version = "4", optional = true }
 clap_mangen = { version = "0.2", optional = true }
 
@@ -45,10 +40,6 @@ tempfile = "3"
 proptest = "1"
 tokio = { version = "1", features = ["test-util"] }
 criterion = { version = "0.5", features = ["html_reports"] }
-
-[[bench]]
-name = "replay_cache_bench"
-harness = false
 
 [[bench]]
 name = "message_bench"

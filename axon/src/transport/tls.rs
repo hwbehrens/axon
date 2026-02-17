@@ -1,6 +1,5 @@
-use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::{Arc, OnceLock, RwLock as StdRwLock};
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
@@ -16,6 +15,7 @@ use x509_parser::prelude::*;
 
 use crate::identity::QuicCertificate;
 use crate::message::Envelope;
+use crate::peer_table::PubkeyMap;
 
 static CRYPTO_PROVIDER: OnceLock<()> = OnceLock::new();
 
@@ -30,7 +30,7 @@ fn ensure_crypto_provider() {
 pub(crate) fn build_endpoint(
     bind_addr: SocketAddr,
     cert: &QuicCertificate,
-    expected_pubkeys: Arc<StdRwLock<HashMap<String, String>>>,
+    expected_pubkeys: PubkeyMap,
     keepalive: Duration,
     idle_timeout: Duration,
 ) -> Result<(quinn::Endpoint, broadcast::Sender<Arc<Envelope>>)> {
@@ -94,12 +94,12 @@ pub(crate) fn build_endpoint(
 
 #[derive(Debug)]
 struct PeerCertVerifier {
-    expected_pubkeys: Arc<StdRwLock<HashMap<String, String>>>,
+    expected_pubkeys: PubkeyMap,
 }
 
 #[derive(Debug)]
 struct PeerClientCertVerifier {
-    expected_pubkeys: Arc<StdRwLock<HashMap<String, String>>>,
+    expected_pubkeys: PubkeyMap,
     roots: Vec<DistinguishedName>,
 }
 

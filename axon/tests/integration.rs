@@ -9,10 +9,10 @@ use std::time::{Duration, Instant};
 use axon::config::{
     AxonPaths, Config, KnownPeer, StaticPeerConfig, load_known_peers, save_known_peers,
 };
-use axon::discovery::{Discovery, PeerEvent, StaticDiscovery};
+use axon::discovery::{PeerEvent, run_static_discovery};
 use axon::identity::Identity;
 use axon::ipc::{DaemonReply, IpcCommand, IpcServer, IpcServerConfig};
-use axon::message::{Envelope, MessageKind, decode, encode};
+use axon::message::{AgentId, Envelope, MessageKind, decode, encode};
 use axon::peer_table::{ConnectionStatus, PeerSource, PeerTable};
 use axon::transport::QuicTransport;
 use serde_json::{Value, json};
@@ -54,4 +54,49 @@ pub(crate) fn make_peer_record(
         rtt_ms: None,
         last_seen: Instant::now(),
     }
+}
+
+/// Create a pair of transports with mutual pubkey registration via PeerTable.
+pub(crate) async fn make_transport_pair(
+    id_a: &Identity,
+    id_b: &Identity,
+) -> (QuicTransport, QuicTransport, PeerTable, PeerTable) {
+    let table_a = PeerTable::new();
+    let table_b = PeerTable::new();
+
+    // Register each peer's pubkey in the other's table
+    table_a
+        .upsert_discovered(
+            id_b.agent_id().into(),
+            "127.0.0.1:1".parse().unwrap(),
+            id_b.public_key_base64().to_string(),
+        )
+        .await;
+    table_b
+        .upsert_discovered(
+            id_a.agent_id().into(),
+            "127.0.0.1:1".parse().unwrap(),
+            id_a.public_key_base64().to_string(),
+        )
+        .await;
+
+    let transport_b = QuicTransport::bind(
+        "127.0.0.1:0".parse().unwrap(),
+        id_b,
+        128,
+        table_b.pubkey_map(),
+    )
+    .await
+    .unwrap();
+
+    let transport_a = QuicTransport::bind(
+        "127.0.0.1:0".parse().unwrap(),
+        id_a,
+        128,
+        table_a.pubkey_map(),
+    )
+    .await
+    .unwrap();
+
+    (transport_a, transport_b, table_a, table_b)
 }

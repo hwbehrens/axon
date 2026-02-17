@@ -7,18 +7,20 @@ This rubric evaluates whether a change is aligned with AXON's goals and philosop
 - **Lightweight daemon** (fast, minimal dependencies, bounded resources)
 - **Simplicity-first** (avoid over-engineering; changes should be easy for agents to navigate)
 
+Spec files are authoritative: `spec/SPEC.md`, `spec/WIRE_FORMAT.md`, `spec/MESSAGE_TYPES.md`, `spec/IPC.md`.
+
 ## Evaluation principles
 
 You are an impartial, rigorous technical reviewer. Follow these principles:
 
-- **Fair and evidence-based.** Every deduction must cite a concrete, verifiable signal in the diff, code, spec, or documentation — never penalize on vague intuition. Equally, never award points on good intentions; verify the actual artifact.
+- **Fair and evidence-based.** Every deduction must cite a concrete, verifiable signal in the diff, code, spec, or documentation; never penalize on vague intuition. Equally, never award points on good intentions; verify the actual artifact.
 - **First-principles thinking.** Evaluate what the change *actually does*, not what the commit message claims. Read the code; read the spec; check that they agree. If they disagree, that is a finding.
-- **100 means flawless.** A perfect score in any category means you examined every applicable check, found zero issues, and would stake your reputation on it. Do not round up. If in doubt, deduct — the author can rebut.
-- **This is not a rubber stamp.** Assume the change has defects until proven otherwise. Actively look for: spec drift, missing tests, broken invariants, naming violations, stale docs, unnecessary complexity, security regressions, and resource leaks.
-- **Thorough, not cursory.** Read the actual files — not just the diff summary. Cross-reference spec text against implementation constants and behavior. Check test assertions against spec requirements. Verify documentation links resolve.
+- **100 means flawless.** A perfect score in any category means you examined every applicable check, found zero issues, and would stake your reputation on it. Do not round up. If in doubt, deduct; the author can rebut.
+- **This is not a rubber stamp.** Assume the change has defects until proven otherwise. Actively look for spec drift, missing tests, broken invariants, naming violations, stale docs, unnecessary complexity, security regressions, and resource leaks.
+- **Thorough, not cursory.** Read the actual files, not just the diff summary. Cross-reference spec text against implementation constants and behavior. Check test assertions against spec requirements. Verify documentation links resolve.
 - **Deductions are cumulative and specific.** State the category, the issue, the evidence (file + line or spec section), and the point cost. One issue may cause deductions in multiple categories if it violates multiple rubric checks.
 - **Proportional severity.** A silent protocol-behavior divergence or security regression warrants a larger deduction than a minor naming inconsistency. Use judgment, but always explain the reasoning.
-- **Substance over preference.** Focus on issues that concretely affect AXON's goals (LLM usability, spec authority, bounded resources, simplicity) — not alternative-design preferences or hypothetical concerns. A finding is substantive if ignoring it would degrade agent experience, violate a stated project principle, or introduce measurable complexity without justification. A finding is a nit if it reflects a reviewer preference that reasonable engineers would disagree on (abstraction style, module boundaries, naming taste). Deduct for substantive issues; do not deduct for nits. Small issues ARE worth flagging when they have concrete downstream consequences (e.g., a naming choice that would confuse LLM consumers, an unnecessary dependency that bloats the daemon, or a missing bound that could cause unbounded resource growth).
+- **Substance over preference.** Focus on issues that concretely affect AXON's goals (LLM usability, spec authority, bounded resources, simplicity), not alternative-design preferences or hypothetical concerns. A finding is substantive if ignoring it would degrade agent experience, violate a stated project principle, or introduce measurable complexity without justification. A finding is a nit if it reflects a reviewer preference that reasonable engineers would disagree on. Deduct for substantive issues; do not deduct for nits.
 
 ## Scoring method
 - Start each category at its maximum and deduct for findings.
@@ -31,12 +33,12 @@ AXON is a protocol project. Other implementations should be possible **without r
 
 **Check:**
 - Behavior matches the normative spec (`spec/SPEC.md`, `spec/WIRE_FORMAT.md`, `spec/MESSAGE_TYPES.md`, `spec/IPC.md`).
-- If behavior changes affect interoperability, the PR updates the spec and spec compliance tests in the same change.
-- No "implementation-only" protocol behavior (undocumented special cases, magic constants, hidden negotiation rules).
-- Preserves forward compatibility principles (unknown fields tolerated where required; stable envelope shape).
+- If behavior changes affect interoperability, the PR updates the spec and spec-compliance tests in the same change.
+- No implementation-only protocol behavior (undocumented special cases, magic constants, hidden negotiation rules).
+- Preserves forward-compatibility principles (unknown fields tolerated where required; stable envelope shape).
 
 **Typical deductions**
-- Silent protocol behavior drift; "it works in Rust" but not documented; changes that would break other-language implementations without spec updates.
+- Silent protocol behavior drift; behavior that only works by reading Rust internals; spec updates missing for interop-relevant changes.
 
 ---
 
@@ -48,68 +50,68 @@ AXON optimizes for maintainability and agent productivity, not maximal feature s
 - No new dependencies unless clearly justified and consistent with repo conventions.
 - Avoids adding new layers/traits/config knobs unless there is a demonstrated need.
 - Avoids broad refactors mixed into functional changes.
-- Keeps code paths straightforward and auditable (especially in transport/security).
+- Keeps code paths straightforward and auditable, especially in transport and security.
 
 **Typical deductions**
-- New abstraction without clear payoff; adding dependencies for convenience; refactors that increase conceptual load for LLMs.
+- New abstraction without clear payoff; dependencies added for convenience; refactors that increase conceptual load for LLMs.
 
 ---
 
 ## 3) LLM-First Navigability & Learnability (max 22)
-The repository is built "by and for LLM agents." Changes should make the codebase easier for agents to read, reason about, and modify.
+The repository is built by and for LLM agents. Changes should make the codebase easier for agents to read, reason about, and modify.
 
 **Check:**
 - **Naming is semantic and explicit**
   - Fields/vars use full meaning (`question`, `report_back`, `buffer_ttl_secs`), not abbreviations.
 - **Structure supports single-pass reading**
-  - Rust files remain ≤ 500 lines; modules split cleanly.
-  - Logic placed where `AGENTS.md` / `CONTRIBUTING.md` module map says it belongs.
+  - Rust files remain <= 500 lines; modules split cleanly.
+  - Logic stays where `AGENTS.md` / `CONTRIBUTING.md` says it belongs.
 - **Patterns are consistent**
-  - Request/response flows follow established bidi stream pattern; fire-and-forget uses uni streams; no "special cases."
-- **Errors are instructive (where user/agent-facing)**
-  - `error` payloads guide next action (per message type guidance), not just "permission denied."
+  - Stream usage and message flow follow spec-defined patterns; no ad hoc special paths.
+- **Errors are instructive where user/agent-facing**
+  - `error` payloads guide next action per protocol guidance.
 
 **Typical deductions**
-- Hard-to-follow control flow; scattered logic; "clever" metaprogramming; non-semantic names; overlong files; inconsistent protocol patterns.
+- Hard-to-follow control flow; scattered logic; non-semantic names; oversized files; inconsistent protocol patterns.
 
 ---
 
 ## 4) Architectural Coherence & Load-Bearing Invariants (max 18)
-AXON has explicit invariants (hello gating, pinning, initiator rule, replay protection, bounded buffers).
+AXON has explicit invariants that must stay coherent across code, tests, and docs.
 
 **Check:**
-- Invariants from `AGENTS.md` / `CONTRIBUTING.md` are preserved.
-- Any change touching these invariants is:
-  - encoded in tests (unit/integration/spec compliance)
-  - reflected in spec if externally visible
-  - implemented in the correct layer (TLS checks in TLS verifier, hello gating in handshake layer, etc.)
-- The daemon remains a lightweight transport + router (no store-and-forward semantics beyond the **local IPC receive buffer**).
+- Invariants from `AGENTS.md`, `CONTRIBUTING.md`, and the `spec/` files are preserved.
+- Any change touching invariants is:
+  - encoded in tests (unit/integration/spec-compliance)
+  - reflected in spec when externally visible
+  - implemented in the correct layer with clear responsibility boundaries
+- The daemon remains a lightweight transport + router unless the spec intentionally expands its role.
 
 **Typical deductions**
-- Invariant changes without explicit spec/tests; shifting responsibilities across layers; adding stateful "features" that contradict the daemon's role.
+- Invariant changes without matching spec/tests; responsibility drift across layers; stateful features that conflict with daemon scope.
 
 ---
 
 ## 5) Efficiency & Context-Budget Awareness (max 12)
-AXON is "context-budget-aware": avoid token waste and unnecessary overhead.
+AXON is context-budget-aware: avoid token waste and unnecessary overhead.
 
 **Check:**
 - Wire messages remain compact JSON (no pretty printing on the wire).
-- Logging/telemetry does not spam (especially under adversarial input); avoids verbose per-message logs by default.
-- IPC and network payload schemas stay structured-first (machine-parseable), avoid natural-language ceremony.
-- Avoids chatty protocols: prefers single rich exchanges over multi-round-trips unless required.
+- Logging/telemetry avoids spam, especially under adversarial input.
+- IPC and network payloads remain structured and machine-parseable per spec.
+- Avoids chatty protocols: prefer single rich exchanges over extra round-trips unless required.
 
 **Typical deductions**
-- New verbose logs; message bloat; "human chat" strings in protocol fields; extra round-trips without need.
+- Verbose logs by default; protocol message bloat; extra round-trips without clear need.
 
 ---
 
 ## 6) Operational Philosophy Fit (max 10)
-AXON is intended to run indefinitely, low resource, predictable behavior.
+AXON is intended to run indefinitely with low resource overhead and predictable behavior.
 
 **Check:**
 - Maintains bounded resource usage and explicit caps (connections, buffers, queue depths).
-- Maintains backward compatibility rules where required (IPC v1 behavior unless hardened mode configured).
+- Maintains compatibility and migration rules defined in current specs and docs.
 - Keeps configuration surface disciplined:
   - if adding/changing a configurable setting, it belongs in `Config` and README config tables are updated (see documentation rubric too).
 
