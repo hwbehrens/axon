@@ -22,7 +22,7 @@ OpenClaw ←→ [Unix Socket] ←→ AXON Daemon ←→ [QUIC/UDP] ←→ AXON D
 
 ### Key Generation
 - On first run, generate an **Ed25519** signing keypair.
-- Store private key at `~/.axon/identity.key` (chmod 600).
+- Store private key seed at `~/.axon/identity.key` as base64 text encoding of 32 bytes (chmod 600).
 - Store public key at `~/.axon/identity.pub` (base64).
 - **Agent ID** = `ed25519.` prefix + first 16 bytes of SHA-256(public key), hex-encoded. 40 chars total (e.g. `ed25519.a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4`). The type prefix enables future algorithm agility.
 
@@ -51,16 +51,17 @@ OpenClaw ←→ [Unix Socket] ←→ AXON Daemon ←→ [QUIC/UDP] ←→ AXON D
 # ~/.axon/config.toml
 [[peers]]
 agent_id = "ed25519.a1b2c3d4..."
-addr = "100.64.0.5:7100"     # Tailscale IP
+addr = "100.64.0.5:7100"                 # IP:port
 pubkey = "base64..."
 
 [[peers]]
 agent_id = "ed25519.e5f6a7b8..."
-addr = "192.168.1.50:7100"   # LAN IP
+addr = "my-laptop.tail1234.ts.net:7100" # hostname:port
 pubkey = "base64..."
 ```
 - Static peers are always in the peer table; mDNS-discovered peers are added/removed dynamically.
 - Static config enables Tailscale/VPN use immediately without any protocol changes.
+- Hostnames are resolved at config-load time (IPv4 preferred). Unresolvable peers are skipped with warning logs.
 
 ### Implementation
 Discovery is implemented as plain async functions (`run_mdns_discovery`, `run_static_discovery`) that push `PeerEvent`s to a channel. Both feed the same peer table.
@@ -174,37 +175,53 @@ Unix socket permissions (`0600`, user-only) as baseline. Peer UID credential che
 ## 6. CLI
 
 ```
-axon daemon [--port 7100] [--disable-mdns] [--axon-root <dir>]
+axon [--state-root <dir>] daemon [--port 7100] [--disable-mdns]
     Start the daemon. Runs in foreground (use systemd/launchd for background).
     --disable-mdns uses static peers only.
-    --axon-root sets the AXON state root (socket/identity/config), enabling multi-agent-per-host layouts.
+    --state-root sets the AXON state root (socket/identity/config), enabling multi-agent-per-host layouts.
+    Aliases: --state, --root. Env fallback: AXON_ROOT. Default: ~/.axon.
 
-axon send <agent_id> <message>
+axon [--state-root <dir>] send <agent_id> <message>
     Send a request to a peer.
 
-axon notify <agent_id> <message>
+axon [--state-root <dir>] notify [--text] <agent_id> <message>
     Send a fire-and-forget message to a peer.
+    If payload looks JSON-like ({, [, "), malformed JSON fails fast.
+    --text forces literal string payload behavior.
 
-axon peers
+axon [--state-root <dir>] peers
     List discovered and connected peers with RTT.
 
-axon status
+axon [--state-root <dir>] status
     Daemon health: uptime, connections, message counts.
 
-axon identity
+axon [--state-root <dir>] identity
     Print this agent's ID and public key.
+    This command is local/offline; it reads/writes identity files in the selected state root.
 
-axon examples
+axon [--state-root <dir>] whoami
+    Query daemon identity and metadata over IPC.
+
+axon [--state-root <dir>] examples
     Print example usage.
+
+axon --version
+axon -V
+    Print CLI version.
 ```
 
-All CLI commands (except `daemon`) connect to the Unix socket, send a command, print the response, and exit.
+CLI execution contracts:
+- `send`/`notify`/`peers`/`status`/`whoami` use IPC and print daemon JSON responses.
+- `identity` is local and does not use IPC.
+- Exit code `0`: success.
+- Exit code `1`: local/runtime failure (parse, I/O, socket connect, decode).
+- Exit code `2`: daemon/application-level failure (`{"ok":false}` reply).
 
 ## 7. File Layout
 
 ```
 ~/.axon/
-├── identity.key        # Ed25519 private key (chmod 600)
+├── identity.key        # Ed25519 private seed (base64 text, chmod 600)
 ├── identity.pub        # Ed25519 public key (base64)
 ├── config.toml         # Optional: port, name, static peers
 ├── known_peers.json    # Cache of last-seen peer addresses (auto-managed)
@@ -218,7 +235,7 @@ port = 7100          # optional, default 7100
 
 [[peers]]
 agent_id = "ed25519.abc..."
-addr = "10.0.0.2:7100"
+addr = "10.0.0.2:7100"           # or "hostname:7100"
 pubkey = "base64..."
 ```
 

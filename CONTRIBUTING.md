@@ -54,7 +54,15 @@ Run all three before submitting. All must pass:
 cd axon
 cargo fmt                           # format
 cargo clippy -- -D warnings         # lint — must be warning-free
-cargo test                          # all tests must pass
+cargo test --test cli_contract      # CLI contract gates
+cargo test                          # full suite
+```
+
+Canonical shortcut:
+
+```sh
+cd axon
+make verify
 ```
 
 ## Constraints
@@ -85,6 +93,14 @@ All source files must stay **under 500 lines**. If a file approaches this limit,
 ## Testing Requirements
 
 Every change must include tests. The test structure:
+
+### Required review gates for user-visible changes
+
+- If you touch CLI parsing/output/routing in `axon/src/main.rs`, add or update at least one black-box CLI contract test in `axon/tests/cli_contract.rs`.
+- If you change persisted files or on-disk formats (`identity.key`, `identity.pub`, `known_peers.json`, `config.toml` semantics), document reset/re-init guidance in the same PR (README/spec/release notes as appropriate).
+- If you change behavior shown in CLI help, examples, or spec text, update all affected artifacts in the same PR (`--help`, `README.md`, `spec/`).
+- If you change CLI command inventory/help semantics, update docs-conformance coverage (`axon/tests/spec_compliance/cli_help.rs`) as needed.
+- For user-visible failure paths, assert both response content and process exit code.
 
 ### Unit tests
 

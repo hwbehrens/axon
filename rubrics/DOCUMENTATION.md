@@ -33,6 +33,7 @@ Do the normative specs remain correct and sufficient to implement AXON in anothe
 - If any externally visible behavior changes (wire format, message kinds, IPC protocol, limits, CLI surface):
   - update the relevant spec files: `spec/SPEC.md`, `spec/WIRE_FORMAT.md`, `spec/MESSAGE_TYPES.md`, `spec/IPC.md`
   - update interoperability checklists and constants tables when impacted
+  - include executable conformance checks when practical (avoid relying only on prose review)
 - Spec language uses RFC2119 keywords appropriately for normative requirements.
 - Spec and implementation agree on critical constants and invariants; consult the authoritative `spec/` files for the current list.
 - Forward-compatibility expectations remain documented where required.
@@ -93,6 +94,7 @@ Can a new LLM agent learn AXON quickly from the repo?
 **Check:**
 - CLI help and subcommand help remain accurate and self-describing (full words, not cryptic abbreviations).
 - Example interactions (e.g., `axon examples`) remain accurate if touched.
+- Examples/help claims are validated against executable behavior (`axon --help`, targeted contract tests), not reviewer assumptions.
 - Error messages intended for agents are instructive and suggest next actions (especially protocol/IPC errors).
 
 **Typical deductions**

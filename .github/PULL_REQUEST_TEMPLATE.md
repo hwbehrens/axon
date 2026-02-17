@@ -33,6 +33,7 @@ Self-assessment against [`RUBRIC.md`](../RUBRIC.md). Check each item you've veri
 - [ ] Tracing events include peer identifiers and message IDs
 - [ ] Config precedence (CLI > config.toml > defaults) preserved if modified
 - [ ] Daemon startup/shutdown lifecycle remains clean
+- [ ] If CLI/path/persisted-format behavior changed, linked `cli_contract` tests and docs/spec/help updates are included
 
 ### Adversarial Robustness
 - [ ] Fuzz target added for any new deserialization entrypoint

@@ -28,7 +28,7 @@ fn axon_bin() -> PathBuf {
 fn spec_cli_commands_are_present_in_help_output() {
     // SPEC.md §6 command inventory (at minimum these commands must exist).
     let expected = [
-        "daemon", "send", "notify", "peers", "status", "identity", "examples",
+        "daemon", "send", "notify", "peers", "status", "identity", "whoami", "examples",
     ];
 
     let output = Command::new(axon_bin())
@@ -44,4 +44,9 @@ fn spec_cli_commands_are_present_in_help_output() {
             "command '{command}' listed in spec should appear in `axon --help`"
         );
     }
+
+    assert!(
+        help.contains("--state-root"),
+        "global state-root flag documented in spec should appear in `axon --help`"
+    );
 }

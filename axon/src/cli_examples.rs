@@ -56,10 +56,11 @@ $ axon send ed25519.f6e5d4c3b2a1f6e5d4c3b2a1f6e5d4c3 "What is the capital of Fra
   }}
   Wire response: {{
     "id": "660e8400-e29b-41d4-a716-446655440001",
-    "kind": "response",
+    "kind": "error",
     "ref": "550e8400-e29b-41d4-a716-446655440000",
-    "payload": {{"answer": "Paris"}}
+    "payload": {{"code":"not_implemented","message":"no application handler installed"}}
   }}
+  (If the remote agent has an app handler, it may return a normal "response" instead.)
 
 ──────────────────────────────────────────────
 Step 3: Send a fire-and-forget message
@@ -79,7 +80,7 @@ All connected clients receive inbound messages as broadcast events.
 
 # 1. Send a request (bidirectional — waits for response)
 → {{"cmd":"send","to":"ed25519.f6e5d4c3...","kind":"request","payload":{{"message":"What is 2+2?"}}}}
-← {{"ok":true,"msg_id":"550e8400-...","response":{{"id":"660e8400-...","kind":"response","ref":"550e8400-...","payload":{{"answer":"4"}}}}}}
+← {{"ok":true,"msg_id":"550e8400-...","response":{{"id":"660e8400-...","kind":"error","ref":"550e8400-...","payload":{{"code":"not_implemented","message":"no application handler installed"}}}}}}
 
 # 2. Send a fire-and-forget message (unidirectional)
 → {{"cmd":"send","to":"ed25519.f6e5d4c3...","kind":"message","payload":{{"data":{{"state":"ready"}}}}}}
@@ -95,7 +96,7 @@ All connected clients receive inbound messages as broadcast events.
 
 # 5. Daemon identity
 → {{"cmd":"whoami"}}
-← {{"ok":true,"agent_id":"ed25519.a1b2...","public_key":"<base64>","name":"my-agent","version":"0.3.0","uptime_secs":3600}}
+← {{"ok":true,"agent_id":"ed25519.a1b2...","public_key":"<base64>","name":"my-agent","version":"<version>","uptime_secs":3600}}
 
 # 6. Inbound message event (broadcast to all connected clients)
 ← {{"event":"inbound","from":"ed25519.f6e5d4c3...","envelope":{{"id":"880e8400-...","kind":"request","payload":{{"question":"Hello?"}}}}}}

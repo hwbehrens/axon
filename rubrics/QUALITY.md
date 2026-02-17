@@ -41,6 +41,9 @@ Does the change do the right thing, including edge cases, without breaking requi
   - Message kinds and stream mapping match `spec/MESSAGE_TYPES.md`.
 - **IPC behavior remains correct**
   - Command semantics and transport guarantees match `spec/IPC.md`.
+- **CLI behavior contracts remain correct (when CLI is touched)**
+  - Root/path selection precedence and command coherence are preserved (`--state-root`/aliases, `AXON_ROOT`, default root).
+  - Exit-code semantics remain script-safe (`0` success, `1` local/runtime failure, `2` daemon/application failure reply).
 - **Forward compatibility behavior preserved**
   - Unknown JSON fields are ignored where required by the spec.
 
@@ -80,6 +83,8 @@ Do tests *meaningfully verify behavior* and protect against regression?
 - **Every behavior change has tests**
   - Unit tests cover new/changed functions and error paths.
   - Integration tests cover cross-module flows (IPC ↔ daemon ↔ transport, discovery ↔ pinning ↔ connect, reconnect loops).
+- **CLI-surface changes include black-box CLI tests**
+  - `axon/tests/cli_contract.rs` includes coverage for changed flags, parsing, output, and exit semantics.
 - **Invariant-driven assertions**
   - Tests explicitly assert invariants defined in `AGENTS.md`, `CONTRIBUTING.md`, and the spec files.
 - **Spec compliance tests updated when relevant**
