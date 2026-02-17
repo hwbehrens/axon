@@ -59,8 +59,10 @@ List connected peers.
 
 **Response:**
 ```json
-{"ok": true, "peers": [{"id": "<agent_id>", "addr": "ip:port", "status": "connected", "rtt_ms": 1.23, "source": "static"}]}
+{"ok": true, "peers": [{"agent_id": "<agent_id>", "addr": "ip:port", "status": "connected", "rtt_ms": 1.23, "source": "static"}]}
 ```
+
+`agent_id` is the canonical peer identity field name in `peers` responses.
 
 ### 3.3 `status`
 
@@ -108,7 +110,9 @@ If `req_id` was present on the command, it is echoed in the error response.
 | Code | Condition |
 |------|-----------|
 | `invalid_command` | Malformed JSON, unknown `cmd`, or missing/invalid field. |
+| `command_too_large` | IPC commands over 64 KB are rejected. |
 | `peer_not_found` | Target `agent_id` not in peer table. |
+| `self_send` | Sending to your own `agent_id` is rejected. |
 | `peer_unreachable` | Peer known but QUIC connection failed or timed out. |
 | `internal_error` | Unexpected daemon error. |
 
