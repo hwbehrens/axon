@@ -19,6 +19,7 @@ pub(crate) struct Counters {
 #[derive(Debug)]
 pub(crate) enum DaemonIpcError {
     PeerNotFound,
+    SelfSend,
     PeerUnreachable,
     InvalidCommand(String),
 }
@@ -27,6 +28,7 @@ impl std::fmt::Display for DaemonIpcError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             DaemonIpcError::PeerNotFound => write!(f, "peer_not_found"),
+            DaemonIpcError::SelfSend => write!(f, "self_send"),
             DaemonIpcError::PeerUnreachable => write!(f, "peer_unreachable"),
             DaemonIpcError::InvalidCommand(msg) => write!(f, "invalid_command: {msg}"),
         }
@@ -95,6 +97,7 @@ pub(crate) async fn handle_command(cmd: CommandEvent, ctx: &DaemonContext<'_>) -
                 let error_code = if let Some(e) = e.downcast_ref::<DaemonIpcError>() {
                     match e {
                         DaemonIpcError::PeerNotFound => IpcErrorCode::PeerNotFound,
+                        DaemonIpcError::SelfSend => IpcErrorCode::SelfSend,
                         DaemonIpcError::PeerUnreachable => IpcErrorCode::PeerUnreachable,
                         DaemonIpcError::InvalidCommand(_) => IpcErrorCode::InvalidCommand,
                     }
@@ -116,7 +119,7 @@ pub(crate) async fn handle_command(cmd: CommandEvent, ctx: &DaemonContext<'_>) -
                 .await
                 .into_iter()
                 .map(|p| PeerSummary {
-                    id: p.agent_id.to_string(),
+                    agent_id: p.agent_id.to_string(),
                     addr: p.addr.to_string(),
                     status: status_str(&p.status).to_string(),
                     rtt_ms: p.rtt_ms,
@@ -172,6 +175,10 @@ async fn handle_send(
     payload: serde_json::Value,
     ref_id: Option<uuid::Uuid>,
 ) -> Result<(uuid::Uuid, Option<crate::message::Envelope>)> {
+    if to == ctx.local_agent_id.as_str() {
+        anyhow::bail!(DaemonIpcError::SelfSend);
+    }
+
     let peer = ctx
         .peer_table
         .get(&to)

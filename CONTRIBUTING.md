@@ -34,6 +34,7 @@ Know where to make changes before you start editing:
 | Discovery event handling | `axon/src/daemon/peer_events.rs` |
 | Reconnection logic | `axon/src/daemon/reconnect.rs` |
 | CLI commands | `axon/src/main.rs` |
+| Doctor diagnostics | `axon/src/main.rs`, `axon/src/doctor.rs`, `axon/src/doctor/checks.rs`, `axon/src/doctor/identity_check.rs` |
 | CLI example output | `axon/src/cli_examples.rs` |
 | Ed25519 identity / agent ID | `axon/src/identity.rs` |
 | Config file parsing | `axon/src/config.rs` |
@@ -100,6 +101,7 @@ Every change must include tests. The test structure:
 - If you change persisted files or on-disk formats (`identity.key`, `identity.pub`, `known_peers.json`, `config.toml` semantics), document reset/re-init guidance in the same PR (README/spec/release notes as appropriate).
 - If you change behavior shown in CLI help, examples, or spec text, update all affected artifacts in the same PR (`--help`, `README.md`, `spec/`).
 - If you change CLI command inventory/help semantics, update docs-conformance coverage (`axon/tests/spec_compliance/cli_help.rs`) as needed.
+- If you change `doctor` behavior (CLI wiring or reported checks), update `axon/tests/doctor_contract.rs` to preserve black-box contract coverage.
 - For user-visible failure paths, assert both response content and process exit code.
 
 ### Unit tests

@@ -10,6 +10,18 @@ Agent IDs used:
   Alice: ed25519.a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4
   Bob:   ed25519.f6e5d4c3b2a1f6e5d4c3b2a1f6e5d4c3
 
+Configuration — Static peers (config.toml)
+──────────────────────────────────────────────
+# ~/.axon/config.toml (Alice's machine)
+name = "alice"
+
+[[peers]]
+agent_id = "ed25519.f6e5d4c3b2a1f6e5d4c3b2a1f6e5d4c3"
+addr = "192.168.1.42:7100"
+pubkey = "<Bob's public_key from `axon identity`>"
+
+Tip: run `axon identity --peer-config` to print a ready-to-share snippet.
+
 Network Protocol (QUIC)
 ──────────────────────────────────────────────
 The following steps show the network-level QUIC protocol interaction.
@@ -34,7 +46,7 @@ $ axon peers
     "ok": true,
     "peers": [
       {{
-        "id": "ed25519.f6e5d4c3b2a1f6e5d4c3b2a1f6e5d4c3",
+        "agent_id": "ed25519.f6e5d4c3b2a1f6e5d4c3b2a1f6e5d4c3",
         "addr": "192.168.1.42:7100",
         "status": "connected",
         "rtt_ms": 1.23,
@@ -88,7 +100,7 @@ All connected clients receive inbound messages as broadcast events.
 
 # 3. List peers
 → {{"cmd":"peers"}}
-← {{"ok":true,"peers":[{{"id":"ed25519.f6e5d4c3...","addr":"192.168.1.42:7100","status":"connected","rtt_ms":1.23,"source":"static"}}]}}
+← {{"ok":true,"peers":[{{"agent_id":"ed25519.f6e5d4c3...","addr":"192.168.1.42:7100","status":"connected","rtt_ms":1.23,"source":"static"}}]}}
 
 # 4. Daemon status
 → {{"cmd":"status"}}

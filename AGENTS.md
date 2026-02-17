@@ -26,7 +26,7 @@ axon/                      Rust implementation (Cargo crate)
   Cargo.toml               Dependencies and package metadata (Rust 2024 edition)
   Makefile                 Canonical build/test/verify entrypoints
   src/                     Implementation
-    main.rs                CLI entrypoint (subcommands: daemon, send, notify, peers, status, identity, whoami, examples)
+    main.rs                CLI entrypoint (subcommands: daemon, send, notify, peers, status, identity, whoami, doctor, examples)
     lib.rs                 Crate root
     daemon/                Daemon orchestration, lifecycle, reconnect
     discovery.rs           mDNS + static peer discovery (plain async functions)
@@ -52,6 +52,7 @@ Client (OpenClaw/CLI) ←→ [Unix Socket IPC] ←→ AXON Daemon ←→ [QUIC/U
 - **Discovery**: mDNS (`_axon._udp.local.`) broadcasts agent ID and public key. Static peers via config file for Tailscale/VPN. Plain async functions.
 - **Transport**: QUIC via `quinn`. TLS 1.3 with forward secrecy. Unidirectional streams for fire-and-forget messages, bidirectional streams for request/response.
 - **IPC**: Unix domain socket at `~/.axon/axon.sock`. Line-delimited JSON. 4 commands: `send`, `peers`, `status`, `whoami`. Inbound messages are broadcast to connected clients; lagging clients are disconnected when bounded IPC queues overflow.
+- **Doctor CLI**: `axon doctor` runs local diagnostics and optional repairs for state-root health, identity material, and config hygiene.
 - **Messages**: JSON envelopes with UUID, kind, payload, and optional ref. 4 kinds: `request`, `response`, `message`, `error`.
 
 ## Module Map (summary)
@@ -67,6 +68,7 @@ Use this to navigate quickly; for the full "change → file(s)" table, see `CONT
 - **Config parsing**: `axon/src/config.rs`
 - **Peer table + pinning**: `axon/src/peer_table.rs`
 - **CLI**: `axon/src/main.rs`
+- **Doctor diagnostics**: `axon/src/doctor.rs`, `axon/src/doctor/checks.rs`, `axon/src/doctor/identity_check.rs`
 
 ## Key Invariants (summary)
 

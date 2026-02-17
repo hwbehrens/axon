@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::thread::JoinHandle;
 
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde_json::{Value, json};
 use tempfile::tempdir;
 
@@ -143,6 +144,17 @@ fn version_flags_print_version_and_exit_zero() {
     let short = run_command(Command::new(&bin).arg("-V"));
     assert!(short.status.success());
     assert!(String::from_utf8_lossy(&short.stdout).contains(expected));
+}
+
+#[test]
+fn verbose_flag_is_listed_in_help() {
+    let bin = axon_bin();
+    let output = run_command(Command::new(&bin).arg("--help"));
+    assert!(output.status.success());
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("--verbose"));
+    assert!(stdout.contains("-v"));
 }
 
 #[test]
@@ -287,6 +299,42 @@ fn send_peer_not_found_returns_exit_code_two() {
 }
 
 #[test]
+fn daemon_error_line_is_reported_instead_of_generic_eof_error() {
+    let bin = axon_bin();
+    let root = tempdir().expect("tempdir");
+    let Some(server) = require_socket_server(
+        root.path(),
+        json!({
+            "ok": false,
+            "error": "command_too_large",
+            "message": "IPC command exceeds 64KB limit"
+        }),
+    ) else {
+        return;
+    };
+
+    let output = run_command(Command::new(&bin).args([
+        "--state-root",
+        root.path().to_str().expect("utf8 path"),
+        "status",
+    ]));
+    assert_eq!(output.status.code(), Some(2));
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("\"error\": \"command_too_large\""));
+    assert!(stdout.contains("IPC command exceeds 64KB limit"));
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("daemon closed connection without a command response"),
+        "CLI should surface daemon error response before EOF"
+    );
+
+    let command = server.join().expect("server thread");
+    assert_eq!(command["cmd"], "status");
+}
+
+#[test]
 fn whoami_uses_ipc_while_identity_is_local() {
     let bin = axon_bin();
     let root = tempdir().expect("tempdir");
@@ -326,7 +374,33 @@ fn whoami_uses_ipc_while_identity_is_local() {
 }
 
 #[test]
-fn non_canonical_identity_key_format_is_rejected_with_remediation() {
+fn identity_peer_config_flag_prints_static_peer_snippet() {
+    let bin = axon_bin();
+    let root = tempdir().expect("tempdir");
+
+    let output = run_command(Command::new(&bin).args([
+        "--state-root",
+        root.path().to_str().expect("utf8 path"),
+        "identity",
+        "--peer-config",
+    ]));
+    assert!(output.status.success());
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("[[peers]]"));
+    assert!(stdout.contains("agent_id = \"ed25519."));
+    assert!(stdout.contains("pubkey = \""));
+    assert!(stdout.contains("addr = \"<this-machine>:7100\""));
+
+    // Ensure the flag prints TOML snippet rather than JSON.
+    assert!(
+        !stdout.contains("\"public_key\""),
+        "peer-config output should be TOML snippet, not identity JSON"
+    );
+}
+
+#[test]
+fn legacy_raw_identity_key_is_auto_migrated() {
     let bin = axon_bin();
     let root = tempdir().expect("tempdir");
     fs::create_dir_all(root.path()).expect("create root");
@@ -337,8 +411,20 @@ fn non_canonical_identity_key_format_is_rejected_with_remediation() {
         root.path().to_str().expect("utf8 path"),
         "identity",
     ]));
-    assert_eq!(output.status.code(), Some(1));
+    assert!(output.status.success());
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("\"agent_id\": \"ed25519."));
+    assert!(stdout.contains("\"public_key\": \""));
+
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("expected base64 text"));
-    assert!(stderr.contains("re-initialize identity"));
+    assert!(stderr.contains(
+        "Notice: migrated identity.key from legacy raw format to base64. Agent ID unchanged."
+    ));
+
+    let migrated = fs::read_to_string(root.path().join("identity.key")).expect("read migrated key");
+    let decoded = STANDARD
+        .decode(migrated.trim())
+        .expect("migrated identity.key should be base64");
+    assert_eq!(decoded.len(), 32);
 }

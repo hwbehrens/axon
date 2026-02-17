@@ -1,5 +1,6 @@
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
+use std::path::Path;
 
 use anyhow::{Context, Result, anyhow};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -29,49 +30,23 @@ impl Identity {
         let signing_key = if paths.identity_key.exists() {
             let raw = fs::read(&paths.identity_key)
                 .with_context(|| format!("failed to read {}", paths.identity_key.display()))?;
-            let text = std::str::from_utf8(&raw).map_err(|_| {
-                anyhow!(
-                    "invalid identity.key format at {}: expected base64 text containing a 32-byte seed; \
-                     non-text or legacy raw keys are unsupported in v0.4.0 pre-launch. \
-                     Remove identity.key and identity.pub from this root to re-initialize identity.",
-                    paths.identity_key.display()
-                )
-            })?;
-            let bytes = STANDARD.decode(text.trim()).map_err(|err| {
-                anyhow!(
-                    "invalid identity.key contents at {}: expected base64 text containing a 32-byte seed ({err}). \
-                     Remove identity.key and identity.pub from this root to re-initialize identity.",
-                    paths.identity_key.display()
-                )
-            })?;
-            let seed: [u8; 32] = bytes.try_into().map_err(|v: Vec<u8>| {
-                anyhow!(
-                    "invalid identity.key length at {}: expected 32 decoded bytes, got {}. \
-                     Remove identity.key and identity.pub from this root to re-initialize identity.",
-                    paths.identity_key.display(),
-                    v.len()
-                )
-            })?;
+            let seed = match std::str::from_utf8(&raw) {
+                Ok(text) => match decode_seed_from_base64_text(text, &paths.identity_key) {
+                    Ok(seed) => seed,
+                    Err(err) if is_legacy_raw_seed_candidate(&raw, text) => {
+                        migrate_legacy_raw_seed(&raw, &paths.identity_key)?
+                    }
+                    Err(err) => return Err(err),
+                },
+                Err(_) => migrate_legacy_raw_seed(&raw, &paths.identity_key)?,
+            };
             SigningKey::from_bytes(&seed)
         } else {
             let mut seed = [0u8; 32];
             getrandom::getrandom(&mut seed)
                 .map_err(|err| anyhow!("failed to gather randomness: {err}"))?;
             let key = SigningKey::from_bytes(&seed);
-            let key_b64 = STANDARD.encode(seed);
-            fs::write(&paths.identity_key, &key_b64).with_context(|| {
-                format!(
-                    "failed to write private key: {}",
-                    paths.identity_key.display()
-                )
-            })?;
-            fs::set_permissions(&paths.identity_key, fs::Permissions::from_mode(0o600))
-                .with_context(|| {
-                    format!(
-                        "failed to set key permissions: {}",
-                        paths.identity_key.display()
-                    )
-                })?;
+            write_seed_as_base64(&paths.identity_key, &seed)?;
             key
         };
 
@@ -131,6 +106,60 @@ impl Identity {
 
         Ok(QuicCertificate { cert_der, key_der })
     }
+}
+
+fn decode_seed_from_base64_text(text: &str, path: &Path) -> Result<[u8; 32]> {
+    let bytes = STANDARD.decode(text.trim()).map_err(|err| {
+        anyhow!(
+            "invalid identity.key contents at {}: expected base64 text containing a 32-byte seed ({err}). \
+             Remove identity.key and identity.pub from this root to re-initialize identity.",
+            path.display()
+        )
+    })?;
+    let seed: [u8; 32] = bytes.try_into().map_err(|v: Vec<u8>| {
+        anyhow!(
+            "invalid identity.key length at {}: expected 32 decoded bytes, got {}. \
+             Remove identity.key and identity.pub from this root to re-initialize identity.",
+            path.display(),
+            v.len()
+        )
+    })?;
+    Ok(seed)
+}
+
+fn migrate_legacy_raw_seed(raw: &[u8], path: &Path) -> Result<[u8; 32]> {
+    if raw.len() != 32 {
+        anyhow::bail!(
+            "invalid identity.key format at {}: expected base64 text containing a 32-byte seed; \
+             found non-UTF-8 key data with {} bytes. \
+             Remove identity.key and identity.pub from this root to re-initialize identity.",
+            path.display(),
+            raw.len()
+        );
+    }
+    let mut seed = [0u8; 32];
+    seed.copy_from_slice(raw);
+    write_seed_as_base64(path, &seed)?;
+    eprintln!(
+        "Notice: migrated identity.key from legacy raw format to base64. Agent ID unchanged."
+    );
+    Ok(seed)
+}
+
+fn is_legacy_raw_seed_candidate(raw: &[u8], text: &str) -> bool {
+    raw.len() == 32
+        && text
+            .chars()
+            .any(|c| !(c.is_ascii_graphic() || c.is_ascii_whitespace()))
+}
+
+fn write_seed_as_base64(path: &Path, seed: &[u8; 32]) -> Result<()> {
+    let key_b64 = STANDARD.encode(seed);
+    fs::write(path, &key_b64)
+        .with_context(|| format!("failed to write private key: {}", path.display()))?;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+        .with_context(|| format!("failed to set key permissions: {}", path.display()))?;
+    Ok(())
 }
 
 /// PKCS#8 v2 (RFC 8410) wrapping of Ed25519 seed + public key.
@@ -253,17 +282,26 @@ mod tests {
     }
 
     #[test]
-    fn non_text_key_format_is_rejected_with_remediation() {
+    fn legacy_raw_key_is_migrated_to_base64() {
         let dir = tempdir().expect("tempdir");
         let paths = AxonPaths::from_root(PathBuf::from(dir.path()));
         paths.ensure_root_exists().expect("ensure root");
 
-        fs::write(&paths.identity_key, [7u8; 32]).expect("write raw key");
+        let raw_seed = [7u8; 32];
+        fs::write(&paths.identity_key, raw_seed).expect("write raw key");
 
-        let result = Identity::load_or_generate(&paths);
-        assert!(result.is_err());
-        let msg = result.unwrap_err().to_string();
-        assert!(msg.contains("expected base64 text"));
-        assert!(msg.contains("re-initialize identity"));
+        let identity = Identity::load_or_generate(&paths).expect("migrate raw key");
+
+        let migrated_text = fs::read_to_string(&paths.identity_key).expect("read migrated key");
+        let decoded = STANDARD
+            .decode(migrated_text.trim())
+            .expect("migrated key should be base64");
+        assert_eq!(decoded, raw_seed);
+
+        let expected = SigningKey::from_bytes(&raw_seed);
+        assert_eq!(
+            identity.agent_id(),
+            derive_agent_id(&expected.verifying_key())
+        );
     }
 }

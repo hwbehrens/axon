@@ -136,6 +136,26 @@ fn ipc_send_command_shape() {
     }
 }
 
+/// `spec/IPC.md` peers response uses canonical `agent_id` (not legacy `id`).
+#[test]
+fn ipc_peers_response_uses_agent_id_field() {
+    let reply = axon::ipc::DaemonReply::Peers {
+        ok: true,
+        peers: vec![axon::ipc::PeerSummary {
+            agent_id: "ed25519.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+            addr: "127.0.0.1:7100".to_string(),
+            status: "connected".to_string(),
+            rtt_ms: Some(1.23),
+            source: "static".to_string(),
+        }],
+        req_id: None,
+    };
+
+    let j: Value = serde_json::to_value(&reply).unwrap();
+    assert!(j["peers"][0].get("agent_id").is_some());
+    assert!(j["peers"][0].get("id").is_none());
+}
+
 /// `spec/IPC.md` error response has ok=false and an error code string.
 #[test]
 fn ipc_error_response_shape() {
@@ -148,6 +168,32 @@ fn ipc_error_response_shape() {
     let j: Value = serde_json::to_value(&reply).unwrap();
     assert_eq!(j["ok"], false);
     assert_eq!(j["error"], "peer_not_found");
+}
+
+/// `spec/IPC.md` error code table includes all daemon-emitted IPC error codes.
+#[test]
+fn ipc_error_codes_match_spec_table() {
+    let expected = vec![
+        "invalid_command".to_string(),
+        "command_too_large".to_string(),
+        "peer_not_found".to_string(),
+        "self_send".to_string(),
+        "peer_unreachable".to_string(),
+        "internal_error".to_string(),
+    ];
+    let actual: Vec<String> = vec![
+        axon::ipc::IpcErrorCode::InvalidCommand,
+        axon::ipc::IpcErrorCode::CommandTooLarge,
+        axon::ipc::IpcErrorCode::PeerNotFound,
+        axon::ipc::IpcErrorCode::SelfSend,
+        axon::ipc::IpcErrorCode::PeerUnreachable,
+        axon::ipc::IpcErrorCode::InternalError,
+    ]
+    .into_iter()
+    .map(|code| code.to_string())
+    .collect();
+
+    assert_eq!(actual, expected);
 }
 
 /// `spec/IPC.md` inbound events include `event`, `from`, and `envelope`.
