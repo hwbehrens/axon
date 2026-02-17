@@ -27,13 +27,30 @@ impl Identity {
         paths.ensure_root_exists()?;
 
         let signing_key = if paths.identity_key.exists() {
-            let raw = fs::read_to_string(&paths.identity_key)
+            let raw = fs::read(&paths.identity_key)
                 .with_context(|| format!("failed to read {}", paths.identity_key.display()))?;
-            let bytes = STANDARD
-                .decode(raw.trim())
-                .context("failed to decode identity.key")?;
+            let text = std::str::from_utf8(&raw).map_err(|_| {
+                anyhow!(
+                    "invalid identity.key format at {}: expected base64 text containing a 32-byte seed; \
+                     non-text or legacy raw keys are unsupported in v0.4.0 pre-launch. \
+                     Remove identity.key and identity.pub from this root to re-initialize identity.",
+                    paths.identity_key.display()
+                )
+            })?;
+            let bytes = STANDARD.decode(text.trim()).map_err(|err| {
+                anyhow!(
+                    "invalid identity.key contents at {}: expected base64 text containing a 32-byte seed ({err}). \
+                     Remove identity.key and identity.pub from this root to re-initialize identity.",
+                    paths.identity_key.display()
+                )
+            })?;
             let seed: [u8; 32] = bytes.try_into().map_err(|v: Vec<u8>| {
-                anyhow!("identity.key must contain 32 bytes, got {}", v.len())
+                anyhow!(
+                    "invalid identity.key length at {}: expected 32 decoded bytes, got {}. \
+                     Remove identity.key and identity.pub from this root to re-initialize identity.",
+                    paths.identity_key.display(),
+                    v.len()
+                )
             })?;
             SigningKey::from_bytes(&seed)
         } else {
@@ -232,6 +249,21 @@ mod tests {
         let result = Identity::load_or_generate(&paths);
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
-        assert!(msg.contains("32 bytes"));
+        assert!(msg.contains("expected 32 decoded bytes"));
+    }
+
+    #[test]
+    fn non_text_key_format_is_rejected_with_remediation() {
+        let dir = tempdir().expect("tempdir");
+        let paths = AxonPaths::from_root(PathBuf::from(dir.path()));
+        paths.ensure_root_exists().expect("ensure root");
+
+        fs::write(&paths.identity_key, [7u8; 32]).expect("write raw key");
+
+        let result = Identity::load_or_generate(&paths);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("expected base64 text"));
+        assert!(msg.contains("re-initialize identity"));
     }
 }
