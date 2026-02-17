@@ -101,7 +101,7 @@ fn bench_daemon_reply_serialize(c: &mut Criterion) {
     let peers = DaemonReply::Peers {
         ok: true,
         peers: vec![PeerSummary {
-            id: format!("ed25519.{}", "a".repeat(32)),
+            agent_id: format!("ed25519.{}", "a".repeat(32)),
             addr: "127.0.0.1:7100".to_string(),
             status: "connected".to_string(),
             rtt_ms: Some(1.2),
