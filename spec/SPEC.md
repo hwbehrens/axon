@@ -41,7 +41,7 @@ OpenClaw ←→ [Unix Socket] ←→ AXON Daemon ←→ [QUIC/UDP] ←→ AXON D
 
 ### Primary: mDNS/DNS-SD (LAN, zero-config)
 - Service type: `_axon._udp.local.`
-- TXT records: `agent_id=<hex>`, `pubkey=<base64 Ed25519 public key>`
+- TXT records: `agent_id=ed25519.<32 hex chars>`, `pubkey=<base64 Ed25519 public key>`
 - Browse continuously for peers; maintain a peer table.
 - Stale peer removal: 60s without mDNS refresh.
 - Re-advertise on startup and periodically.
@@ -101,7 +101,7 @@ Authentication is solely via mTLS. The `PeerTable` owns a shared `PubkeyMap` tha
 | `request` | Bidirectional | Send a request, expect a response |
 | `response` | Bidirectional | Reply to a request |
 | `message` | Unidirectional | Fire-and-forget |
-| `error` | Bidirectional | Error reply to a request |
+| `error` | Bidirectional (reply) or Unidirectional (unsolicited) | Error reply to a request, or unsolicited error |
 
 - Stream contains: JSON bytes, delimited by QUIC stream FIN (no length prefix).
 - Max message size: 64KB.
@@ -139,7 +139,7 @@ Note: `from` and `to` are **not** on the wire. The daemon populates these fields
 - **`request`** — Ask another agent something. Expects a `response` or `error` reply on the same bidirectional stream.
 - **`response`** — Reply to a `request`.
 - **`message`** — Fire-and-forget notification. Sent on a unidirectional stream.
-- **`error`** — Error reply to a `request`. Sent on the same bidirectional stream.
+- **`error`** — Error reply to a `request` on a bidirectional stream, or unsolicited error on a unidirectional stream.
 
 ## 5. Local IPC: Unix Domain Socket
 
@@ -158,7 +158,7 @@ Line-delimited JSON over Unix socket. Each line is one complete JSON object. Sin
 {"cmd": "whoami"}
 ```
 
-- **`send`** — Send a message to a remote peer. Requires `to`, `kind`, and `payload`.
+- **`send`** — Send a message to a remote peer. Requires `to`, `kind` (`request` or `message`), and `payload`.
 - **`peers`** — List discovered and connected peers.
 - **`status`** — Daemon health: uptime, connections, message counts.
 - **`whoami`** — Daemon identity (agent_id, public key, version).

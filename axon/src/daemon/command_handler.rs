@@ -3,7 +3,9 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 
-use crate::ipc::{CommandEvent, DaemonReply, IpcCommand, IpcErrorCode, IpcServer, PeerSummary};
+use crate::ipc::{
+    CommandEvent, DaemonReply, IpcCommand, IpcErrorCode, IpcSendKind, IpcServer, PeerSummary,
+};
 use crate::message::{AgentId, Envelope};
 use crate::peer_table::{ConnectionStatus, PeerSource, PeerTable};
 use crate::transport::QuicTransport;
@@ -166,7 +168,7 @@ pub(crate) async fn handle_command(cmd: CommandEvent, ctx: &DaemonContext<'_>) -
 async fn handle_send(
     ctx: &DaemonContext<'_>,
     to: String,
-    kind: crate::message::MessageKind,
+    kind: IpcSendKind,
     payload: serde_json::Value,
     ref_id: Option<uuid::Uuid>,
 ) -> Result<(uuid::Uuid, Option<crate::message::Envelope>)> {
@@ -176,7 +178,12 @@ async fn handle_send(
         .await
         .ok_or_else(|| anyhow::anyhow!(DaemonIpcError::PeerNotFound))?;
 
-    let mut envelope = Envelope::new((*ctx.local_agent_id).clone(), to.clone(), kind, payload);
+    let mut envelope = Envelope::new(
+        (*ctx.local_agent_id).clone(),
+        to.clone(),
+        kind.as_message_kind(),
+        payload,
+    );
     envelope.ref_id = ref_id;
     envelope
         .validate()

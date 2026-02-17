@@ -11,7 +11,7 @@ AXON defines four message kinds plus a forward-compatibility sentinel:
 | `request` | Bidirectional | ← `response` or `error` | Ask a peer to do something; caller blocks waiting |
 | `response` | Bidirectional (reply) | — | Reply to a `request` |
 | `message` | Unidirectional | No | Fire-and-forget notification |
-| `error` | Bidirectional (reply) or Unidirectional | No | Failure reply to a `request`, or unsolicited error |
+| `error` | Bidirectional (reply) or Unidirectional (unsolicited) | No | Failure reply to a `request`, or unsolicited error |
 
 ### Forward Compatibility: `unknown`
 

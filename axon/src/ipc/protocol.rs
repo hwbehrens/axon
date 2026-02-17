@@ -10,12 +10,28 @@ use crate::message::{Envelope, MessageKind};
 
 /// Client-to-daemon IPC command, deserialized from line-delimited JSON.
 /// Tagged by the `cmd` field (e.g., `{"cmd": "send", ...}`).
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum IpcSendKind {
+    Request,
+    Message,
+}
+
+impl IpcSendKind {
+    pub fn as_message_kind(self) -> MessageKind {
+        match self {
+            IpcSendKind::Request => MessageKind::Request,
+            IpcSendKind::Message => MessageKind::Message,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "cmd", rename_all = "lowercase")]
 pub enum IpcCommand {
     Send {
         to: String,
-        kind: MessageKind,
+        kind: IpcSendKind,
         payload: Value,
         #[serde(default, rename = "ref")]
         ref_id: Option<Uuid>,

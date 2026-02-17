@@ -67,7 +67,7 @@ fn wire_format_boundary_conditions() {
         );
         match encode(&env) {
             Ok(encoded) => {
-                let body_len = encoded.len() - 4;
+                let body_len = encoded.len();
                 if body_len <= MAX_MESSAGE_SIZE as usize {
                     low = mid;
                 } else {

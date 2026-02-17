@@ -165,7 +165,7 @@ fn ipc_send_with_ref_deserializes() {
             to, kind, ref_id, ..
         } => {
             assert_eq!(to, "ed25519.deadbeef01234567deadbeef01234567");
-            assert_eq!(kind, MessageKind::Request);
+            assert_eq!(kind, axon::ipc::IpcSendKind::Request);
             assert!(ref_id.is_some());
         }
         _ => panic!("expected Send"),
@@ -182,6 +182,47 @@ fn ipc_send_without_ref_defaults_to_none() {
             assert!(ref_id.is_none());
         }
         _ => panic!("expected Send"),
+    }
+}
+
+/// IPC send kind is restricted to request|message.
+#[test]
+fn ipc_send_rejects_non_sendable_kinds() {
+    for kind in ["response", "error", "totally_unknown_kind"] {
+        let input = format!(
+            r#"{{"cmd":"send","to":"ed25519.deadbeef01234567deadbeef01234567","kind":"{kind}","payload":{{}}}}"#
+        );
+        let parsed = serde_json::from_str::<IpcCommand>(&input);
+        assert!(
+            parsed.is_err(),
+            "kind={kind} should be rejected at IPC parse boundary"
+        );
+    }
+}
+
+/// Invalid send.kind values return invalid_command.
+#[tokio::test]
+async fn ipc_send_invalid_kind_returns_invalid_command() {
+    let dir = tempdir().unwrap();
+    let socket_path = dir.path().join("axon.sock");
+    let (_server, _cmd_rx) = IpcServer::bind(socket_path.clone(), 64, IpcServerConfig::default())
+        .await
+        .unwrap();
+
+    for kind in ["response", "error", "totally_unknown_kind"] {
+        let mut client = UnixStream::connect(&socket_path).await.unwrap();
+        let cmd = format!(
+            r#"{{"cmd":"send","to":"ed25519.deadbeef01234567deadbeef01234567","kind":"{kind}","payload":{{}}}}"#
+        ) + "\n";
+        client.write_all(cmd.as_bytes()).await.unwrap();
+        let mut line = String::new();
+        let mut reader = BufReader::new(client);
+        reader.read_line(&mut line).await.unwrap();
+        assert!(line.contains("\"ok\":false"));
+        assert!(
+            line.contains("invalid_command"),
+            "expected invalid_command for kind={kind}, got {line}"
+        );
     }
 }
 

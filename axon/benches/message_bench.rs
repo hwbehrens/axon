@@ -99,7 +99,7 @@ fn bench_encode_decode_roundtrip(c: &mut Criterion) {
     group.bench_function("small_envelope", |b| {
         b.iter(|| {
             let encoded = encode(black_box(&small)).unwrap();
-            let _decoded = decode(&encoded[4..]).unwrap();
+            let _decoded = decode(&encoded).unwrap();
         })
     });
 
@@ -107,7 +107,7 @@ fn bench_encode_decode_roundtrip(c: &mut Criterion) {
     group.bench_function("medium_envelope", |b| {
         b.iter(|| {
             let encoded = encode(black_box(&medium)).unwrap();
-            let _decoded = decode(&encoded[4..]).unwrap();
+            let _decoded = decode(&encoded).unwrap();
         })
     });
 
@@ -115,7 +115,7 @@ fn bench_encode_decode_roundtrip(c: &mut Criterion) {
     group.bench_function("large_envelope", |b| {
         b.iter(|| {
             let encoded = encode(black_box(&large)).unwrap();
-            let _decoded = decode(&encoded[4..]).unwrap();
+            let _decoded = decode(&encoded).unwrap();
         })
     });
 

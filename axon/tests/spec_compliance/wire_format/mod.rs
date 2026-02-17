@@ -130,7 +130,7 @@ fn ipc_send_command_shape() {
     match cmd {
         axon::ipc::IpcCommand::Send { to, kind, .. } => {
             assert_eq!(to, "ed25519.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
-            assert_eq!(kind, MessageKind::Request);
+            assert_eq!(kind, axon::ipc::IpcSendKind::Request);
         }
         _ => panic!("expected Send"),
     }

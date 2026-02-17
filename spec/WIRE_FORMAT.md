@@ -343,10 +343,11 @@ Default socket path: `~/.axon/axon.sock`
 
 #### Send
 ```json
-{"cmd":"send","to":"<agent_id>","kind":"<message_kind>","payload":{...},"ref":"<uuid>"}
+{"cmd":"send","to":"<agent_id>","kind":"request|message","payload":{...},"ref":"<uuid>"}
 ```
 - `ref` is optional.
-- For bidirectional kinds (`request`), the daemon waits for the remote response and returns it inline in the `SendOk` reply.
+- `kind` is restricted to `request` or `message`. Other values MUST return `invalid_command`.
+- For `request`, the daemon waits for the remote response and returns it inline in the `SendOk` reply.
 
 #### Peers
 ```json

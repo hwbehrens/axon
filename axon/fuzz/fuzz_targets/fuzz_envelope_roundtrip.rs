@@ -18,8 +18,7 @@ fuzz_target!(|data: &[u8]| {
         return;
     };
 
-    // encode() prepends a 4-byte length prefix; decode() expects raw JSON.
-    let Ok(roundtripped) = decode(&wire[4..]) else {
+    let Ok(roundtripped) = decode(&wire) else {
         return;
     };
 
