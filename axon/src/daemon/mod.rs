@@ -98,12 +98,9 @@ pub async fn run_daemon(opts: DaemonOptions) -> Result<()> {
         config.effective_idle_timeout(),
         None,
         config.effective_inbound_read_timeout(),
+        peer_table.pubkey_map(),
     )
     .await?;
-    // Eagerly populate expected_pubkeys from peer table so inbound connections are pinned
-    for peer in peer_table.list().await {
-        transport.set_expected_peer(peer.agent_id.to_string(), peer.pubkey.clone());
-    }
 
     // --- IPC ---
     let start = Instant::now();
@@ -221,7 +218,6 @@ pub async fn run_daemon(opts: DaemonOptions) -> Result<()> {
                     handle_peer_event(
                         event,
                         &peer_table,
-                        &transport,
                         &local_agent_id,
                         &mut reconnect_map,
                     ).await;
@@ -235,14 +231,12 @@ pub async fn run_daemon(opts: DaemonOptions) -> Result<()> {
                 if !removed.is_empty() {
                     for id in &removed {
                         reconnect_map.remove(id);
-                        transport.remove_expected_peer(id);
                     }
                     info!(count = removed.len(), "removed stale discovered peers");
                     if let Err(err) = save_known_peers(&paths.known_peers, &peer_table.to_known_peers().await).await {
                         warn!(error = %err, "failed to persist known peers after stale cleanup");
                     }
                 }
-                transport.gc_connecting_locks().await;
             }
             _ = reconnect_interval.tick() => {
                 attempt_reconnects(

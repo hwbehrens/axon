@@ -37,23 +37,8 @@ async fn transport_connect() {
     let (id_a, _dir_a) = make_identity();
     let (id_b, _dir_b) = make_identity();
 
-    let transport_b = QuicTransport::bind("127.0.0.1:0".parse().unwrap(), &id_b, 128)
-        .await
-        .unwrap();
+    let (transport_a, transport_b, _, _) = make_transport_pair(&id_a, &id_b).await;
     let addr_b = transport_b.local_addr().unwrap();
-
-    let transport_a = QuicTransport::bind("127.0.0.1:0".parse().unwrap(), &id_a, 128)
-        .await
-        .unwrap();
-
-    transport_a.set_expected_peer(
-        id_b.agent_id().to_string(),
-        id_b.public_key_base64().to_string(),
-    );
-    transport_b.set_expected_peer(
-        id_a.agent_id().to_string(),
-        id_a.public_key_base64().to_string(),
-    );
 
     let peer_b = make_peer_record(&id_b, addr_b);
     let conn = transport_a.ensure_connection(&peer_b).await.unwrap();
@@ -67,23 +52,8 @@ async fn transport_request_gets_error_response() {
     let (id_a, _dir_a) = make_identity();
     let (id_b, _dir_b) = make_identity();
 
-    let transport_b = QuicTransport::bind("127.0.0.1:0".parse().unwrap(), &id_b, 128)
-        .await
-        .unwrap();
-    let addr_b = transport_b.local_addr().unwrap();
-
-    let transport_a = QuicTransport::bind("127.0.0.1:0".parse().unwrap(), &id_a, 128)
-        .await
-        .unwrap();
-
-    transport_a.set_expected_peer(
-        id_b.agent_id().to_string(),
-        id_b.public_key_base64().to_string(),
-    );
-    transport_b.set_expected_peer(
-        id_a.agent_id().to_string(),
-        id_a.public_key_base64().to_string(),
-    );
+    let (transport_a, _transport_b, _, _) = make_transport_pair(&id_a, &id_b).await;
+    let addr_b = _transport_b.local_addr().unwrap();
 
     let peer_b = make_peer_record(&id_b, addr_b);
 
@@ -106,24 +76,9 @@ async fn transport_message_fire_and_forget() {
     let (id_a, _dir_a) = make_identity();
     let (id_b, _dir_b) = make_identity();
 
-    let transport_b = QuicTransport::bind("127.0.0.1:0".parse().unwrap(), &id_b, 128)
-        .await
-        .unwrap();
+    let (transport_a, transport_b, _, _) = make_transport_pair(&id_a, &id_b).await;
     let addr_b = transport_b.local_addr().unwrap();
     let mut rx_b = transport_b.subscribe_inbound();
-
-    let transport_a = QuicTransport::bind("127.0.0.1:0".parse().unwrap(), &id_a, 128)
-        .await
-        .unwrap();
-
-    transport_a.set_expected_peer(
-        id_b.agent_id().to_string(),
-        id_b.public_key_base64().to_string(),
-    );
-    transport_b.set_expected_peer(
-        id_a.agent_id().to_string(),
-        id_a.public_key_base64().to_string(),
-    );
 
     let peer_b = make_peer_record(&id_b, addr_b);
 

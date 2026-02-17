@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock as StdRwLock};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
@@ -8,6 +8,13 @@ use tokio::sync::RwLock;
 
 use crate::config::{KnownPeer, StaticPeerConfig};
 use crate::message::AgentId;
+
+/// Sync-safe pubkey map shared with TLS verifiers.
+///
+/// Uses `std::sync::RwLock` (not `tokio::sync`) because rustls verifier
+/// callbacks are synchronous. This map is the single source of truth for
+/// peer public keys — updated automatically by `PeerTable` mutations.
+pub type PubkeyMap = Arc<StdRwLock<HashMap<String, String>>>;
 
 pub const STALE_TIMEOUT: Duration = Duration::from_secs(60);
 
@@ -68,6 +75,7 @@ impl PeerRecord {
 #[derive(Debug, Clone)]
 pub struct PeerTable {
     inner: Arc<RwLock<HashMap<AgentId, PeerRecord>>>,
+    pubkeys: PubkeyMap,
 }
 
 impl Default for PeerTable {
@@ -80,7 +88,13 @@ impl PeerTable {
     pub fn new() -> Self {
         Self {
             inner: Arc::new(RwLock::new(HashMap::new())),
+            pubkeys: Arc::new(StdRwLock::new(HashMap::new())),
         }
+    }
+
+    /// Returns the sync-safe pubkey map for sharing with TLS verifiers.
+    pub fn pubkey_map(&self) -> PubkeyMap {
+        self.pubkeys.clone()
     }
 
     pub async fn upsert_discovered(&self, agent_id: AgentId, addr: SocketAddr, pubkey: String) {
@@ -96,31 +110,47 @@ impl PeerTable {
                 existing.last_seen = Instant::now();
             })
             .or_insert_with(|| PeerRecord {
-                agent_id,
+                agent_id: agent_id.clone(),
                 addr,
-                pubkey,
+                pubkey: pubkey.clone(),
                 source: PeerSource::Discovered,
                 status: ConnectionStatus::Discovered,
                 rtt_ms: None,
                 last_seen: Instant::now(),
             });
+        if let Ok(mut map) = self.pubkeys.write() {
+            map.insert(agent_id.to_string(), pubkey);
+        }
     }
 
     pub async fn upsert_static(&self, cfg: &StaticPeerConfig) {
         let mut table = self.inner.write().await;
         table.insert(cfg.agent_id.clone(), PeerRecord::from_static(cfg));
+        if let Ok(mut map) = self.pubkeys.write() {
+            map.insert(cfg.agent_id.to_string(), cfg.pubkey.clone());
+        }
     }
 
     pub async fn upsert_cached(&self, peer: &KnownPeer) {
         let mut table = self.inner.write().await;
-        table
+        let inserted = table
             .entry(peer.agent_id.clone())
             .or_insert_with(|| PeerRecord::from_cached(peer));
+        if let Ok(mut map) = self.pubkeys.write() {
+            map.entry(peer.agent_id.to_string())
+                .or_insert_with(|| inserted.pubkey.clone());
+        }
     }
 
     pub async fn remove(&self, agent_id: &str) -> Option<PeerRecord> {
         let mut table = self.inner.write().await;
-        table.remove(agent_id)
+        let removed = table.remove(agent_id);
+        if removed.is_some()
+            && let Ok(mut map) = self.pubkeys.write()
+        {
+            map.remove(agent_id);
+        }
+        removed
     }
 
     pub async fn get(&self, agent_id: &str) -> Option<PeerRecord> {
@@ -182,6 +212,13 @@ impl PeerTable {
             .collect();
         for id in &stale {
             table.remove(id);
+        }
+        if !stale.is_empty()
+            && let Ok(mut map) = self.pubkeys.write()
+        {
+            for id in &stale {
+                map.remove(id.as_str());
+            }
         }
         stale
     }

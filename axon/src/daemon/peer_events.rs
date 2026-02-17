@@ -7,12 +7,10 @@ use super::reconnect::ReconnectState;
 use crate::discovery::PeerEvent;
 use crate::message::AgentId;
 use crate::peer_table::{PeerSource, PeerTable};
-use crate::transport::QuicTransport;
 
 pub(crate) async fn handle_peer_event(
     event: PeerEvent,
     peer_table: &PeerTable,
-    transport: &QuicTransport,
     local_agent_id: &AgentId,
     reconnect_state: &mut HashMap<AgentId, ReconnectState>,
 ) {
@@ -41,7 +39,6 @@ pub(crate) async fn handle_peer_event(
                 return;
             }
 
-            transport.set_expected_peer(agent_id.to_string(), pubkey.clone());
             peer_table
                 .upsert_discovered(agent_id.clone(), addr, pubkey)
                 .await;

@@ -1,10 +1,13 @@
 use super::*;
 use crate::config::AxonPaths;
 use crate::identity::Identity;
+use crate::peer_table::PeerTable;
 use rustls::SignatureScheme;
 use rustls::client::danger::ServerCertVerifier;
 use rustls::server::danger::ClientCertVerifier;
+use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::RwLock as StdRwLock;
 use tempfile::tempdir;
 
 #[test]
@@ -26,13 +29,13 @@ fn cert_pubkey_extraction_matches_identity() {
 
 fn make_test_verifier() -> PeerCertVerifier {
     PeerCertVerifier {
-        expected_pubkeys: Arc::new(StdRwLock::new(HashMap::new())),
+        expected_pubkeys: PeerTable::new().pubkey_map(),
     }
 }
 
 fn make_test_client_verifier() -> PeerClientCertVerifier {
     PeerClientCertVerifier {
-        expected_pubkeys: Arc::new(StdRwLock::new(HashMap::new())),
+        expected_pubkeys: PeerTable::new().pubkey_map(),
         roots: vec![],
     }
 }
@@ -115,14 +118,14 @@ fn server_verifier_accepts_known_peer() {
     let identity = Identity::load_or_generate(&paths).expect("identity");
     let cert = identity.make_quic_certificate().expect("cert");
 
-    let mut expected = HashMap::new();
-    expected.insert(
+    let pubkey_map = Arc::new(StdRwLock::new(HashMap::new()));
+    pubkey_map.write().unwrap().insert(
         identity.agent_id().to_string(),
         identity.public_key_base64().to_string(),
     );
 
     let verifier = PeerCertVerifier {
-        expected_pubkeys: Arc::new(StdRwLock::new(expected)),
+        expected_pubkeys: pubkey_map,
     };
     let cert_der = CertificateDer::from(cert.cert_der);
     let agent_id_string = identity.agent_id().to_string();
@@ -149,12 +152,15 @@ fn server_verifier_rejects_pubkey_mismatch() {
     let identity = Identity::load_or_generate(&paths).expect("identity");
     let cert = identity.make_quic_certificate().expect("cert");
 
-    let mut expected = HashMap::new();
+    let pubkey_map = Arc::new(StdRwLock::new(HashMap::new()));
     // Register the agent_id but with a wrong pubkey
-    expected.insert(identity.agent_id().to_string(), STANDARD.encode([99u8; 32]));
+    pubkey_map
+        .write()
+        .unwrap()
+        .insert(identity.agent_id().to_string(), STANDARD.encode([99u8; 32]));
 
     let verifier = PeerCertVerifier {
-        expected_pubkeys: Arc::new(StdRwLock::new(expected)),
+        expected_pubkeys: pubkey_map,
     };
     let cert_der = CertificateDer::from(cert.cert_der);
     let agent_id_string = identity.agent_id().to_string();

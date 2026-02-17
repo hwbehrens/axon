@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::net::SocketAddr;
 use std::pin::Pin;
-use std::sync::{Arc, RwLock as StdRwLock};
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -12,7 +12,7 @@ use tracing::{debug, info, warn};
 
 use crate::identity::Identity;
 use crate::message::{AgentId, Envelope};
-use crate::peer_table::PeerRecord;
+use crate::peer_table::{PeerRecord, PubkeyMap};
 
 use super::connection::run_connection;
 use super::connection::{send_request, send_unidirectional};
@@ -32,14 +32,6 @@ pub struct QuicTransport {
     connections: Arc<RwLock<HashMap<String, quinn::Connection>>>,
     /// Per-peer lock to prevent concurrent connection attempts to the same peer.
     connecting_locks: Arc<RwLock<HashMap<String, Arc<Mutex<()>>>>>,
-    /// Peer public key map shared with TLS verifier callbacks.
-    ///
-    /// Uses `std::sync::RwLock` (not `tokio::sync`) because rustls `ServerCertVerifier`
-    /// and `ClientCertVerifier` callbacks are synchronous — they cannot `.await`.
-    /// All access is non-blocking: short inserts/removes via `set_expected_peer` /
-    /// `remove_expected_peer`, and short reads inside TLS verification.
-    /// Do NOT hold this lock across `.await` points.
-    expected_pubkeys: Arc<StdRwLock<HashMap<String, String>>>,
     inbound_tx: broadcast::Sender<Arc<Envelope>>,
     inbound_semaphore: Arc<Semaphore>,
     cancel: CancellationToken,
@@ -52,6 +44,7 @@ impl QuicTransport {
         bind_addr: SocketAddr,
         identity: &Identity,
         max_connections: usize,
+        pubkey_map: PubkeyMap,
     ) -> Result<Self> {
         Self::bind_cancellable(
             bind_addr,
@@ -62,6 +55,7 @@ impl QuicTransport {
             Duration::from_secs(60),
             None,
             Duration::from_secs(10),
+            pubkey_map,
         )
         .await
     }
@@ -76,16 +70,11 @@ impl QuicTransport {
         idle_timeout: Duration,
         response_handler: Option<ResponseHandlerFn>,
         inbound_read_timeout: Duration,
+        pubkey_map: PubkeyMap,
     ) -> Result<Self> {
         let cert = identity.make_quic_certificate()?;
-        let expected_pubkeys = Arc::new(StdRwLock::new(HashMap::new()));
-        let (endpoint, inbound_tx) = build_endpoint(
-            bind_addr,
-            &cert,
-            expected_pubkeys.clone(),
-            keepalive,
-            idle_timeout,
-        )?;
+        let (endpoint, inbound_tx) =
+            build_endpoint(bind_addr, &cert, pubkey_map, keepalive, idle_timeout)?;
 
         let transport = Self {
             endpoint,
@@ -93,7 +82,6 @@ impl QuicTransport {
             max_connections,
             connections: Arc::new(RwLock::new(HashMap::new())),
             connecting_locks: Arc::new(RwLock::new(HashMap::new())),
-            expected_pubkeys,
             inbound_tx,
             inbound_semaphore: Arc::new(Semaphore::new(max_connections)),
             cancel,
@@ -108,38 +96,11 @@ impl QuicTransport {
         self.inbound_tx.subscribe()
     }
 
-    pub fn set_expected_peer(&self, agent_id: String, pubkey: String) {
-        if let Ok(mut map) = self.expected_pubkeys.write() {
-            map.insert(agent_id, pubkey);
-        }
-    }
-
-    pub fn remove_expected_peer(&self, agent_id: &str) {
-        if let Ok(mut map) = self.expected_pubkeys.write() {
-            map.remove(agent_id);
-        }
-    }
-
-    /// Remove stale per-peer connecting lock entries for peers that are no
-    /// longer expected (not in `expected_pubkeys`). Called periodically to
-    /// prevent unbounded growth from transient mDNS peers.
-    pub async fn gc_connecting_locks(&self) {
-        let expected: Vec<String> = self
-            .expected_pubkeys
-            .read()
-            .map(|m| m.keys().cloned().collect())
-            .unwrap_or_default();
-        let mut locks = self.connecting_locks.write().await;
-        locks.retain(|k, _| expected.contains(k));
-    }
-
     pub async fn has_connection(&self, agent_id: &str) -> bool {
         self.connections.read().await.contains_key(agent_id)
     }
 
     pub async fn ensure_connection(&self, peer: &PeerRecord) -> Result<quinn::Connection> {
-        self.set_expected_peer(peer.agent_id.to_string(), peer.pubkey.clone());
-
         // Fast path: already connected.
         if let Some(existing) = self
             .connections

@@ -55,3 +55,48 @@ pub(crate) fn make_peer_record(
         last_seen: Instant::now(),
     }
 }
+
+/// Create a pair of transports with mutual pubkey registration via PeerTable.
+pub(crate) async fn make_transport_pair(
+    id_a: &Identity,
+    id_b: &Identity,
+) -> (QuicTransport, QuicTransport, PeerTable, PeerTable) {
+    let table_a = PeerTable::new();
+    let table_b = PeerTable::new();
+
+    // Register each peer's pubkey in the other's table
+    table_a
+        .upsert_discovered(
+            id_b.agent_id().into(),
+            "127.0.0.1:1".parse().unwrap(),
+            id_b.public_key_base64().to_string(),
+        )
+        .await;
+    table_b
+        .upsert_discovered(
+            id_a.agent_id().into(),
+            "127.0.0.1:1".parse().unwrap(),
+            id_a.public_key_base64().to_string(),
+        )
+        .await;
+
+    let transport_b = QuicTransport::bind(
+        "127.0.0.1:0".parse().unwrap(),
+        id_b,
+        128,
+        table_b.pubkey_map(),
+    )
+    .await
+    .unwrap();
+
+    let transport_a = QuicTransport::bind(
+        "127.0.0.1:0".parse().unwrap(),
+        id_a,
+        128,
+        table_a.pubkey_map(),
+    )
+    .await
+    .unwrap();
+
+    (transport_a, transport_b, table_a, table_b)
+}
