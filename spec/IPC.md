@@ -89,7 +89,7 @@ Daemon identity.
 
 **Response:**
 ```json
-{"ok": true, "agent_id": "ed25519.a1b2...", "public_key": "<base64>", "name": "agent-name", "version": "0.4.0", "uptime_secs": 3600}
+{"ok": true, "agent_id": "ed25519.a1b2...", "public_key": "<base64>", "name": "agent-name", "version": "0.5.0", "uptime_secs": 3600}
 ```
 
 Response shape notes:
