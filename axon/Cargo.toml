@@ -15,7 +15,6 @@ quinn = "0.11"
 rustls = { version = "0.23", features = ["ring"] }
 rcgen = "0.13"
 ed25519-dalek = { version = "2", features = ["rand_core"] }
-rand = "0.8"
 mdns-sd = "0.11"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }
@@ -27,7 +26,6 @@ sha2 = "0.10"
 base64 = "0.22"
 uuid = { version = "1", features = ["v4", "serde"] }
 anyhow = "1"
-thiserror = "2"
 x509-parser = "0.16"
 getrandom = "0.2"
 libc = "0.2" # Required for Unix peer credentials (Linux SO_PEERCRED, macOS getpeereid) — no std-only API

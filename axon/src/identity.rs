@@ -38,7 +38,8 @@ impl Identity {
             SigningKey::from_bytes(&seed)
         } else {
             let mut seed = [0u8; 32];
-            getrandom::getrandom(&mut seed).context("failed to gather randomness")?;
+            getrandom::getrandom(&mut seed)
+                .map_err(|err| anyhow!("failed to gather randomness: {err}"))?;
             let key = SigningKey::from_bytes(&seed);
             let key_b64 = STANDARD.encode(seed);
             fs::write(&paths.identity_key, &key_b64).with_context(|| {

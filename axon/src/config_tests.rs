@@ -1,16 +1,18 @@
 use super::*;
 use tempfile::tempdir;
 
-#[test]
-fn config_defaults_when_missing() {
+#[tokio::test]
+async fn config_defaults_when_missing() {
     let dir = tempdir().expect("temp dir");
-    let cfg = Config::load(&dir.path().join("missing.toml")).expect("load missing config");
+    let cfg = Config::load(&dir.path().join("missing.toml"))
+        .await
+        .expect("load missing config");
     assert_eq!(cfg.effective_port(None), 7100);
     assert!(cfg.peers.is_empty());
 }
 
-#[test]
-fn config_parses_static_peers() {
+#[tokio::test]
+async fn config_parses_static_peers() {
     let dir = tempdir().expect("temp dir");
     let path = dir.path().join("config.toml");
     std::fs::write(
@@ -25,7 +27,7 @@ fn config_parses_static_peers() {
     )
     .expect("write config");
 
-    let cfg = Config::load(&path).expect("load config");
+    let cfg = Config::load(&path).await.expect("load config");
     assert_eq!(cfg.effective_port(None), 8111);
     assert_eq!(cfg.peers.len(), 1);
     assert_eq!(cfg.peers[0].addr.to_string(), "127.0.0.1:7100");
@@ -42,16 +44,16 @@ fn cli_override_takes_precedence() {
     assert_eq!(cfg.effective_port(None), 8000);
 }
 
-#[test]
-fn invalid_toml_returns_error() {
+#[tokio::test]
+async fn invalid_toml_returns_error() {
     let dir = tempdir().expect("temp dir");
     let path = dir.path().join("config.toml");
     std::fs::write(&path, "{{{{not toml!").expect("write");
-    assert!(Config::load(&path).is_err());
+    assert!(Config::load(&path).await.is_err());
 }
 
-#[test]
-fn config_ignores_unknown_fields() {
+#[tokio::test]
+async fn config_ignores_unknown_fields() {
     let dir = tempdir().expect("temp dir");
     let path = dir.path().join("config.toml");
     std::fs::write(
@@ -59,7 +61,9 @@ fn config_ignores_unknown_fields() {
         "max_ipc_clients = 32\nmax_connections = 256\nkeepalive_secs = 5\nport = 7200\n",
     )
     .expect("write");
-    let cfg = Config::load(&path).expect("load config with old fields");
+    let cfg = Config::load(&path)
+        .await
+        .expect("load config with old fields");
     assert_eq!(cfg.effective_port(None), 7200);
 }
 
@@ -75,14 +79,16 @@ async fn known_peers_roundtrip() {
     }];
 
     save_known_peers(&path, &peers).await.expect("save");
-    let loaded = load_known_peers(&path).expect("load");
+    let loaded = load_known_peers(&path).await.expect("load");
     assert_eq!(loaded, peers);
 }
 
-#[test]
-fn known_peers_empty_when_missing() {
+#[tokio::test]
+async fn known_peers_empty_when_missing() {
     let dir = tempdir().expect("temp dir");
-    let loaded = load_known_peers(&dir.path().join("missing.json")).expect("load");
+    let loaded = load_known_peers(&dir.path().join("missing.json"))
+        .await
+        .expect("load");
     assert!(loaded.is_empty());
 }
 
@@ -157,6 +163,6 @@ async fn save_known_peers_creates_parent_dir() {
         .await
         .expect("save should create parent dirs");
     assert!(path.exists(), "file should exist after save");
-    let loaded = load_known_peers(&path).expect("load");
+    let loaded = load_known_peers(&path).await.expect("load");
     assert_eq!(loaded, peers);
 }

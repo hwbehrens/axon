@@ -1,5 +1,6 @@
 use std::env;
 use std::fs;
+use std::io::ErrorKind;
 use std::net::SocketAddr;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -79,12 +80,15 @@ pub struct Config {
 }
 
 impl Config {
-    pub fn load(path: &Path) -> Result<Self> {
-        if !path.exists() {
-            return Ok(Self::default());
-        }
-        let raw = fs::read_to_string(path)
-            .with_context(|| format!("failed to read config: {}", path.display()))?;
+    pub async fn load(path: &Path) -> Result<Self> {
+        let raw = match tokio::fs::read_to_string(path).await {
+            Ok(raw) => raw,
+            Err(err) if err.kind() == ErrorKind::NotFound => return Ok(Self::default()),
+            Err(err) => {
+                return Err(err)
+                    .with_context(|| format!("failed to read config: {}", path.display()));
+            }
+        };
         let parsed = toml::from_str::<Self>(&raw)
             .with_context(|| format!("failed to parse config: {}", path.display()))?;
         Ok(parsed)
@@ -110,12 +114,15 @@ pub struct KnownPeer {
     pub last_seen_unix_ms: u64,
 }
 
-pub fn load_known_peers(path: &Path) -> Result<Vec<KnownPeer>> {
-    if !path.exists() {
-        return Ok(Vec::new());
-    }
-    let raw = fs::read_to_string(path)
-        .with_context(|| format!("failed to read known peers: {}", path.display()))?;
+pub async fn load_known_peers(path: &Path) -> Result<Vec<KnownPeer>> {
+    let raw = match tokio::fs::read_to_string(path).await {
+        Ok(raw) => raw,
+        Err(err) if err.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(err) => {
+            return Err(err)
+                .with_context(|| format!("failed to read known peers: {}", path.display()));
+        }
+    };
     let peers = serde_json::from_str::<Vec<KnownPeer>>(&raw)
         .with_context(|| format!("failed to parse known peers: {}", path.display()))?;
     Ok(peers)

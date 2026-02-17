@@ -57,7 +57,7 @@ pub async fn run_daemon(opts: DaemonOptions) -> Result<()> {
     };
     paths.ensure_root_exists()?;
 
-    let config = Config::load(&paths.config)?;
+    let config = Config::load(&paths.config).await?;
     let port = config.effective_port(opts.port);
 
     let identity = Identity::load_or_generate(&paths)?;
@@ -83,7 +83,7 @@ pub async fn run_daemon(opts: DaemonOptions) -> Result<()> {
     for peer in &config.peers {
         peer_table.upsert_static(peer).await;
     }
-    for peer in load_known_peers(&paths.known_peers)? {
+    for peer in load_known_peers(&paths.known_peers).await? {
         peer_table.upsert_cached(&peer).await;
     }
 

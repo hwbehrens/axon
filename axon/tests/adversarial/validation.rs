@@ -153,27 +153,27 @@ async fn known_peers_corruption_resilience() {
     // Random bytes.
     std::fs::write(&path, b"\x80\x81\x82\xff random garbage").unwrap();
     assert!(
-        load_known_peers(&path).is_err(),
+        load_known_peers(&path).await.is_err(),
         "random bytes should return Err"
     );
 
     // Truncated JSON.
     std::fs::write(&path, b"[{\"agent_id\":\"aaa").unwrap();
     assert!(
-        load_known_peers(&path).is_err(),
+        load_known_peers(&path).await.is_err(),
         "truncated JSON should return Err"
     );
 
     // Wrong schema — array of strings instead of KnownPeer objects.
     std::fs::write(&path, b"[\"not\",\"a\",\"peer\"]").unwrap();
     assert!(
-        load_known_peers(&path).is_err(),
+        load_known_peers(&path).await.is_err(),
         "wrong schema should return Err"
     );
 
     // Empty array — valid, should load as empty vec.
     std::fs::write(&path, b"[]").unwrap();
-    let peers = load_known_peers(&path).unwrap();
+    let peers = load_known_peers(&path).await.unwrap();
     assert!(peers.is_empty(), "empty array should load as empty vec");
 
     // Valid data.
@@ -184,7 +184,7 @@ async fn known_peers_corruption_resilience() {
         last_seen_unix_ms: 1000,
     }];
     save_known_peers(&path, &valid).await.unwrap();
-    let loaded = load_known_peers(&path).unwrap();
+    let loaded = load_known_peers(&path).await.unwrap();
     assert_eq!(loaded.len(), 1, "valid data should load correctly");
     assert_eq!(loaded[0].agent_id, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
 }
@@ -194,42 +194,42 @@ async fn known_peers_corruption_resilience() {
 // =========================================================================
 
 /// Config::load handles corrupt, invalid, and missing files gracefully.
-#[test]
-fn config_corruption_resilience() {
+#[tokio::test]
+async fn config_corruption_resilience() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("config.toml");
 
     // Random bytes.
     std::fs::write(&path, b"\x80\x81\x82\xff random garbage").unwrap();
     assert!(
-        Config::load(&path).is_err(),
+        Config::load(&path).await.is_err(),
         "random bytes should return Err"
     );
 
     // Invalid TOML syntax.
     std::fs::write(&path, b"[invalid toml =====").unwrap();
     assert!(
-        Config::load(&path).is_err(),
+        Config::load(&path).await.is_err(),
         "invalid TOML should return Err"
     );
 
     // Valid TOML but wrong types (port as string).
     std::fs::write(&path, b"port = \"not a number\"").unwrap();
     assert!(
-        Config::load(&path).is_err(),
+        Config::load(&path).await.is_err(),
         "wrong types should return Err"
     );
 
     // Valid TOML but wrong nested type (peers as string).
     std::fs::write(&path, b"peers = \"not an array\"").unwrap();
     assert!(
-        Config::load(&path).is_err(),
+        Config::load(&path).await.is_err(),
         "wrong nested types should return Err"
     );
 
     // Non-existent path returns default config (not Err).
     let missing = dir.path().join("nonexistent.toml");
-    let config = Config::load(&missing).unwrap();
+    let config = Config::load(&missing).await.unwrap();
     assert_eq!(
         config.effective_port(None),
         7100,
@@ -242,7 +242,7 @@ fn config_corruption_resilience() {
 
     // Valid minimal config.
     std::fs::write(&path, b"port = 9000").unwrap();
-    let config = Config::load(&path).unwrap();
+    let config = Config::load(&path).await.unwrap();
     assert_eq!(config.effective_port(None), 9000);
     assert!(config.peers.is_empty());
 }

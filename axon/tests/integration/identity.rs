@@ -39,8 +39,8 @@ fn cert_pubkey_matches_identity() {
 // =========================================================================
 
 /// Config with static peers round-trips through TOML.
-#[test]
-fn config_static_peers_roundtrip() {
+#[tokio::test]
+async fn config_static_peers_roundtrip() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("config.toml");
     std::fs::write(
@@ -55,7 +55,7 @@ pubkey = "dGVzdHB1YmtleQ=="
 "#,
     )
     .unwrap();
-    let config = Config::load(&path).unwrap();
+    let config = Config::load(&path).await.unwrap();
     assert_eq!(config.effective_port(None), 8000);
     assert_eq!(config.peers.len(), 1);
     assert_eq!(
@@ -85,7 +85,7 @@ async fn known_peers_save_load_integration() {
     ];
 
     save_known_peers(&path, &peers).await.unwrap();
-    let loaded = load_known_peers(&path).unwrap();
+    let loaded = load_known_peers(&path).await.unwrap();
     assert_eq!(loaded.len(), 2);
     assert_eq!(
         loaded[0].agent_id,

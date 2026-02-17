@@ -174,8 +174,8 @@ fn ipc_inbound_shape() {
 // =========================================================================
 
 /// `spec/SPEC.md` static peer config includes agent_id, addr, pubkey.
-#[test]
-fn config_static_peers_match_spec() {
+#[tokio::test]
+async fn config_static_peers_match_spec() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("config.toml");
     std::fs::write(
@@ -190,7 +190,7 @@ pubkey = "cHVia2V5MQ=="
 "#,
     )
     .unwrap();
-    let config = axon::config::Config::load(&path).unwrap();
+    let config = axon::config::Config::load(&path).await.unwrap();
     assert_eq!(config.peers.len(), 1);
     assert_eq!(
         config.peers[0].agent_id,
