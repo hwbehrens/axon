@@ -1,4 +1,4 @@
-.PHONY: all test test-unit test-integration test-e2e test-all fmt lint check fuzz fuzz-target coverage coverage-html coverage-lcov mutants mutants-fast clean verify ci
+.PHONY: all test test-unit test-integration test-e2e test-cli test-all fmt lint check fuzz fuzz-target coverage coverage-html coverage-lcov mutants mutants-fast clean verify ci
 
 # Default: format, lint, and run all tests
 all: fmt lint test-all
@@ -14,6 +14,10 @@ test-integration:
 # End-to-end daemon lifecycle tests (~10s)
 test-e2e:
 	cargo test --test daemon_lifecycle --test daemon_e2e
+
+# Black-box CLI contract tests
+test-cli:
+	cargo test --test cli_contract
 
 # All tests (unit + integration + e2e)
 test-all:
@@ -76,9 +80,9 @@ clean:
 	rm -rf mutants.out lcov.info
 
 # Pre-commit: the full verification suite
-verify: fmt lint test-all
+verify: fmt lint test-cli test-all
 	@echo "✅ All checks passed"
 
 # CI: everything including coverage
-ci: fmt lint test-all coverage
+ci: fmt lint test-cli test-all coverage
 	@echo "✅ CI pipeline passed"

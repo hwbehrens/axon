@@ -6,6 +6,8 @@
 use axon::message::*;
 use serde_json::{Value, json};
 
+#[path = "spec_compliance/cli_help.rs"]
+mod cli_help;
 #[path = "spec_compliance/envelope.rs"]
 mod envelope;
 #[path = "spec_compliance/payloads.rs"]
