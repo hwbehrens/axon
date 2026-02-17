@@ -1,10 +1,11 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::{Arc, RwLock as StdRwLock};
+use std::sync::{Arc, RwLock as StdRwLock, RwLockWriteGuard as StdRwLockWriteGuard};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
+use tracing::warn;
 
 use crate::config::{KnownPeer, StaticPeerConfig};
 use crate::message::AgentId;
@@ -97,6 +98,22 @@ impl PeerTable {
         self.pubkeys.clone()
     }
 
+    fn pubkeys_write_guard(
+        &self,
+        operation: &'static str,
+    ) -> StdRwLockWriteGuard<'_, HashMap<String, String>> {
+        match self.pubkeys.write() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                warn!(
+                    operation = operation,
+                    "pubkey map lock poisoned; recovering map to keep TLS pinset available"
+                );
+                poisoned.into_inner()
+            }
+        }
+    }
+
     pub async fn upsert_discovered(&self, agent_id: AgentId, addr: SocketAddr, pubkey: String) {
         let mut table = self.inner.write().await;
         table
@@ -118,17 +135,15 @@ impl PeerTable {
                 rtt_ms: None,
                 last_seen: Instant::now(),
             });
-        if let Ok(mut map) = self.pubkeys.write() {
-            map.insert(agent_id.to_string(), pubkey);
-        }
+        let mut map = self.pubkeys_write_guard("upsert_discovered");
+        map.insert(agent_id.to_string(), pubkey);
     }
 
     pub async fn upsert_static(&self, cfg: &StaticPeerConfig) {
         let mut table = self.inner.write().await;
         table.insert(cfg.agent_id.clone(), PeerRecord::from_static(cfg));
-        if let Ok(mut map) = self.pubkeys.write() {
-            map.insert(cfg.agent_id.to_string(), cfg.pubkey.clone());
-        }
+        let mut map = self.pubkeys_write_guard("upsert_static");
+        map.insert(cfg.agent_id.to_string(), cfg.pubkey.clone());
     }
 
     pub async fn upsert_cached(&self, peer: &KnownPeer) {
@@ -136,18 +151,16 @@ impl PeerTable {
         let inserted = table
             .entry(peer.agent_id.clone())
             .or_insert_with(|| PeerRecord::from_cached(peer));
-        if let Ok(mut map) = self.pubkeys.write() {
-            map.entry(peer.agent_id.to_string())
-                .or_insert_with(|| inserted.pubkey.clone());
-        }
+        let mut map = self.pubkeys_write_guard("upsert_cached");
+        map.entry(peer.agent_id.to_string())
+            .or_insert_with(|| inserted.pubkey.clone());
     }
 
     pub async fn remove(&self, agent_id: &str) -> Option<PeerRecord> {
         let mut table = self.inner.write().await;
         let removed = table.remove(agent_id);
-        if removed.is_some()
-            && let Ok(mut map) = self.pubkeys.write()
-        {
+        if removed.is_some() {
+            let mut map = self.pubkeys_write_guard("remove");
             map.remove(agent_id);
         }
         removed
@@ -213,9 +226,8 @@ impl PeerTable {
         for id in &stale {
             table.remove(id);
         }
-        if !stale.is_empty()
-            && let Ok(mut map) = self.pubkeys.write()
-        {
+        if !stale.is_empty() {
+            let mut map = self.pubkeys_write_guard("remove_stale");
             for id in &stale {
                 map.remove(id.as_str());
             }

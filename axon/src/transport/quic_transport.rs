@@ -19,7 +19,7 @@ use super::connection::{send_request, send_unidirectional};
 use super::tls::build_endpoint;
 
 /// Optional callback to produce a response for a bidirectional request.
-/// If `None` is returned, the default `auto_response` is used.
+/// If `None` is returned, the default error response is used.
 pub type ResponseHandlerFn = Arc<
     dyn Fn(Arc<Envelope>) -> Pin<Box<dyn Future<Output = Option<Envelope>> + Send>> + Send + Sync,
 >;

@@ -286,6 +286,33 @@ async fn send_response(send: &mut quinn::SendStream, response: &Envelope) {
     }
 }
 
+async fn register_connection(
+    connections: &Arc<RwLock<HashMap<String, quinn::Connection>>>,
+    peer_id: &str,
+    connection: &quinn::Connection,
+) -> usize {
+    let stable_id = connection.stable_id();
+    connections
+        .write()
+        .await
+        .insert(peer_id.to_string(), connection.clone());
+    stable_id
+}
+
+async fn unregister_connection_if_current(
+    connections: &Arc<RwLock<HashMap<String, quinn::Connection>>>,
+    peer_id: &str,
+    stable_id: usize,
+) {
+    let mut conns = connections.write().await;
+    if conns
+        .get(peer_id)
+        .is_some_and(|c| c.stable_id() == stable_id)
+    {
+        conns.remove(peer_id);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Connection loop
 // ---------------------------------------------------------------------------
@@ -316,11 +343,7 @@ pub(crate) async fn run_connection(
         inbound_read_timeout,
     };
 
-    let my_stable_id = ctx.connection.stable_id();
-    ctx.connections
-        .write()
-        .await
-        .insert(peer_id.clone(), ctx.connection.clone());
+    let my_stable_id = register_connection(&ctx.connections, &peer_id, &ctx.connection).await;
 
     loop {
         tokio::select! {
@@ -347,13 +370,7 @@ pub(crate) async fn run_connection(
 
     // Only remove our entry if we're still the registered connection.
     // Another connection loop (from a simultaneous dial) may have replaced us.
-    let mut conns = ctx.connections.write().await;
-    if conns
-        .get(&peer_id)
-        .is_some_and(|c| c.stable_id() == my_stable_id)
-    {
-        conns.remove(&peer_id);
-    }
+    unregister_connection_if_current(&ctx.connections, &peer_id, my_stable_id).await;
 }
 
 #[cfg(test)]

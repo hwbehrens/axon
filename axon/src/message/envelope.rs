@@ -217,6 +217,12 @@ impl Envelope {
         if self.id.is_nil() {
             bail!("message id must be non-nil");
         }
+        if self.id.get_version() != Some(uuid::Version::Random) {
+            bail!("message id must be UUID v4");
+        }
+        if !self.payload.get().trim_start().starts_with('{') {
+            bail!("payload must be a JSON object");
+        }
         Ok(())
     }
 

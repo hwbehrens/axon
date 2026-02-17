@@ -58,6 +58,24 @@ fn validation_rejects_nil_uuid() {
 }
 
 #[test]
+fn validation_rejects_non_v4_uuid() {
+    let mut env = Envelope::new(agent_a(), agent_b(), MessageKind::Message, json!({}));
+    env.id = uuid::Uuid::parse_str("f81d4fae-7dec-11d0-a765-00a0c91e6bf6").unwrap();
+    assert!(env.validate().is_err());
+}
+
+#[test]
+fn validation_rejects_non_object_payload() {
+    let raw = r#"{
+            "id":"6fc0ec4f-e59f-4bea-9d57-0d9fdd1108f1",
+            "kind":"message",
+            "payload":[1,2,3]
+        }"#;
+    let decoded: Envelope = serde_json::from_str(raw).expect("deserialize");
+    assert!(decoded.validate().is_err());
+}
+
+#[test]
 fn unknown_envelope_fields_are_ignored() {
     let raw = r#"{
             "id":"6fc0ec4f-e59f-4bea-9d57-0d9fdd1108f1",
@@ -113,15 +131,6 @@ fn from_and_to_are_optional() {
 use proptest::prelude::*;
 
 proptest! {
-    #[test]
-    fn validation_accepts_any_non_nil_uuid(
-        a in any::<u128>().prop_filter("non-nil", |v| *v != 0),
-    ) {
-        let mut env = Envelope::new(agent_a(), agent_b(), MessageKind::Message, json!({}));
-        env.id = uuid::Uuid::from_u128(a);
-        prop_assert!(env.validate().is_ok());
-    }
-
     #[test]
     fn response_always_links_request(
         from_hex in "[0-9a-f]{32}",

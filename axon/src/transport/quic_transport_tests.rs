@@ -4,9 +4,14 @@ use crate::identity::Identity;
 use crate::message::MessageKind;
 use crate::peer_table::PeerTable;
 use serde_json::json;
+use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 use tempfile::tempdir;
+use tokio::sync::{RwLock, broadcast};
+use tokio::time::{Instant, sleep};
+use tokio_util::sync::CancellationToken;
 
 async fn make_transport_pair() -> (
     Identity,
@@ -73,6 +78,29 @@ async fn make_transport_pair() -> (
         dir_a,
         dir_b,
     )
+}
+
+async fn wait_for_registered_connection(
+    connections: &Arc<RwLock<HashMap<String, quinn::Connection>>>,
+    peer_id: &str,
+    expected_stable_id: usize,
+) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if connections
+            .read()
+            .await
+            .get(peer_id)
+            .is_some_and(|c| c.stable_id() == expected_stable_id)
+        {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for connection registration"
+        );
+        sleep(Duration::from_millis(20)).await;
+    }
 }
 
 #[tokio::test]
@@ -263,6 +291,76 @@ async fn ensure_connection_idempotent_after_simultaneous_dial() {
         conn2.stable_id(),
         "repeated ensure_connection should return the same connection"
     );
+}
+
+#[tokio::test]
+async fn superseded_connection_shutdown_preserves_newer_entry() {
+    let (id_a, id_b, transport_a, transport_b, _, _, _dir_a, _dir_b) = make_transport_pair().await;
+    let addr_b = transport_b.local_addr().expect("local_addr b");
+
+    let conn1 = transport_a
+        .endpoint
+        .connect(addr_b, id_b.agent_id())
+        .expect("begin outbound connect 1")
+        .await
+        .expect("complete outbound connect 1");
+
+    let conn2 = transport_a
+        .endpoint
+        .connect(addr_b, id_b.agent_id())
+        .expect("begin outbound connect 2")
+        .await
+        .expect("complete outbound connect 2");
+
+    let shared_connections = Arc::new(RwLock::new(HashMap::new()));
+    let (inbound_tx, _inbound_rx) = broadcast::channel(16);
+    let cancel1 = CancellationToken::new();
+    let cancel2 = CancellationToken::new();
+
+    let task1 = tokio::spawn(run_connection(
+        conn1.clone(),
+        id_a.agent_id().to_string(),
+        inbound_tx.clone(),
+        shared_connections.clone(),
+        cancel1.clone(),
+        None,
+        Duration::from_secs(10),
+    ));
+    wait_for_registered_connection(&shared_connections, id_b.agent_id(), conn1.stable_id()).await;
+
+    let task2 = tokio::spawn(run_connection(
+        conn2.clone(),
+        id_a.agent_id().to_string(),
+        inbound_tx,
+        shared_connections.clone(),
+        cancel2.clone(),
+        None,
+        Duration::from_secs(10),
+    ));
+    wait_for_registered_connection(&shared_connections, id_b.agent_id(), conn2.stable_id()).await;
+
+    cancel1.cancel();
+    tokio::time::timeout(Duration::from_secs(5), task1)
+        .await
+        .expect("task1 join timeout")
+        .expect("task1 should exit cleanly");
+
+    let current_stable_id = shared_connections
+        .read()
+        .await
+        .get(id_b.agent_id())
+        .map(|c| c.stable_id());
+    assert_eq!(
+        current_stable_id,
+        Some(conn2.stable_id()),
+        "superseded loop must not remove newer connection entry"
+    );
+
+    cancel2.cancel();
+    tokio::time::timeout(Duration::from_secs(5), task2)
+        .await
+        .expect("task2 join timeout")
+        .expect("task2 should exit cleanly");
 }
 
 #[tokio::test]
