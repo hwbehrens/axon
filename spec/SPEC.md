@@ -162,14 +162,15 @@ Line-delimited JSON over Unix socket. Each line is one complete JSON object. Sin
 - **`send`** — Send a message to a remote peer. Requires `to`, `kind` (`request` or `message`), and `payload`.
 - **`peers`** — List discovered and connected peers.
 - **`status`** — Daemon health: uptime, connections, message counts.
-- **`whoami`** — Daemon identity (agent_id, public key, version).
+- **`whoami`** — Daemon identity and metadata (`ok`, `agent_id`, `public_key`, optional `name`, `version`, `uptime_secs`).
 
 ### Authentication
 Unix socket permissions (`0600`, user-only) as baseline. Peer UID credential check (`SO_PEERCRED`/`getpeereid`) verifies connecting processes belong to the same user. No token-based auth.
 
 ### Multiple IPC Clients
 - Multiple clients can connect to the socket simultaneously.
-- All connected clients receive all inbound messages via broadcast.
+- All connected clients receive inbound messages via broadcast while they keep up with delivery.
+- Per-client outbound IPC queues are bounded; a lagging client is disconnected on overflow rather than silently skipped.
 - Commands are handled by whichever client sends them.
 
 ## 6. CLI
@@ -214,8 +215,8 @@ CLI execution contracts:
 - `send`/`notify`/`peers`/`status`/`whoami` use IPC and print daemon JSON responses.
 - `identity` is local and does not use IPC.
 - Exit code `0`: success.
-- Exit code `1`: local/runtime failure (parse, I/O, socket connect, decode).
-- Exit code `2`: daemon/application-level failure (`{"ok":false}` reply).
+- Exit code `1`: local/runtime failure after argument parsing (I/O, socket connect, decode).
+- Exit code `2`: CLI parse/usage failure (Clap) or daemon/application-level failure (`{"ok":false}` reply).
 
 ## 7. File Layout
 
@@ -256,7 +257,7 @@ Only `name`, `port`, and `peers` are configurable. All tuning values (timeouts, 
 ### Runtime
 - Accept inbound QUIC connections (mTLS validates peer certs against peer table).
 - Accept inbound IPC connections.
-- Route messages: IPC → QUIC (outbound), QUIC → IPC (inbound, broadcast to all clients).
+- Route messages: IPC → QUIC (outbound), QUIC → IPC (inbound, broadcast to connected clients; lagging IPC clients are disconnected when their bounded queue overflows).
 - Maintain peer table from mDNS events + static config.
 - Periodically save known_peers.json (every 60s or on peer change).
 

@@ -26,7 +26,7 @@ axon/                      Rust implementation (Cargo crate)
   Cargo.toml               Dependencies and package metadata (Rust 2024 edition)
   Makefile                 Canonical build/test/verify entrypoints
   src/                     Implementation
-    main.rs                CLI entrypoint (subcommands: daemon, send, notify, peers, status, identity, examples)
+    main.rs                CLI entrypoint (subcommands: daemon, send, notify, peers, status, identity, whoami, examples)
     lib.rs                 Crate root
     daemon/                Daemon orchestration, lifecycle, reconnect
     discovery.rs           mDNS + static peer discovery (plain async functions)
@@ -51,7 +51,7 @@ Client (OpenClaw/CLI) ←→ [Unix Socket IPC] ←→ AXON Daemon ←→ [QUIC/U
 - **Identity**: Ed25519 signing keypair. Agent ID derived from SHA-256 of public key. Self-signed X.509 cert generated on each startup for QUIC TLS.
 - **Discovery**: mDNS (`_axon._udp.local.`) broadcasts agent ID and public key. Static peers via config file for Tailscale/VPN. Plain async functions.
 - **Transport**: QUIC via `quinn`. TLS 1.3 with forward secrecy. Unidirectional streams for fire-and-forget messages, bidirectional streams for request/response.
-- **IPC**: Unix domain socket at `~/.axon/axon.sock`. Line-delimited JSON. 4 commands: `send`, `peers`, `status`, `whoami`. All connected IPC clients receive all inbound messages via broadcast.
+- **IPC**: Unix domain socket at `~/.axon/axon.sock`. Line-delimited JSON. 4 commands: `send`, `peers`, `status`, `whoami`. Inbound messages are broadcast to connected clients; lagging clients are disconnected when bounded IPC queues overflow.
 - **Messages**: JSON envelopes with UUID, kind, payload, and optional ref. 4 kinds: `request`, `response`, `message`, `error`.
 
 ## Module Map (summary)

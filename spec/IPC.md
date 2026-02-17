@@ -9,7 +9,7 @@
 
 The IPC interface connects local client processes (CLI tools, agents) with the AXON daemon over a Unix domain socket. It provides message sending, peer listing, daemon status, and identity queries via a simple line-delimited JSON protocol.
 
-All inbound messages from peers are broadcast to every connected IPC client.
+All inbound messages from peers are broadcast to connected IPC clients (deliver-or-disconnect under bounded-queue backpressure).
 
 ---
 
@@ -87,8 +87,12 @@ Daemon identity.
 
 **Response:**
 ```json
-{"ok": true, "agent_id": "ed25519.a1b2...", "public_key": "<base64>", "name": "agent-name", "version": "0.3.0", "uptime_secs": 3600}
+{"ok": true, "agent_id": "ed25519.a1b2...", "public_key": "<base64>", "name": "agent-name", "version": "0.4.0", "uptime_secs": 3600}
 ```
+
+Response shape notes:
+- `public_key` is standard base64 (Ed25519 public key).
+- `name` is optional and may be omitted when unset.
 
 ---
 
@@ -112,7 +116,7 @@ If `req_id` was present on the command, it is echoed in the error response.
 
 ## 5. Inbound Events
 
-All inbound messages from peers are broadcast to every connected IPC client as unsolicited events:
+All inbound messages from peers are broadcast to connected IPC clients as unsolicited events:
 
 ```json
 {"event": "inbound", "from": "<agent_id>", "envelope": {...}}
@@ -122,13 +126,13 @@ Inbound events are identified by the presence of `"event": "inbound"`. They neve
 
 Clients demultiplex by checking for `"event": "inbound"` — if present, it is a pushed event; otherwise it is a command response.
 
-**No receive buffer.** Messages arriving when no IPC client is connected are dropped.
+The daemon uses a bounded per-client outbound queue. If a client cannot keep up and its queue overflows, that client is disconnected (deliver-or-disconnect semantics). Messages arriving when no IPC client is connected are dropped.
 
 ---
 
 ## 6. Multiple Clients
 
-Up to 64 IPC clients may connect simultaneously. All connected clients receive all inbound broadcast events. Commands are handled independently per client.
+Up to 64 IPC clients may connect simultaneously. Connected clients that keep up receive all inbound broadcast events. Lagging clients are disconnected on queue overflow. Commands are handled independently per client.
 
 ---
 

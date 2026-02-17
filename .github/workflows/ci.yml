@@ -31,12 +31,12 @@ jobs:
             score=$(echo "$PR_BODY" | grep -oP '\*\*Score:\s*\K\d+')
             echo "✅ Self-assessment score: $score/100"
             if [ "$score" -lt 70 ]; then
-              echo "⚠️  Score below 70 — please review RUBRIC.md and address gaps before requesting review."
+              echo "⚠️  Score below 70 — please review the files in /rubrics and address gaps before requesting review."
               exit 1
             fi
           else
             echo "❌ No self-assessment score found in PR body."
-            echo "Please add a score line: **Score: NN/100** (see RUBRIC.md)"
+            echo "Please add a score line: **Score: NN/100** (see /rubrics)"
             exit 1
           fi
 

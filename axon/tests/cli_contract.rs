@@ -10,6 +10,7 @@ use serde_json::{Value, json};
 use tempfile::tempdir;
 
 const VALID_AGENT_ID: &str = "ed25519.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const VALID_AGENT_ID_UPPER: &str = "ED25519.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
 
 fn axon_bin() -> PathBuf {
     if let Some(bin) = std::env::var_os("CARGO_BIN_EXE_axon") {
@@ -38,9 +39,9 @@ fn run_command(cmd: &mut Command) -> Output {
     cmd.output().expect("failed to execute axon binary")
 }
 
-fn spawn_single_reply_server(
+fn spawn_multi_reply_server(
     root: &Path,
-    reply: Value,
+    replies: Vec<Value>,
 ) -> std::result::Result<JoinHandle<Value>, Error> {
     fs::create_dir_all(root).expect("create root");
     let socket_path = root.join("axon.sock");
@@ -55,18 +56,27 @@ fn spawn_single_reply_server(
             reader.read_line(&mut line).expect("read command line");
         }
 
-        let payload = serde_json::to_string(&reply).expect("serialize reply");
-        stream
-            .write_all(payload.as_bytes())
-            .expect("write reply payload");
-        stream.write_all(b"\n").expect("write reply newline");
+        for reply in replies {
+            let payload = serde_json::to_string(&reply).expect("serialize reply");
+            stream
+                .write_all(payload.as_bytes())
+                .expect("write reply payload");
+            stream.write_all(b"\n").expect("write reply newline");
+        }
 
         serde_json::from_str(line.trim()).expect("decode command JSON")
     }))
 }
 
 fn require_socket_server(root: &Path, reply: Value) -> Option<JoinHandle<Value>> {
-    match spawn_single_reply_server(root, reply) {
+    require_socket_server_with_replies(root, vec![reply])
+}
+
+fn require_socket_server_with_replies(
+    root: &Path,
+    replies: Vec<Value>,
+) -> Option<JoinHandle<Value>> {
+    match spawn_multi_reply_server(root, replies) {
         Ok(server) => Some(server),
         Err(err) if err.kind() == ErrorKind::PermissionDenied => {
             eprintln!(
@@ -76,6 +86,49 @@ fn require_socket_server(root: &Path, reply: Value) -> Option<JoinHandle<Value>>
         }
         Err(err) => panic!("failed to start unix socket server: {err}"),
     }
+}
+
+#[test]
+fn command_reply_ignores_unsolicited_inbound_event_lines() {
+    let bin = axon_bin();
+    let root = tempdir().expect("tempdir");
+    let Some(server) = require_socket_server_with_replies(
+        root.path(),
+        vec![
+            json!({
+                "event": "inbound",
+                "from": VALID_AGENT_ID,
+                "envelope": {
+                    "id": "550e8400-e29b-41d4-a716-446655440000",
+                    "kind": "message",
+                    "payload": {"data": {"hello": "world"}}
+                }
+            }),
+            json!({
+                "ok": true,
+                "uptime_secs": 7,
+                "peers_connected": 0,
+                "messages_sent": 1,
+                "messages_received": 2
+            }),
+        ],
+    ) else {
+        return;
+    };
+
+    let output = run_command(Command::new(&bin).args([
+        "--state-root",
+        root.path().to_str().expect("utf8 path"),
+        "status",
+    ]));
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("\"ok\": true"));
+    assert!(stdout.contains("\"uptime_secs\": 7"));
+    assert!(!stdout.contains("\"event\": \"inbound\""));
+
+    let command = server.join().expect("server thread");
+    assert_eq!(command["cmd"], "status");
 }
 
 #[test]
@@ -133,6 +186,29 @@ fn notify_text_override_sends_literal_string_payload() {
     assert_eq!(command["cmd"], "send");
     assert_eq!(command["kind"], "message");
     assert_eq!(command["payload"]["data"], "{\"x\":");
+}
+
+#[test]
+fn uppercase_agent_id_is_canonicalized_before_send() {
+    let bin = axon_bin();
+    let root = tempdir().expect("tempdir");
+    let Some(server) = require_socket_server(root.path(), json!({"ok": true, "msg_id": "x"}))
+    else {
+        return;
+    };
+
+    let output = run_command(Command::new(&bin).args([
+        "--state-root",
+        root.path().to_str().expect("utf8 path"),
+        "send",
+        VALID_AGENT_ID_UPPER,
+        "hello",
+    ]));
+    assert!(output.status.success());
+
+    let command = server.join().expect("server thread");
+    assert_eq!(command["cmd"], "send");
+    assert_eq!(command["to"], VALID_AGENT_ID);
 }
 
 #[test]

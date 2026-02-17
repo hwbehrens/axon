@@ -220,22 +220,19 @@ fn init_tracing() {
 }
 
 fn parse_agent_id_arg(input: &str) -> std::result::Result<String, String> {
-    if is_valid_agent_id(input) {
-        return Ok(input.to_string());
-    }
-    Err(format!(
-        "invalid agent_id '{input}'; expected format ed25519.<32 lowercase hex>"
-    ))
+    canonicalize_agent_id(input)
+        .ok_or_else(|| format!("invalid agent_id '{input}'; expected format ed25519.<32 hex>"))
 }
 
-fn is_valid_agent_id(input: &str) -> bool {
-    let Some(hex) = input.strip_prefix("ed25519.") else {
-        return false;
-    };
-    hex.len() == 32
-        && hex
-            .chars()
-            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+fn canonicalize_agent_id(input: &str) -> Option<String> {
+    let (prefix, hex) = input.split_once('.')?;
+    if !prefix.eq_ignore_ascii_case("ed25519") {
+        return None;
+    }
+    if hex.len() != 32 || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    Some(format!("ed25519.{}", hex.to_ascii_lowercase()))
 }
 
 fn parse_notify_payload(data: &str, force_text: bool) -> Result<Value> {
@@ -289,18 +286,25 @@ async fn send_ipc(paths: &AxonPaths, command: Value) -> Result<Value> {
         .context("failed to write IPC newline")?;
 
     let mut reader = BufReader::new(stream);
-    let mut response = String::new();
-    let bytes = reader
-        .read_line(&mut response)
-        .await
-        .context("failed to read IPC response")?;
-    if bytes == 0 {
-        return Err(anyhow::anyhow!(
-            "daemon closed connection without a response"
-        ));
-    }
+    loop {
+        let mut response = String::new();
+        let bytes = reader
+            .read_line(&mut response)
+            .await
+            .context("failed to read IPC response")?;
+        if bytes == 0 {
+            return Err(anyhow::anyhow!(
+                "daemon closed connection without a command response"
+            ));
+        }
 
-    serde_json::from_str(response.trim()).context("failed to decode IPC response")
+        let decoded: Value =
+            serde_json::from_str(response.trim()).context("failed to decode IPC response")?;
+        if decoded.get("event").and_then(Value::as_str) == Some("inbound") {
+            continue;
+        }
+        return Ok(decoded);
+    }
 }
 
 #[cfg(test)]
@@ -317,5 +321,12 @@ mod tests {
     fn daemon_reply_success_maps_to_exit_0() {
         let code = daemon_reply_exit_code(&json!({"ok": true}));
         assert_eq!(code, ExitCode::SUCCESS);
+    }
+
+    #[test]
+    fn parse_agent_id_arg_normalizes_case() {
+        let parsed = parse_agent_id_arg("ED25519.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
+            .expect("mixed/upper case should parse");
+        assert_eq!(parsed, "ed25519.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
     }
 }

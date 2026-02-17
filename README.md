@@ -146,8 +146,11 @@ axon --help
   - fallback order: CLI flag -> `AXON_ROOT` -> `~/.axon`
 - Exit codes:
   - `0`: success
-  - `1`: local/runtime failure (parse, I/O, daemon socket connect/decode)
-  - `2`: daemon/application-level failure reply (`"ok": false`)
+  - `1`: local/runtime failure after argument parsing (I/O, daemon socket connect/decode, etc.)
+  - `2`: CLI parse/usage failure (Clap) or daemon/application-level failure reply (`"ok": false`)
+- IPC inbound event delivery:
+  - connected clients receive inbound broadcast events
+  - per-client delivery uses bounded queues; lagging clients are disconnected instead of silently dropped
 
 ### Example interaction
 
@@ -207,7 +210,7 @@ These are compile-time constants and cannot be changed via configuration.
 | `IDLE_TIMEOUT` | `60s` | `daemon/mod.rs` | QUIC idle timeout. Connections with no traffic for this duration are closed. |
 | `INBOUND_READ_TIMEOUT` | `10s` | `daemon/mod.rs` | Maximum time to wait for data on an inbound QUIC stream. |
 | `MAX_IPC_CLIENTS` | `64` | `daemon/mod.rs` | Maximum simultaneous IPC client connections. |
-| `MAX_CLIENT_QUEUE` | `1024` | `daemon/mod.rs` | Per-IPC-client outbound message queue depth. |
+| `MAX_CLIENT_QUEUE` | `1024` | `daemon/mod.rs` | Per-IPC-client outbound message queue depth; overflow disconnects lagging clients. |
 | `RECONNECT_MAX_BACKOFF` | `30s` | `daemon/mod.rs` | Maximum backoff between reconnection attempts. Backoff starts at 1s and doubles. |
 | Save interval | `60s` | `daemon/mod.rs` | How often the daemon persists `known_peers.json` to disk. |
 | Stale cleanup interval | `5s` | `daemon/mod.rs` | How often the daemon checks for and removes stale discovered peers. |

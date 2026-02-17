@@ -106,7 +106,7 @@ impl Config {
         };
         let parsed = toml::from_str::<RawConfig>(&raw)
             .with_context(|| format!("failed to parse config: {}", path.display()))?;
-        Ok(parsed.resolve(path))
+        Ok(parsed.resolve(path).await)
     }
 
     pub fn effective_port(&self, cli_override: Option<u16>) -> u16 {
@@ -121,6 +121,20 @@ pub enum PeerAddr {
 }
 
 impl PeerAddr {
+    fn resolve_host(host: &str, port: u16) -> Result<SocketAddr> {
+        let addrs: Vec<SocketAddr> = (host, port)
+            .to_socket_addrs()
+            .with_context(|| format!("failed to resolve '{host}:{port}'"))?
+            .collect();
+        if let Some(addr) = addrs.iter().copied().find(SocketAddr::is_ipv4) {
+            return Ok(addr);
+        }
+        addrs
+            .into_iter()
+            .next()
+            .ok_or_else(|| anyhow!("resolution returned no addresses for '{host}:{port}'"))
+    }
+
     fn parse(input: &str) -> Result<Self> {
         if let Ok(addr) = input.parse::<SocketAddr>() {
             return Ok(Self::Socket(addr));
@@ -145,18 +159,24 @@ impl PeerAddr {
     pub fn resolve(&self) -> Result<SocketAddr> {
         match self {
             PeerAddr::Socket(addr) => Ok(*addr),
+            PeerAddr::Host { host, port } => Self::resolve_host(host, *port),
+        }
+    }
+
+    pub async fn resolve_for_config_load(&self) -> Result<SocketAddr> {
+        match self {
+            PeerAddr::Socket(addr) => Ok(*addr),
             PeerAddr::Host { host, port } => {
-                let addrs: Vec<SocketAddr> = (host.as_str(), *port)
-                    .to_socket_addrs()
-                    .with_context(|| format!("failed to resolve '{host}:{port}'"))?
-                    .collect();
-                if let Some(addr) = addrs.iter().copied().find(SocketAddr::is_ipv4) {
-                    return Ok(addr);
-                }
-                addrs
-                    .into_iter()
-                    .next()
-                    .ok_or_else(|| anyhow!("resolution returned no addresses for '{host}:{port}'"))
+                let host_for_lookup = host.clone();
+                let host_for_error = host.clone();
+                let port = *port;
+                tokio::task::spawn_blocking(move || Self::resolve_host(&host_for_lookup, port))
+                    .await
+                    .map_err(|err| {
+                        anyhow!(
+                            "hostname resolution task failed for '{host_for_error}:{port}': {err}"
+                        )
+                    })?
             }
         }
     }
@@ -210,12 +230,11 @@ struct RawConfig {
 }
 
 impl RawConfig {
-    fn resolve(self, path: &Path) -> Config {
-        let peers = self
-            .peers
-            .into_iter()
-            .filter_map(|peer| match peer.addr.resolve() {
-                Ok(addr) => Some(StaticPeerConfig {
+    async fn resolve(self, path: &Path) -> Config {
+        let mut peers = Vec::with_capacity(self.peers.len());
+        for peer in self.peers {
+            match peer.addr.resolve_for_config_load().await {
+                Ok(addr) => peers.push(StaticPeerConfig {
                     agent_id: peer.agent_id,
                     addr,
                     pubkey: peer.pubkey,
@@ -228,10 +247,9 @@ impl RawConfig {
                         config = %path.display(),
                         "skipping static peer with invalid or unresolved addr"
                     );
-                    None
                 }
-            })
-            .collect();
+            }
+        }
 
         Config {
             name: self.name,
