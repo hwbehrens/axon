@@ -96,7 +96,7 @@ async fn reconnect_after_peer_restart() {
     let peer_list2 = peers_resp2["peers"].as_array().expect("peers is array");
     let b_peer = peer_list2
         .iter()
-        .find(|p| p["id"].as_str() == Some(id_b.agent_id()))
+        .find(|p| p["agent_id"].as_str() == Some(id_b.agent_id()))
         .expect("daemon B not found in peers after restart");
     assert_eq!(
         b_peer["status"].as_str(),

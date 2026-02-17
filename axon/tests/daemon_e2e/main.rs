@@ -115,7 +115,7 @@ pub(crate) async fn wait_for_peer_connected(
         if let Ok(resp) = ipc_command(socket_path, json!({"cmd": "peers"})).await {
             if let Some(peers) = resp["peers"].as_array() {
                 if peers.iter().any(|p| {
-                    p["id"].as_str() == Some(peer_agent_id)
+                    p["agent_id"].as_str() == Some(peer_agent_id)
                         && p["status"].as_str() == Some("connected")
                 }) {
                     return true;

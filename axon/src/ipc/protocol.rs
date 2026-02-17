@@ -82,7 +82,7 @@ pub struct CommandEvent {
 /// Summary of a connected or known peer, returned by the `peers` command.
 #[derive(Debug, Clone, Serialize)]
 pub struct PeerSummary {
-    pub id: String,
+    pub agent_id: String,
     pub addr: String,
     pub status: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -110,7 +110,9 @@ pub struct WhoamiInfo {
 #[serde(rename_all = "snake_case")]
 pub enum IpcErrorCode {
     InvalidCommand,
+    CommandTooLarge,
     PeerNotFound,
+    SelfSend,
     PeerUnreachable,
     InternalError,
 }
@@ -119,7 +121,9 @@ impl std::fmt::Display for IpcErrorCode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             IpcErrorCode::InvalidCommand => write!(f, "invalid_command"),
+            IpcErrorCode::CommandTooLarge => write!(f, "command_too_large"),
             IpcErrorCode::PeerNotFound => write!(f, "peer_not_found"),
+            IpcErrorCode::SelfSend => write!(f, "self_send"),
             IpcErrorCode::PeerUnreachable => write!(f, "peer_unreachable"),
             IpcErrorCode::InternalError => write!(f, "internal_error"),
         }
@@ -133,7 +137,9 @@ impl IpcErrorCode {
             IpcErrorCode::InvalidCommand => {
                 "malformed command, unknown cmd, or invalid field value"
             }
+            IpcErrorCode::CommandTooLarge => "IPC command exceeds 64KB limit",
             IpcErrorCode::PeerNotFound => "target agent_id not in peer table",
+            IpcErrorCode::SelfSend => "cannot send messages to self",
             IpcErrorCode::PeerUnreachable => "peer known but connection failed or timed out",
             IpcErrorCode::InternalError => "unexpected daemon error",
         }

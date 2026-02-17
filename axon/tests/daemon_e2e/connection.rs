@@ -65,7 +65,7 @@ async fn wrong_pubkey_prevents_connection() {
     let peer_list = peers["peers"].as_array().unwrap();
     let b_entry = peer_list
         .iter()
-        .find(|p| p["id"].as_str() == Some(id_b.agent_id()));
+        .find(|p| p["agent_id"].as_str() == Some(id_b.agent_id()));
     if let Some(entry) = b_entry {
         assert_ne!(
             entry["status"].as_str(),

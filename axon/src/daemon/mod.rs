@@ -1,8 +1,10 @@
 pub(crate) mod command_handler;
+mod lockfile;
 mod peer_events;
 mod reconnect;
 
 use command_handler::{Counters, DaemonContext, handle_command};
+use lockfile::DaemonLock;
 use peer_events::handle_peer_event;
 use reconnect::{ReconnectState, attempt_reconnects, handle_reconnect_outcome, reconnect_channel};
 
@@ -56,6 +58,7 @@ pub async fn run_daemon(opts: DaemonOptions) -> Result<()> {
         None => AxonPaths::discover()?,
     };
     paths.ensure_root_exists()?;
+    let mut daemon_lock = DaemonLock::acquire(&paths.root)?;
 
     let config = Config::load(&paths.config).await?;
     let port = config.effective_port(opts.port);
@@ -77,6 +80,7 @@ pub async fn run_daemon(opts: DaemonOptions) -> Result<()> {
 
     // --- Cancellation token for structured shutdown ---
     let cancel = opts.cancel.unwrap_or_default();
+    spawn_shutdown_signal_task(cancel.clone());
 
     // --- Peer table ---
     let peer_table = PeerTable::new();
@@ -281,8 +285,57 @@ pub async fn run_daemon(opts: DaemonOptions) -> Result<()> {
     {
         warn!(error = %err, "failed to save known peers during shutdown");
     }
-    ipc.cleanup_socket()?;
+    let cleanup_socket_result = ipc.cleanup_socket();
+    if let Err(err) = daemon_lock.release() {
+        warn!(error = %err, "failed to remove daemon lock file during shutdown");
+    }
+    cleanup_socket_result?;
     info!("shutdown complete");
+
+    Ok(())
+}
+
+fn spawn_shutdown_signal_task(cancel: CancellationToken) {
+    tokio::spawn(async move {
+        if let Err(err) = wait_for_shutdown_signal(cancel).await {
+            warn!(error = %err, "failed to install shutdown signal handler");
+        }
+    });
+}
+
+#[cfg(unix)]
+async fn wait_for_shutdown_signal(cancel: CancellationToken) -> Result<()> {
+    use tokio::signal::unix::{SignalKind, signal};
+
+    let mut sigterm =
+        signal(SignalKind::terminate()).context("failed to install SIGTERM handler")?;
+    let mut sigint = signal(SignalKind::interrupt()).context("failed to install SIGINT handler")?;
+
+    tokio::select! {
+        _ = cancel.cancelled() => {}
+        _ = sigterm.recv() => {
+            info!("received SIGTERM, initiating graceful shutdown");
+            cancel.cancel();
+        }
+        _ = sigint.recv() => {
+            info!("received SIGINT, initiating graceful shutdown");
+            cancel.cancel();
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(not(unix))]
+async fn wait_for_shutdown_signal(cancel: CancellationToken) -> Result<()> {
+    tokio::select! {
+        _ = cancel.cancelled() => {}
+        result = tokio::signal::ctrl_c() => {
+            result.context("failed to install Ctrl-C handler")?;
+            info!("received Ctrl-C, initiating graceful shutdown");
+            cancel.cancel();
+        }
+    }
 
     Ok(())
 }

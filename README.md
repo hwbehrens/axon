@@ -135,6 +135,15 @@ axon whoami
 # Local identity (state root files, no daemon required)
 axon identity
 
+# Diagnose local state (read-only report)
+axon doctor
+
+# Apply safe local repairs
+axon doctor --fix
+
+# Allow identity regeneration if key material is unrecoverable
+axon doctor --fix --rekey
+
 # See all commands
 axon --help
 ```
@@ -151,6 +160,13 @@ axon --help
 - IPC inbound event delivery:
   - connected clients receive inbound broadcast events
   - per-client delivery uses bounded queues; lagging clients are disconnected instead of silently dropped
+- Global verbosity override:
+  - `--verbose` / `-v` sets default logging to `debug` (otherwise default is `info`)
+  - if `RUST_LOG` is explicitly set, it takes precedence over `--verbose`
+- Doctor command behavior:
+  - `axon doctor` runs local health checks and returns a JSON report (`checks`, `fixes_applied`, `ok`)
+  - `axon doctor --fix` applies safe local repairs; `--rekey` (requires `--fix`) allows identity reset when key data is unrecoverable
+  - returns exit code `2` when unresolved check failures remain (`ok: false`)
 
 ### Example interaction
 
@@ -204,7 +220,7 @@ These are compile-time constants and cannot be changed via configuration.
 | `MAX_MESSAGE_SIZE` | `65536` (64 KB) | `message/envelope.rs` | Maximum encoded envelope size. Messages exceeding this are rejected. |
 | `REQUEST_TIMEOUT` | `30s` | `transport/mod.rs` | Timeout for bidirectional request/response exchanges. |
 | `STALE_TIMEOUT` | `60s` | `peer_table.rs` | Discovered (non-static, non-cached) peers with no activity for this duration are removed. |
-| `MAX_IPC_LINE_LENGTH` | `64 KB` | `ipc/server.rs` | Maximum length of a single IPC command line. Overlong lines are rejected with `invalid_command`. |
+| `MAX_IPC_LINE_LENGTH` | `64 KB` | `ipc/server.rs` | Maximum length of a single IPC command line. Overlong lines are rejected with `command_too_large`. |
 | `MAX_CONNECTIONS` | `128` | `daemon/mod.rs` | Maximum simultaneous QUIC peer connections. |
 | `KEEPALIVE` | `15s` | `daemon/mod.rs` | QUIC keepalive interval. |
 | `IDLE_TIMEOUT` | `60s` | `daemon/mod.rs` | QUIC idle timeout. Connections with no traffic for this duration are closed. |
