@@ -33,6 +33,55 @@ async fn config_parses_static_peers() {
     assert_eq!(cfg.peers[0].addr.to_string(), "127.0.0.1:7100");
 }
 
+#[tokio::test]
+async fn config_parses_hostname_peer_addr() {
+    let dir = tempdir().expect("temp dir");
+    let path = dir.path().join("config.toml");
+    std::fs::write(
+        &path,
+        r#"
+                [[peers]]
+                agent_id = "ed25519.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                addr = "localhost:7100"
+                pubkey = "Zm9v"
+            "#,
+    )
+    .expect("write config");
+
+    let cfg = Config::load(&path).await.expect("load config");
+    assert_eq!(cfg.peers.len(), 1);
+    assert_eq!(cfg.peers[0].addr.port(), 7100);
+    assert!(cfg.peers[0].addr.ip().is_loopback());
+}
+
+#[tokio::test]
+async fn config_skips_unresolvable_or_invalid_peer_addr() {
+    let dir = tempdir().expect("temp dir");
+    let path = dir.path().join("config.toml");
+    std::fs::write(
+        &path,
+        r#"
+                [[peers]]
+                agent_id = "ed25519.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                addr = "127.0.0.1:7100"
+                pubkey = "Zm9v"
+
+                [[peers]]
+                agent_id = "ed25519.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                addr = "peer-does-not-exist.invalid:7100"
+                pubkey = "YmFy"
+            "#,
+    )
+    .expect("write config");
+
+    let cfg = Config::load(&path).await.expect("load config");
+    assert_eq!(cfg.peers.len(), 1);
+    assert_eq!(
+        cfg.peers[0].agent_id.as_str(),
+        "ed25519.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    );
+}
+
 #[test]
 fn cli_override_takes_precedence() {
     let cfg = Config {
@@ -109,6 +158,31 @@ fn discover_with_override_uses_override_root() {
     let paths = AxonPaths::discover_with_override(Some(root.as_path())).expect("discover");
     assert_eq!(paths.root, root);
     assert_eq!(paths.socket, PathBuf::from("/tmp/axon-override/axon.sock"));
+}
+
+#[test]
+fn peer_addr_parse_and_resolve_ipv4_socket() {
+    let addr = PeerAddr::parse("127.0.0.1:7100").expect("parse");
+    assert_eq!(
+        addr.resolve().expect("resolve"),
+        "127.0.0.1:7100".parse().expect("socket addr")
+    );
+}
+
+#[test]
+fn peer_addr_parse_hostname_with_port() {
+    let addr = PeerAddr::parse("localhost:7100").expect("parse");
+    let PeerAddr::Host { host, port } = addr else {
+        panic!("expected host variant");
+    };
+    assert_eq!(host, "localhost");
+    assert_eq!(port, 7100);
+}
+
+#[test]
+fn peer_addr_requires_port() {
+    let err = PeerAddr::parse("localhost").expect_err("missing port should fail");
+    assert!(err.to_string().contains("host:port"));
 }
 
 #[test]

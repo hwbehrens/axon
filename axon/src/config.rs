@@ -1,12 +1,13 @@
 use std::env;
 use std::fs;
 use std::io::ErrorKind;
-use std::net::SocketAddr;
+use std::net::{SocketAddr, ToSocketAddrs};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
+use tracing::warn;
 
 use crate::message::AgentId;
 
@@ -103,13 +104,91 @@ impl Config {
                     .with_context(|| format!("failed to read config: {}", path.display()));
             }
         };
-        let parsed = toml::from_str::<Self>(&raw)
+        let parsed = toml::from_str::<RawConfig>(&raw)
             .with_context(|| format!("failed to parse config: {}", path.display()))?;
-        Ok(parsed)
+        Ok(parsed.resolve(path))
     }
 
     pub fn effective_port(&self, cli_override: Option<u16>) -> u16 {
         cli_override.or(self.port).unwrap_or(7100)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PeerAddr {
+    Socket(SocketAddr),
+    Host { host: String, port: u16 },
+}
+
+impl PeerAddr {
+    fn parse(input: &str) -> Result<Self> {
+        if let Ok(addr) = input.parse::<SocketAddr>() {
+            return Ok(Self::Socket(addr));
+        }
+
+        let (host, port) = input
+            .rsplit_once(':')
+            .ok_or_else(|| anyhow!("expected host:port or ip:port"))?;
+        if host.is_empty() {
+            anyhow::bail!("host cannot be empty");
+        }
+
+        let port = port
+            .parse::<u16>()
+            .with_context(|| format!("invalid port '{port}'"))?;
+        Ok(Self::Host {
+            host: host.to_string(),
+            port,
+        })
+    }
+
+    pub fn resolve(&self) -> Result<SocketAddr> {
+        match self {
+            PeerAddr::Socket(addr) => Ok(*addr),
+            PeerAddr::Host { host, port } => {
+                let addrs: Vec<SocketAddr> = (host.as_str(), *port)
+                    .to_socket_addrs()
+                    .with_context(|| format!("failed to resolve '{host}:{port}'"))?
+                    .collect();
+                if let Some(addr) = addrs.iter().copied().find(SocketAddr::is_ipv4) {
+                    return Ok(addr);
+                }
+                addrs
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| anyhow!("resolution returned no addresses for '{host}:{port}'"))
+            }
+        }
+    }
+}
+
+impl std::fmt::Display for PeerAddr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PeerAddr::Socket(addr) => write!(f, "{addr}"),
+            PeerAddr::Host { host, port } => write!(f, "{host}:{port}"),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for PeerAddr {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        let raw = String::deserialize(deserializer)?;
+        Self::parse(&raw).map_err(serde::de::Error::custom)
+    }
+}
+
+impl Serialize for PeerAddr {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        match self {
+            PeerAddr::Socket(addr) => serializer.serialize_str(&addr.to_string()),
+            PeerAddr::Host { host, port } => serializer.serialize_str(&format!("{host}:{port}")),
+        }
     }
 }
 
@@ -118,6 +197,55 @@ pub struct StaticPeerConfig {
     pub agent_id: AgentId,
     pub addr: SocketAddr,
     pub pubkey: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+struct RawConfig {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    port: Option<u16>,
+    #[serde(default)]
+    peers: Vec<RawStaticPeerConfig>,
+}
+
+impl RawConfig {
+    fn resolve(self, path: &Path) -> Config {
+        let peers = self
+            .peers
+            .into_iter()
+            .filter_map(|peer| match peer.addr.resolve() {
+                Ok(addr) => Some(StaticPeerConfig {
+                    agent_id: peer.agent_id,
+                    addr,
+                    pubkey: peer.pubkey,
+                }),
+                Err(err) => {
+                    warn!(
+                        agent_id = %peer.agent_id,
+                        addr = %peer.addr,
+                        error = %err,
+                        config = %path.display(),
+                        "skipping static peer with invalid or unresolved addr"
+                    );
+                    None
+                }
+            })
+            .collect();
+
+        Config {
+            name: self.name,
+            port: self.port,
+            peers,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+struct RawStaticPeerConfig {
+    agent_id: AgentId,
+    addr: PeerAddr,
+    pubkey: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
