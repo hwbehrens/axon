@@ -178,6 +178,59 @@ async fn shutdown_during_reconnect_churn() {
     );
 }
 
+/// IPC remains responsive while reconnect loop is churning against
+/// an unreachable peer. Verifies that spawned reconnect tasks don't
+/// block the main event loop.
+#[tokio::test]
+
+async fn ipc_responsive_during_reconnect_churn() {
+    let dir = tempdir().unwrap();
+    let port = pick_free_port();
+
+    // Configure a peer that doesn't exist — reconnect loop will churn.
+    let peers = vec![StaticPeerConfig {
+        agent_id: "ed25519.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+        addr: "127.0.0.1:1".parse().unwrap(),
+        pubkey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==".to_string(),
+    }];
+    let daemon = spawn_daemon(dir.path(), port, peers);
+    assert!(wait_for_socket(&daemon.paths, Duration::from_secs(5)).await);
+
+    // Let the reconnect loop start churning.
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    // IPC commands should still respond promptly (< 2s) even though
+    // the reconnect loop is actively trying to connect to an unreachable peer.
+    let start = tokio::time::Instant::now();
+    let status = ipc_command(&daemon.paths.socket, json!({"cmd": "status"}))
+        .await
+        .expect("status command should succeed during reconnect churn");
+    let elapsed = start.elapsed();
+
+    assert_eq!(status["ok"], json!(true));
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "IPC should respond within 2s during reconnect churn, took {:?}",
+        elapsed
+    );
+
+    // Peers command should also respond promptly.
+    let start = tokio::time::Instant::now();
+    let peers_resp = ipc_command(&daemon.paths.socket, json!({"cmd": "peers"}))
+        .await
+        .expect("peers command should succeed during reconnect churn");
+    let elapsed = start.elapsed();
+
+    assert_eq!(peers_resp["ok"], json!(true));
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "peers should respond within 2s during reconnect churn, took {:?}",
+        elapsed
+    );
+
+    daemon.shutdown().await;
+}
+
 /// Shutdown while IPC clients are connected: daemon exits cleanly
 /// and the peer daemon remains functional.
 #[tokio::test]

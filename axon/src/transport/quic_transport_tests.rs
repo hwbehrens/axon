@@ -156,6 +156,115 @@ async fn send_notify_unidirectional() {
     assert_eq!(received.from.as_deref(), Some(id_a.agent_id()));
 }
 
+/// When both sides dial simultaneously, ensure_connection on both should
+/// succeed and messaging should work. The stable_id-based dedup in
+/// run_connection prevents a superseded loop from removing a live connection.
+#[tokio::test]
+async fn simultaneous_dial_both_sides_can_message() {
+    let (id_a, id_b, transport_a, transport_b, _, _, _dir_a, _dir_b) = make_transport_pair().await;
+    let addr_a = transport_a.local_addr().expect("local_addr a");
+    let addr_b = transport_b.local_addr().expect("local_addr b");
+
+    let peer_b = PeerRecord {
+        agent_id: id_b.agent_id().into(),
+        addr: addr_b,
+        pubkey: id_b.public_key_base64().to_string(),
+        source: crate::peer_table::PeerSource::Static,
+        status: crate::peer_table::ConnectionStatus::Discovered,
+        rtt_ms: None,
+        last_seen: std::time::Instant::now(),
+    };
+    let peer_a = PeerRecord {
+        agent_id: id_a.agent_id().into(),
+        addr: addr_a,
+        pubkey: id_a.public_key_base64().to_string(),
+        source: crate::peer_table::PeerSource::Static,
+        status: crate::peer_table::ConnectionStatus::Discovered,
+        rtt_ms: None,
+        last_seen: std::time::Instant::now(),
+    };
+
+    // Both sides dial simultaneously.
+    let (conn_a, conn_b) = tokio::join!(
+        transport_a.ensure_connection(&peer_b),
+        transport_b.ensure_connection(&peer_a),
+    );
+    conn_a.expect("A→B connect should succeed");
+    conn_b.expect("B→A connect should succeed");
+
+    // Both sides should have a connection entry.
+    assert!(transport_a.has_connection(id_b.agent_id()).await);
+    assert!(transport_b.has_connection(id_a.agent_id()).await);
+
+    // Messaging should work in both directions.
+    let mut rx_b = transport_b.subscribe_inbound();
+    let notify = Envelope::new(
+        id_a.agent_id().to_string(),
+        id_b.agent_id().to_string(),
+        MessageKind::Message,
+        json!({"test": "simultaneous"}),
+    );
+    transport_a
+        .send(&peer_b, notify)
+        .await
+        .expect("send A→B should work after simultaneous dial");
+
+    let received = tokio::time::timeout(Duration::from_secs(5), rx_b.recv())
+        .await
+        .expect("timeout")
+        .expect("recv");
+    assert_eq!(received.kind, MessageKind::Message);
+}
+
+/// After simultaneous dial, calling ensure_connection again should return
+/// the existing connection (idempotent, no accumulation).
+#[tokio::test]
+async fn ensure_connection_idempotent_after_simultaneous_dial() {
+    let (id_a, id_b, transport_a, transport_b, _, _, _dir_a, _dir_b) = make_transport_pair().await;
+    let addr_a = transport_a.local_addr().expect("local_addr a");
+    let addr_b = transport_b.local_addr().expect("local_addr b");
+
+    let peer_b = PeerRecord {
+        agent_id: id_b.agent_id().into(),
+        addr: addr_b,
+        pubkey: id_b.public_key_base64().to_string(),
+        source: crate::peer_table::PeerSource::Static,
+        status: crate::peer_table::ConnectionStatus::Discovered,
+        rtt_ms: None,
+        last_seen: std::time::Instant::now(),
+    };
+    let peer_a = PeerRecord {
+        agent_id: id_a.agent_id().into(),
+        addr: addr_a,
+        pubkey: id_a.public_key_base64().to_string(),
+        source: crate::peer_table::PeerSource::Static,
+        status: crate::peer_table::ConnectionStatus::Discovered,
+        rtt_ms: None,
+        last_seen: std::time::Instant::now(),
+    };
+
+    // Simultaneous dial.
+    let (_, _) = tokio::join!(
+        transport_a.ensure_connection(&peer_b),
+        transport_b.ensure_connection(&peer_a),
+    );
+
+    // A second ensure_connection should return the existing one, not open a third.
+    let conn1 = transport_a
+        .ensure_connection(&peer_b)
+        .await
+        .expect("re-ensure should succeed");
+    let conn2 = transport_a
+        .ensure_connection(&peer_b)
+        .await
+        .expect("re-ensure should succeed again");
+    assert_eq!(
+        conn1.stable_id(),
+        conn2.stable_id(),
+        "repeated ensure_connection should return the same connection"
+    );
+}
+
 #[tokio::test]
 async fn send_request_bidirectional_default_error() {
     let (id_a, id_b, transport_a, transport_b, _, _, _dir_a, _dir_b) = make_transport_pair().await;
