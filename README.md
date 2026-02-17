@@ -160,22 +160,8 @@ Located at `~/.axon/config.toml` (or `<axon_root>/config.toml`).
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
+| `name` | `String` | _(none)_ | Optional display name for this agent. |
 | `port` | `u16` | `7100` | QUIC listen port. CLI `--port` overrides this. |
-| `max_ipc_clients` | `usize` | `64` | Maximum simultaneous IPC client connections. |
-| `max_connections` | `usize` | `128` | Maximum simultaneous QUIC peer connections. |
-| `keepalive_secs` | `u64` | `15` | QUIC keepalive interval in seconds. |
-| `idle_timeout_secs` | `u64` | `60` | QUIC idle timeout in seconds. Connections with no traffic for this duration are closed. |
-| `reconnect_max_backoff_secs` | `u64` | `30` | Maximum backoff between reconnection attempts to unreachable peers. Backoff starts at 1s and doubles. |
-| `handshake_timeout_secs` | `u64` | `5` | Maximum time to wait for a hello handshake on a new inbound connection before closing it. |
-| `inbound_read_timeout_secs` | `u64` | `10` | Maximum time to wait for data on an inbound QUIC stream before timing out. |
-| `ipc.allow_v1` | `bool` | `true` | When `false`, reject IPC v1 (no-hello) connections and require v2+ handshake. |
-| `ipc.buffer_size` | `usize` | `1000` | Maximum number of messages in the IPC receive buffer. Set to `0` to disable buffering. |
-| `ipc.buffer_ttl_secs` | `u64` | `86400` | Time-to-live for buffered messages in seconds (default: 24 hours). Expired messages are evicted lazily. |
-| `ipc.buffer_byte_cap` | `usize` | `4194304` | Approximate byte cap on receive buffer memory (default: 4 MB). Uses envelope size estimates; actual usage may slightly exceed this under adversarial payloads. Oldest messages are evicted when exceeded. |
-| `ipc.max_client_queue` | `usize` | `1024` | Per-IPC-client outbound message queue depth. Messages are dropped if a client falls behind. |
-| `ipc.token_path` | `String` | `~/.axon/ipc-token` | Path to the IPC auth token file (used when peer credentials are unavailable). |
-
-> **⚠️ Hardened mode note:** The bundled CLI currently uses IPC v1 (no `hello` handshake). Setting `ipc.allow_v1 = false` will cause all CLI commands (`axon peers`, `axon send`, etc.) to be rejected with `hello_required`. Use raw IPC or a v2-capable client when hardened mode is enabled.
 
 #### Static peers
 
@@ -192,22 +178,22 @@ These are compile-time constants and cannot be changed via configuration.
 
 | Constant | Value | Location | Description |
 |----------|-------|----------|-------------|
-| `PROTOCOL_VERSION` | `1` | `message/envelope.rs` | Wire protocol version included in every envelope. |
-| `MAX_MESSAGE_SIZE` | `65536` (64 KB) | `message/wire.rs` | Maximum encoded envelope size. Messages exceeding this are rejected. |
-| `REQUEST_TIMEOUT` | `30s` | `transport/mod.rs` | Timeout for bidirectional request/response exchanges (query, delegate, etc.). |
+| `MAX_MESSAGE_SIZE` | `65536` (64 KB) | `message/envelope.rs` | Maximum encoded envelope size. Messages exceeding this are rejected. |
+| `REQUEST_TIMEOUT` | `30s` | `transport/mod.rs` | Timeout for bidirectional request/response exchanges. |
 | `STALE_TIMEOUT` | `60s` | `peer_table.rs` | Discovered (non-static, non-cached) peers with no activity for this duration are removed. |
 | `MAX_IPC_LINE_LENGTH` | `64 KB` | `ipc/server.rs` | Maximum length of a single IPC command line. Overlong lines are rejected with `invalid_command`. |
-| Replay cache TTL | `300s` (5 min) | `daemon/mod.rs` | Duration for which message UUIDs are remembered to detect replays. |
-| Replay cache max entries | `100,000` | `daemon/mod.rs` | Maximum replay cache size. Oldest entries are evicted when exceeded. |
+| `MAX_CONNECTIONS` | `128` | `daemon/mod.rs` | Maximum simultaneous QUIC peer connections. |
+| `KEEPALIVE` | `15s` | `daemon/mod.rs` | QUIC keepalive interval. |
+| `IDLE_TIMEOUT` | `60s` | `daemon/mod.rs` | QUIC idle timeout. Connections with no traffic for this duration are closed. |
+| `INBOUND_READ_TIMEOUT` | `10s` | `daemon/mod.rs` | Maximum time to wait for data on an inbound QUIC stream. |
+| `MAX_IPC_CLIENTS` | `64` | `daemon/mod.rs` | Maximum simultaneous IPC client connections. |
+| `MAX_CLIENT_QUEUE` | `1024` | `daemon/mod.rs` | Per-IPC-client outbound message queue depth. |
+| `RECONNECT_MAX_BACKOFF` | `30s` | `daemon/mod.rs` | Maximum backoff between reconnection attempts. Backoff starts at 1s and doubles. |
 | Save interval | `60s` | `daemon/mod.rs` | How often the daemon persists `known_peers.json` to disk. |
 | Stale cleanup interval | `5s` | `daemon/mod.rs` | How often the daemon checks for and removes stale discovered peers. |
 | Reconnect interval | `1s` | `daemon/mod.rs` | How often the daemon checks for peers needing reconnection. |
-| Initial reconnect backoff | `1s` | `daemon/reconnect.rs` | First reconnect attempt delay after a connection failure. Doubles up to `reconnect_max_backoff_secs`. |
+| Initial reconnect backoff | `1s` | `daemon/reconnect.rs` | First reconnect attempt delay after a connection failure. Doubles up to `RECONNECT_MAX_BACKOFF`. |
 | Initiator-rule wait | `2s` | `daemon/command_handler.rs` | When the higher-ID daemon sends a message, it waits this long for the lower-ID peer to initiate a connection. |
-| `IPC_VERSION` | `2` | `ipc/handlers/mod.rs` | Maximum IPC protocol version supported by the daemon. |
-| `MAX_CONSUMER_LEN` | `64` bytes | `ipc/handlers/mod.rs` | Maximum length of a consumer name in `hello`. |
-| `DEFAULT_BYTE_CAP` | `4194304` (4 MB) | `ipc/receive_buffer.rs` | Default approximate byte cap on receive buffer memory. |
-| Max consumers | `1024` | `ipc/receive_buffer.rs` | Maximum number of tracked consumer states before LRU eviction. |
 
 ## Documentation
 

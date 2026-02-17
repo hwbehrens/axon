@@ -12,6 +12,15 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
+// Hardcoded defaults (previously configurable; see Phase 9).
+const MAX_CONNECTIONS: usize = 128;
+const KEEPALIVE: Duration = Duration::from_secs(15);
+const IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+const INBOUND_READ_TIMEOUT: Duration = Duration::from_secs(10);
+const MAX_IPC_CLIENTS: usize = 64;
+const MAX_CLIENT_QUEUE: usize = 1024;
+const RECONNECT_MAX_BACKOFF: Duration = Duration::from_secs(30);
+
 use anyhow::{Context, Result};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -93,11 +102,11 @@ pub async fn run_daemon(opts: DaemonOptions) -> Result<()> {
         bind_addr,
         &identity,
         cancel.clone(),
-        config.effective_max_connections(),
-        config.effective_keepalive(),
-        config.effective_idle_timeout(),
+        MAX_CONNECTIONS,
+        KEEPALIVE,
+        IDLE_TIMEOUT,
         None,
-        config.effective_inbound_read_timeout(),
+        INBOUND_READ_TIMEOUT,
         peer_table.pubkey_map(),
     )
     .await?;
@@ -109,16 +118,12 @@ pub async fn run_daemon(opts: DaemonOptions) -> Result<()> {
         public_key: identity.public_key_base64().to_string(),
         name: config.name.clone(),
         version: env!("CARGO_PKG_VERSION").to_string(),
-        max_client_queue: config.effective_max_client_queue(),
+        max_client_queue: MAX_CLIENT_QUEUE,
         uptime_secs: Arc::new(move || start.elapsed().as_secs()),
     };
 
-    let (ipc, mut cmd_rx) = IpcServer::bind(
-        paths.socket.clone(),
-        config.effective_max_ipc_clients(),
-        ipc_config,
-    )
-    .await?;
+    let (ipc, mut cmd_rx) =
+        IpcServer::bind(paths.socket.clone(), MAX_IPC_CLIENTS, ipc_config).await?;
 
     // --- Inbound message forwarder (transport → IPC clients) ---
     let mut inbound_rx = transport.subscribe_inbound();
@@ -244,7 +249,7 @@ pub async fn run_daemon(opts: DaemonOptions) -> Result<()> {
                     &transport,
                     &local_agent_id,
                     &mut reconnect_map,
-                    config.effective_reconnect_max_backoff(),
+                    RECONNECT_MAX_BACKOFF,
                     &cancel,
                 ).await;
             }

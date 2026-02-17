@@ -31,28 +31,10 @@ async fn reconnect_after_peer_restart() {
         pubkey: id_a.public_key_base64().to_string(),
     }];
 
-    // Write configs with aggressive keepalive/idle timeouts so A detects B's
-    // disconnection within a few seconds instead of the default 60s idle timeout.
-    // We write configs manually (with peers included) and pass empty peers to
-    // spawn_daemon so it doesn't overwrite them with default timeouts.
-    for (dir, port, peers) in [
-        (dir_a.path(), port_a, &peers_for_a),
-        (dir_b.path(), port_b, &peers_for_b),
-    ] {
-        let config = axon::config::Config {
-            port: Some(port),
-            peers: peers.clone(),
-            keepalive_secs: Some(1),
-            idle_timeout_secs: Some(3),
-            ..Default::default()
-        };
-        let paths = AxonPaths::from_root(PathBuf::from(dir));
-        std::fs::write(&paths.config, toml::to_string_pretty(&config).unwrap()).unwrap();
-    }
-
-    // Start both daemons (empty peers vec so spawn_daemon doesn't overwrite our config).
-    let (cancel_a, paths_a, handle_a) = spawn_daemon(dir_a.path(), port_a, true, vec![], None);
-    let (cancel_b, paths_b, handle_b) = spawn_daemon(dir_b.path(), port_b, true, vec![], None);
+    // Start both daemons with static peer config.
+    let (cancel_a, paths_a, handle_a) = spawn_daemon(dir_a.path(), port_a, true, peers_for_a, None);
+    let (cancel_b, paths_b, handle_b) =
+        spawn_daemon(dir_b.path(), port_b, true, peers_for_b.clone(), None);
 
     assert!(
         wait_for_socket(&paths_a, Duration::from_secs(5)).await,
@@ -94,8 +76,9 @@ async fn reconnect_after_peer_restart() {
         "daemon A did not notice B disconnected"
     );
 
-    // Restart daemon B on the same port (config already on disk with fast timeouts).
-    let (cancel_b2, paths_b2, handle_b2) = spawn_daemon(dir_b.path(), port_b, true, vec![], None);
+    // Restart daemon B on the same port.
+    let (cancel_b2, paths_b2, handle_b2) =
+        spawn_daemon(dir_b.path(), port_b, true, peers_for_b, None);
     assert!(
         wait_for_socket(&paths_b2, Duration::from_secs(5)).await,
         "daemon B2 socket did not appear"
