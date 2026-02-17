@@ -7,7 +7,7 @@ use super::*;
 async fn graceful_shutdown_cleans_up() {
     let dir = tempdir().unwrap();
     let port = pick_free_port();
-    let (cancel, paths, handle) = spawn_daemon(dir.path(), port, true, vec![], None);
+    let (cancel, paths, handle) = spawn_daemon(dir.path(), port, true, vec![]);
 
     // Wait for daemon to be ready.
     assert!(
@@ -74,8 +74,8 @@ async fn both_sides_connect() {
         pubkey: id_a.public_key_base64().to_string(),
     }];
 
-    let (cancel_a, paths_a, handle_a) = spawn_daemon(dir_a.path(), port_a, true, peers_for_a, None);
-    let (cancel_b, paths_b, handle_b) = spawn_daemon(dir_b.path(), port_b, true, peers_for_b, None);
+    let (cancel_a, paths_a, handle_a) = spawn_daemon(dir_a.path(), port_a, true, peers_for_a);
+    let (cancel_b, paths_b, handle_b) = spawn_daemon(dir_b.path(), port_b, true, peers_for_b);
 
     assert!(
         wait_for_socket(&paths_a, Duration::from_secs(5)).await,
@@ -110,7 +110,7 @@ async fn both_sides_connect() {
 async fn send_to_unknown_peer_returns_error() {
     let dir = tempdir().unwrap();
     let port = pick_free_port();
-    let (cancel, paths, handle) = spawn_daemon(dir.path(), port, true, vec![], None);
+    let (cancel, paths, handle) = spawn_daemon(dir.path(), port, true, vec![]);
 
     assert!(wait_for_socket(&paths, Duration::from_secs(5)).await);
 
@@ -163,8 +163,8 @@ async fn peers_command_shows_connected_peer() {
         pubkey: id_a.public_key_base64().to_string(),
     }];
 
-    let (cancel_a, paths_a, handle_a) = spawn_daemon(dir_a.path(), port_a, true, peers_for_a, None);
-    let (cancel_b, paths_b, handle_b) = spawn_daemon(dir_b.path(), port_b, true, peers_for_b, None);
+    let (cancel_a, paths_a, handle_a) = spawn_daemon(dir_a.path(), port_a, true, peers_for_a);
+    let (cancel_b, paths_b, handle_b) = spawn_daemon(dir_b.path(), port_b, true, peers_for_b);
 
     assert!(wait_for_socket(&paths_a, Duration::from_secs(5)).await);
     assert!(wait_for_socket(&paths_b, Duration::from_secs(5)).await);

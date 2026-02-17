@@ -260,6 +260,20 @@ fn decode_rejects_oversized_input() {
 }
 
 #[test]
+fn wire_encode_omits_from_and_to() {
+    let env = Envelope::new(
+        agent_a(),
+        agent_b(),
+        MessageKind::Request,
+        json!({"question": "test?"}),
+    );
+    let encoded = env.wire_encode().unwrap();
+    let decoded: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
+    assert!(decoded.get("from").is_none());
+    assert!(decoded.get("to").is_none());
+}
+
+#[test]
 fn now_millis_is_plausible() {
     let ms = now_millis();
     assert!(ms > 1_577_836_800_000);

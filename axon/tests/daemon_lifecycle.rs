@@ -40,7 +40,6 @@ fn spawn_daemon(
     port: u16,
     disable_mdns: bool,
     peers: Vec<StaticPeerConfig>,
-    agent_id_override: Option<String>,
 ) -> (
     CancellationToken,
     AxonPaths,
@@ -65,7 +64,6 @@ fn spawn_daemon(
         port: Some(port),
         disable_mdns,
         axon_root: Some(PathBuf::from(dir)),
-        agent_id: agent_id_override,
         cancel: Some(cancel.clone()),
     };
 

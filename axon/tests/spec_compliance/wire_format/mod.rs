@@ -17,6 +17,22 @@ fn wire_format_is_raw_json() {
     assert_eq!(decoded["kind"], "request");
 }
 
+/// spec/WIRE_FORMAT.md envelope schema: `from`/`to` are daemon-local and not on
+/// QUIC wire payloads.
+#[test]
+fn wire_encoding_omits_from_and_to_fields() {
+    let env = Envelope::new(
+        agent_a(),
+        agent_b(),
+        MessageKind::Message,
+        json!({"topic": "t"}),
+    );
+    let encoded = env.wire_encode().unwrap();
+    let decoded: Value = serde_json::from_slice(&encoded).unwrap();
+    assert!(decoded.get("from").is_none());
+    assert!(decoded.get("to").is_none());
+}
+
 /// spec.md §3: max message size is 64KB.
 #[test]
 fn max_message_size_is_64kb() {

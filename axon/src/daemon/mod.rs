@@ -43,7 +43,6 @@ pub struct DaemonOptions {
     pub port: Option<u16>,
     pub disable_mdns: bool,
     pub axon_root: Option<PathBuf>,
-    pub agent_id: Option<String>,
     pub cancel: Option<CancellationToken>,
 }
 
@@ -62,10 +61,7 @@ pub async fn run_daemon(opts: DaemonOptions) -> Result<()> {
     let port = config.effective_port(opts.port);
 
     let identity = Identity::load_or_generate(&paths)?;
-    let local_agent_id: AgentId = opts
-        .agent_id
-        .map(AgentId::from)
-        .unwrap_or_else(|| AgentId::from(identity.agent_id()));
+    let local_agent_id: AgentId = AgentId::from(identity.agent_id());
 
     info!(agent_id = %local_agent_id, port, "starting AXON daemon");
 

@@ -32,9 +32,9 @@ async fn reconnect_after_peer_restart() {
     }];
 
     // Start both daemons with static peer config.
-    let (cancel_a, paths_a, handle_a) = spawn_daemon(dir_a.path(), port_a, true, peers_for_a, None);
+    let (cancel_a, paths_a, handle_a) = spawn_daemon(dir_a.path(), port_a, true, peers_for_a);
     let (cancel_b, paths_b, handle_b) =
-        spawn_daemon(dir_b.path(), port_b, true, peers_for_b.clone(), None);
+        spawn_daemon(dir_b.path(), port_b, true, peers_for_b.clone());
 
     assert!(
         wait_for_socket(&paths_a, Duration::from_secs(5)).await,
@@ -77,8 +77,7 @@ async fn reconnect_after_peer_restart() {
     );
 
     // Restart daemon B on the same port.
-    let (cancel_b2, paths_b2, handle_b2) =
-        spawn_daemon(dir_b.path(), port_b, true, peers_for_b, None);
+    let (cancel_b2, paths_b2, handle_b2) = spawn_daemon(dir_b.path(), port_b, true, peers_for_b);
     assert!(
         wait_for_socket(&paths_b2, Duration::from_secs(5)).await,
         "daemon B2 socket did not appear"
@@ -142,8 +141,8 @@ async fn ipc_send_delivers_message_e2e() {
         pubkey: id_a.public_key_base64().to_string(),
     }];
 
-    let (cancel_a, paths_a, handle_a) = spawn_daemon(dir_a.path(), port_a, true, peers_for_a, None);
-    let (cancel_b, paths_b, handle_b) = spawn_daemon(dir_b.path(), port_b, true, peers_for_b, None);
+    let (cancel_a, paths_a, handle_a) = spawn_daemon(dir_a.path(), port_a, true, peers_for_a);
+    let (cancel_b, paths_b, handle_b) = spawn_daemon(dir_b.path(), port_b, true, peers_for_b);
 
     assert!(wait_for_socket(&paths_a, Duration::from_secs(5)).await);
     assert!(wait_for_socket(&paths_b, Duration::from_secs(5)).await);
@@ -223,8 +222,8 @@ async fn status_counters_increment_after_send() {
         pubkey: id_a.public_key_base64().to_string(),
     }];
 
-    let (cancel_a, paths_a, handle_a) = spawn_daemon(dir_a.path(), port_a, true, peers_for_a, None);
-    let (cancel_b, paths_b, handle_b) = spawn_daemon(dir_b.path(), port_b, true, peers_for_b, None);
+    let (cancel_a, paths_a, handle_a) = spawn_daemon(dir_a.path(), port_a, true, peers_for_a);
+    let (cancel_b, paths_b, handle_b) = spawn_daemon(dir_b.path(), port_b, true, peers_for_b);
 
     assert!(wait_for_socket(&paths_a, Duration::from_secs(5)).await);
     assert!(wait_for_socket(&paths_b, Duration::from_secs(5)).await);
@@ -298,8 +297,8 @@ async fn notify_delivered_through_daemon_e2e() {
         pubkey: id_a.public_key_base64().to_string(),
     }];
 
-    let (cancel_a, paths_a, handle_a) = spawn_daemon(dir_a.path(), port_a, true, peers_for_a, None);
-    let (cancel_b, paths_b, handle_b) = spawn_daemon(dir_b.path(), port_b, true, peers_for_b, None);
+    let (cancel_a, paths_a, handle_a) = spawn_daemon(dir_a.path(), port_a, true, peers_for_a);
+    let (cancel_b, paths_b, handle_b) = spawn_daemon(dir_b.path(), port_b, true, peers_for_b);
 
     assert!(wait_for_socket(&paths_a, Duration::from_secs(5)).await);
     assert!(wait_for_socket(&paths_b, Duration::from_secs(5)).await);
@@ -371,9 +370,8 @@ async fn known_peers_persisted_after_connection() {
         pubkey: id_a.public_key_base64().to_string(),
     }];
 
-    let (cancel_a, paths_a, handle_a) = spawn_daemon(dir_a.path(), port_a, true, peers_for_a, None);
-    let (cancel_b, _paths_b, handle_b) =
-        spawn_daemon(dir_b.path(), port_b, true, peers_for_b, None);
+    let (cancel_a, paths_a, handle_a) = spawn_daemon(dir_a.path(), port_a, true, peers_for_a);
+    let (cancel_b, _paths_b, handle_b) = spawn_daemon(dir_b.path(), port_b, true, peers_for_b);
 
     assert!(wait_for_socket(&paths_a, Duration::from_secs(5)).await);
     assert!(

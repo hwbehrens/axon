@@ -35,9 +35,6 @@ enum Commands {
         /// Disable mDNS discovery (use static peers only).
         #[arg(long)]
         disable_mdns: bool,
-        /// Override the derived agent_id (for testing/aliasing).
-        #[arg(long)]
-        agent_id: Option<String>,
     },
     /// Send a request to another agent and wait for a response.
     Send { agent_id: String, message: String },
@@ -67,16 +64,11 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Daemon {
-            port,
-            disable_mdns,
-            agent_id,
-        } => {
+        Commands::Daemon { port, disable_mdns } => {
             run_daemon(DaemonOptions {
                 port,
                 disable_mdns,
                 axon_root: None,
-                agent_id,
                 cancel: None,
             })
             .await?;

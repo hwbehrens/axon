@@ -43,6 +43,46 @@ async fn connection_uni_message_delivered() {
     assert_eq!(received.from, Some(AgentId::from(id_a.agent_id())));
 }
 
+/// Invariant: receiver identity must come from TLS-authenticated peer,
+/// not wire-provided `from`/`to` fields.
+#[tokio::test]
+async fn connection_uni_spoofed_from_overwritten_by_tls_identity() {
+    let (id_a, _dir_a) = make_identity();
+    let (id_b, _dir_b) = make_identity();
+
+    let (transport_a, transport_b, _, _) = make_transport_pair(&id_a, &id_b).await;
+    let addr_b = transport_b.local_addr().unwrap();
+    let mut rx_b = transport_b.subscribe_inbound();
+    let peer_b = make_peer_record(&id_b, addr_b);
+
+    let conn = transport_a.ensure_connection(&peer_b).await.unwrap();
+    let spoofed = Envelope::new(
+        "ed25519.ffffffffffffffffffffffffffffffff".to_string(),
+        "ed25519.11111111111111111111111111111111".to_string(),
+        MessageKind::Message,
+        json!({"topic": "connection.spoof", "data": {"x": 1}}),
+    );
+    let spoofed_id = spoofed.id;
+    let raw_bytes = serde_json::to_vec(&spoofed).unwrap();
+
+    let mut send = conn.open_uni().await.unwrap();
+    send.write_all(&raw_bytes).await.unwrap();
+    send.finish().unwrap();
+
+    let received = loop {
+        let msg = tokio::time::timeout(Duration::from_secs(5), rx_b.recv())
+            .await
+            .expect("timeout waiting for spoofed message")
+            .expect("recv failed");
+        if msg.id == spoofed_id {
+            break msg;
+        }
+    };
+
+    assert_eq!(received.from, Some(AgentId::from(id_a.agent_id())));
+    assert_eq!(received.to, Some(AgentId::from(id_b.agent_id())));
+}
+
 /// Invariant: unknown message kind on bidi stream returns error.
 /// Exercises: handle_authenticated_bidi (unknown kind branch) over the wire.
 /// Sends raw bytes with a fabricated kind through a real QUIC bidi stream.

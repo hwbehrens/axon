@@ -11,7 +11,7 @@ use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
-use crate::message::{Envelope, MAX_MESSAGE_SIZE, MessageKind};
+use crate::message::{Envelope, MessageKind};
 
 use super::quic_transport::ResponseHandlerFn;
 use super::tls::{derive_agent_id_from_pubkey_bytes, extract_ed25519_pubkey_from_cert_der};
@@ -45,10 +45,9 @@ pub(crate) async fn send_unidirectional(
     connection: &quinn::Connection,
     envelope: Envelope,
 ) -> Result<()> {
-    let bytes = serde_json::to_vec(&envelope).context("failed to serialize envelope")?;
-    if bytes.len() > MAX_MESSAGE_SIZE_USIZE {
-        return Err(anyhow!("message exceeds max size {MAX_MESSAGE_SIZE} bytes"));
-    }
+    let bytes = envelope
+        .wire_encode()
+        .context("failed to serialize envelope for wire")?;
 
     let mut stream = connection
         .open_uni()
@@ -62,11 +61,11 @@ pub(crate) async fn send_unidirectional(
 pub(crate) async fn send_request(
     connection: &quinn::Connection,
     envelope: Envelope,
+    local_agent_id: &str,
 ) -> Result<Envelope> {
-    let bytes = serde_json::to_vec(&envelope).context("failed to serialize request")?;
-    if bytes.len() > MAX_MESSAGE_SIZE_USIZE {
-        return Err(anyhow!("message exceeds max size {MAX_MESSAGE_SIZE} bytes"));
-    }
+    let bytes = envelope
+        .wire_encode()
+        .context("failed to serialize request for wire")?;
 
     let (mut send, mut recv) = connection
         .open_bi()
@@ -78,11 +77,13 @@ pub(crate) async fn send_request(
     let response_bytes = timeout(REQUEST_TIMEOUT, read_framed(&mut recv))
         .await
         .context("request timed out after 30s")??;
-    let response = serde_json::from_slice::<Envelope>(&response_bytes)
+    let mut response = serde_json::from_slice::<Envelope>(&response_bytes)
         .context("failed to decode response envelope")?;
     response
         .validate()
         .context("response envelope failed validation")?;
+    let peer_id = derive_peer_id_from_connection(connection)?;
+    overwrite_authenticated_identity(&mut response, &peer_id, local_agent_id);
     Ok(response)
 }
 
@@ -130,6 +131,19 @@ pub(crate) fn extract_peer_pubkey_base64_from_connection(
     Ok(STANDARD.encode(key))
 }
 
+fn derive_peer_id_from_connection(connection: &quinn::Connection) -> Result<String> {
+    let peer_cert_pubkey_b64 = extract_peer_pubkey_base64_from_connection(connection)?;
+    let pubkey_bytes = STANDARD
+        .decode(&peer_cert_pubkey_b64)
+        .context("failed to decode peer cert public key from base64")?;
+    Ok(derive_agent_id_from_pubkey_bytes(&pubkey_bytes))
+}
+
+fn overwrite_authenticated_identity(envelope: &mut Envelope, peer_id: &str, local_agent_id: &str) {
+    envelope.from = Some(peer_id.into());
+    envelope.to = Some(local_agent_id.into());
+}
+
 // ---------------------------------------------------------------------------
 // Connection context — shared state for stream handlers
 // ---------------------------------------------------------------------------
@@ -150,7 +164,8 @@ struct ConnectionContext {
 async fn handle_uni_stream(ctx: &ConnectionContext, peer_id: &str, mut recv: quinn::RecvStream) {
     match timeout(ctx.inbound_read_timeout, read_framed(&mut recv)).await {
         Ok(Ok(bytes)) => match serde_json::from_slice::<Envelope>(&bytes) {
-            Ok(envelope) => {
+            Ok(mut envelope) => {
+                overwrite_authenticated_identity(&mut envelope, peer_id, &ctx.local_agent_id);
                 if envelope.kind == MessageKind::Unknown {
                     debug!("dropping unknown kind on uni stream");
                 } else if envelope.kind.expects_response() {
@@ -237,7 +252,7 @@ async fn handle_bidi_stream(
     send: quinn::SendStream,
     mut recv: quinn::RecvStream,
 ) {
-    let request = match timeout(ctx.inbound_read_timeout, read_framed(&mut recv)).await {
+    let mut request = match timeout(ctx.inbound_read_timeout, read_framed(&mut recv)).await {
         Ok(Ok(bytes)) => match serde_json::from_slice::<Envelope>(&bytes) {
             Ok(r) => r,
             Err(err) => {
@@ -255,6 +270,7 @@ async fn handle_bidi_stream(
         }
     };
 
+    overwrite_authenticated_identity(&mut request, peer_id, &ctx.local_agent_id);
     handle_authenticated_bidi(ctx, request, send).await;
 }
 
@@ -263,7 +279,7 @@ async fn handle_bidi_stream(
 // ---------------------------------------------------------------------------
 
 async fn send_response(send: &mut quinn::SendStream, response: &Envelope) {
-    if let Ok(response_bytes) = serde_json::to_vec(response)
+    if let Ok(response_bytes) = response.wire_encode()
         && write_framed(send, &response_bytes).await.is_ok()
     {
         let _ = send.finish();
@@ -283,22 +299,13 @@ pub(crate) async fn run_connection(
     response_handler: Option<ResponseHandlerFn>,
     inbound_read_timeout: Duration,
 ) {
-    let peer_cert_pubkey_b64 = match extract_peer_pubkey_base64_from_connection(&connection) {
-        Ok(pubkey) => pubkey,
+    let peer_id = match derive_peer_id_from_connection(&connection) {
+        Ok(peer_id) => peer_id,
         Err(err) => {
-            warn!(error = %err, "failed to extract peer cert public key");
+            warn!(error = %err, "failed to derive peer id from TLS identity");
             return;
         }
     };
-
-    let pubkey_bytes = match STANDARD.decode(&peer_cert_pubkey_b64) {
-        Ok(bytes) => bytes,
-        Err(err) => {
-            warn!(error = %err, "failed to decode peer cert public key from base64");
-            return;
-        }
-    };
-    let peer_id = derive_agent_id_from_pubkey_bytes(&pubkey_bytes);
 
     let ctx = ConnectionContext {
         connection: connection.clone(),

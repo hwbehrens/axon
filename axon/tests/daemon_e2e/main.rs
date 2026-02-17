@@ -49,7 +49,6 @@ pub(crate) fn spawn_daemon_with_config(
     dir: &std::path::Path,
     port: u16,
     config: Config,
-    agent_id_override: Option<String>,
 ) -> DaemonHandle {
     let cancel = CancellationToken::new();
     let paths = AxonPaths::from_root(PathBuf::from(dir));
@@ -62,7 +61,6 @@ pub(crate) fn spawn_daemon_with_config(
         port: Some(port),
         disable_mdns: true,
         axon_root: Some(PathBuf::from(dir)),
-        agent_id: agent_id_override,
         cancel: Some(cancel.clone()),
     };
 
@@ -87,7 +85,6 @@ pub(crate) fn spawn_daemon(
             peers,
             ..Default::default()
         },
-        None,
     )
 }
 

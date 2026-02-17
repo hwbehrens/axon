@@ -219,6 +219,17 @@ impl Envelope {
         }
         Ok(())
     }
+
+    /// Serialize for QUIC wire transport.
+    ///
+    /// The wire format carries only `id`, `kind`, `payload`, and optional
+    /// `ref`; daemon-local routing fields (`from`, `to`) are stripped.
+    pub fn wire_encode(&self) -> Result<Vec<u8>> {
+        let mut wire = self.clone();
+        wire.from = None;
+        wire.to = None;
+        encode(&wire)
+    }
 }
 
 pub const MAX_MESSAGE_SIZE: u32 = 65536;

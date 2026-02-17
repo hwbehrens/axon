@@ -155,7 +155,8 @@ impl QuicTransport {
         let connection = self.ensure_connection(peer).await?;
 
         if envelope.kind.expects_response() {
-            let response = send_request(&connection, envelope).await?;
+            let response =
+                send_request(&connection, envelope, self.local_agent_id.as_str()).await?;
             Ok(Some(response))
         } else {
             send_unidirectional(&connection, envelope).await?;
