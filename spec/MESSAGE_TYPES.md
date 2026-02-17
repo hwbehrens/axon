@@ -1,254 +1,53 @@
-# AXON Message Types — v2 (Revised)
+# AXON Message Types
 
-_Feb 14, 2026. Incorporates feedback. Personal details scrubbed for eventual public release._
+_Feb 16, 2026. Simplified architecture: 4 message kinds, opaque payloads, no handshake._
 
 ## Message Kinds
 
-### Core Types
+AXON defines four message kinds plus a forward-compatibility sentinel:
 
-| Kind | Expects Response? | Stream Type | Purpose |
-|------|-------------------|-------------|---------|
-| `hello` | ← `hello` | Bidirectional | Version negotiation + identity exchange (first message on any new connection) |
-| `ping` | ← `pong` | Bidirectional | Liveness check |
-| `query` | ← `response` | Bidirectional | Ask a question |
-| `delegate` | ← `ack`, then optionally ← `result` | Bidir (ack), then Unidir (result) | Assign a task |
-| `notify` | No | Unidirectional | Informational, fire-and-forget |
-| `cancel` | ← `ack` | Bidirectional | Cancel a previous delegation |
-| `discover` | ← `capabilities` | Bidirectional | What can you do? |
+| Kind | Stream Type | Expects Response? | Purpose |
+|------|-------------|-------------------|---------|
+| `request` | Bidirectional | ← `response` or `error` | Ask a peer to do something; caller blocks waiting |
+| `response` | Bidirectional (reply) | — | Reply to a `request` |
+| `message` | Unidirectional | No | Fire-and-forget notification |
+| `error` | Bidirectional (reply) or Unidirectional | No | Failure reply to a `request`, or unsolicited error |
 
-### Response Types
+### Forward Compatibility: `unknown`
 
-| Kind | Purpose |
-|------|---------|
-| `hello` | Version negotiation response |
-| `pong` | Heartbeat response with status |
-| `response` | Answer to a query |
-| `ack` | Acknowledgment (delegation/cancel received) |
-| `result` | Async task completion report |
-| `capabilities` | Response to discover |
-| `error` | Failure response to any request |
+The `MessageKind` enum uses `#[serde(other)]` to deserialize any unrecognized kind string as `Unknown`. This allows older implementations to receive messages with kinds defined in future protocol versions without failing to parse. Unknown-kind messages received on a bidirectional stream receive a default error response (see §Default Error Response).
 
 ---
 
-## Version Negotiation: `hello`
+## Envelope (Wire Format)
 
-**Every new QUIC connection begins with a `hello` exchange.** No other messages may be sent until `hello` completes.
-
-The initiating peer opens a bidirectional stream and sends:
-```json
-{
-  "v": 1,
-  "id": "uuid",
-  "from": "agent-id",
-  "to": "agent-id",
-  "ts": 1771108000000,
-  "kind": "hello",
-  "ref": null,
-  "payload": {
-    "protocol_versions": [1],
-    "agent_name": "optional display name",
-    "features": ["delegate", "discover"]
-  }
-}
-```
-
-The receiver responds on the same stream:
-```json
-{
-  "v": 1,
-  "id": "uuid",
-  "from": "agent-id",
-  "to": "agent-id",
-  "ts": 1771108000001,
-  "kind": "hello",
-  "ref": "original-hello-id",
-  "payload": {
-    "protocol_versions": [1],
-    "selected_version": 1,
-    "agent_name": "optional display name",
-    "features": ["delegate", "discover", "cancel"]
-  }
-}
-```
-
-- `protocol_versions`: array of supported protocol versions (ascending).
-- `selected_version`: highest mutually supported version. If no overlap → `error` with code `incompatible_version`.
-- `features`: optional list of supported message kinds beyond the required set (`ping`, `query`, `notify`, `error`). Allows graceful degradation — if a peer doesn't advertise `delegate`, don't send delegations.
-
-**Required kinds** (must be supported by all versions): `hello`, `ping`, `pong`, `query`, `response`, `notify`, `error`.
-
-**Optional kinds** (advertised in features): `delegate`, `ack`, `result`, `cancel`, `discover`, `capabilities`.
-
----
-
-## Envelope (all messages)
+Every QUIC message is a JSON object with exactly these fields:
 
 ```json
 {
-  "v": 1,
   "id": "uuid-v4",
-  "from": "agent-id-hex",
-  "to": "agent-id-hex",
-  "ts": 1771108000000,
-  "kind": "<message kind>",
-  "ref": "<referenced message id, or null>",
-  "payload": { ... }
+  "kind": "request",
+  "payload": { ... },
+  "ref": "uuid-v4"
 }
 ```
 
-- `v`: protocol version (negotiated via hello).
-- `id`: unique message identifier (UUID v4).
-- `from` / `to`: typed agent IDs (e.g. `ed25519.` + first 16 bytes of SHA-256 of public key, hex, 40 chars total).
-- `ts`: unix milliseconds.
-- `kind`: message type string.
-- `ref`: the message ID this responds to. Null for initiating messages.
-- `payload`: kind-specific data. Unknown fields MUST be ignored (forward compatibility).
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `id` | string | Yes | UUID v4 message identifier. Must be non-nil. |
+| `kind` | string | Yes | One of `request`, `response`, `message`, `error`. |
+| `payload` | object | Yes | Opaque JSON object. Application-defined. |
+| `ref` | string | Conditional | Referenced message ID. Present on `response` and `error` replies. Links to the original `request`'s `id`. |
 
----
+**Not on the wire:** `from`, `to`, `v`, `ts`. The daemon populates `from` and `to` from the authenticated QUIC connection identity before forwarding to IPC clients.
 
-## Payload Schemas
+### `ref` field handling
 
-### ping
-```json
-{ }
-```
-
-### pong
-```json
-{
-  "status": "idle|busy|overloaded",
-  "uptime_secs": 3600,
-  "active_tasks": 2,
-  "agent_name": "display name"
-}
-```
-
-### query
-```json
-{
-  "question": "What events are on the family calendar this week?",
-  "domain": "family.calendar",
-  "max_tokens": 200,
-  "deadline_ms": 30000
-}
-```
-- `question`: natural language or structured query.
-- `domain`: dot-separated topic hint. Optional. Helps receiver scope its answer.
-- `max_tokens`: numeric budget for the response. 0 = no limit. Receiver should treat as a guideline.
-- `deadline_ms`: how long sender waits before timing out. Optional, default 30000.
-
-### response
-```json
-{
-  "data": { "events": [ ... ] },
-  "summary": "Three swim practices this week: Mon/Wed/Fri 4-5pm",
-  "tokens_used": 47,
-  "truncated": false
-}
-```
-- `data`: structured response (any JSON value).
-- `summary`: human-readable one-liner. Always present.
-- `tokens_used`: budget consumed. Informational.
-- `truncated`: whether response was cut short due to max_tokens.
-
-### delegate
-```json
-{
-  "task": "Send a message to the family group chat about dinner plans",
-  "context": {
-    "dinner_time": "7:00 PM",
-    "location": "home"
-  },
-  "priority": "normal|urgent",
-  "report_back": true,
-  "deadline_ms": 60000
-}
-```
-- `task`: natural language task description.
-- `context`: structured data the receiver needs. Arbitrary JSON object. Optional.
-- `priority`: `normal` or `urgent`. Default `normal`.
-- `report_back`: should receiver send a `result` when done? Default true. If false, delegate is fire-and-forget after ack.
-- `deadline_ms`: task should be attempted within this window. Optional.
-
-### ack
-```json
-{
-  "accepted": true,
-  "estimated_ms": 5000
-}
-```
-- `accepted`: will the receiver attempt the task? False = refused.
-- `estimated_ms`: rough completion estimate. Optional.
-
-### result
-```json
-{
-  "status": "completed|failed|partial",
-  "outcome": "Message sent to the group chat. Got a thumbs-up reaction.",
-  "data": { ... },
-  "error": null
-}
-```
-- `status`: completion state.
-- `outcome`: natural language summary.
-- `data`: structured result. Optional.
-- `error`: error message if failed. Null on success.
-
-Note: `result` does NOT include the original task description. The sender correlates via `ref`.
-
-### notify
-```json
-{
-  "topic": "user.location",
-  "data": {
-    "status": "heading out",
-    "eta_back": "2h"
-  },
-  "importance": "low|medium|high"
-}
-```
-- `topic`: dot-separated topic string.
-- `data`: arbitrary payload.
-- `importance`: hint. `low` = background, `high` = act on this. Default `low`.
-
-No subscription mechanism in v0.2. Senders push; receivers filter.
-
-### cancel
-```json
-{
-  "reason": "Plans changed, no longer needed"
-}
-```
-`ref` field in envelope points to the delegation being cancelled. Best-effort.
-
-### discover
-```json
-{ }
-```
-
-### capabilities
-```json
-{
-  "agent_name": "Family Assistant",
-  "domains": ["family", "calendar", "groceries", "school"],
-  "channels": ["imessage", "apple-reminders"],
-  "tools": ["web_search", "calendar_cli"],
-  "max_concurrent_tasks": 4,
-  "model": "gemini-3-pro"
-}
-```
-All fields optional. Agents share what they choose.
-
-### error
-```json
-{
-  "code": "not_authorized|unknown_domain|overloaded|internal|timeout|cancelled|incompatible_version|unknown_kind|peer_not_found|invalid_envelope",
-  "message": "Human-readable explanation of what went wrong and what to try instead",
-  "retryable": false
-}
-```
-
-Error messages SHOULD be instructive. Not just "permission denied" but "I don't have access to work calendars. Try querying the work agent (agent ID a1b2...) instead."
+- When there is no reference, senders **SHOULD** omit the field entirely (not serialize `"ref": null`).
+- Receivers **MUST** accept all of:
+  - `"ref"` absent from the JSON object
+  - `"ref": null`
+  - `"ref": "<uuid>"`
 
 ---
 
@@ -256,21 +55,88 @@ Error messages SHOULD be instructive. Not just "permission denied" but "I don't 
 
 | Pattern | Stream | Rationale |
 |---------|--------|-----------|
-| hello ↔ hello | Bidirectional | Must complete before anything else |
-| ping ↔ pong | Bidirectional | Fast round-trip |
-| query ↔ response/error | Bidirectional | Caller blocks waiting |
-| delegate ↔ ack/error | Bidirectional | Caller blocks for ack only |
-| result | Unidirectional | Async, may arrive much later |
-| notify | Unidirectional | Fire and forget |
-| cancel ↔ ack/error | Bidirectional | Confirm cancellation |
-| discover ↔ capabilities/error | Bidirectional | Round-trip |
-| unsolicited error | Unidirectional | Connection-level issues |
+| `request` ↔ `response` or `error` | Bidirectional | Caller blocks waiting for reply |
+| `message` | Unidirectional | Fire and forget |
+| `error` (unsolicited) | Unidirectional | Connection-level or protocol-level issues |
+
+### Rules
+
+- **One message per stream.** Each AXON message is sent on a fresh QUIC stream. The sender writes the JSON body then finishes the send side (FIN).
+- **Bidirectional streams** carry a single `request` from the initiator side, followed by a single `response` or `error` from the receiver side.
+- **Unidirectional streams** carry a single `message` or unsolicited `error`. No reply is possible.
+- **No hello gating.** There is no handshake exchange. Messages may be sent as soon as the QUIC/TLS connection is established and the peer's identity is verified via mTLS.
 
 ---
 
-## Domain Conventions
+## Default Error Response
 
-Domains are dot-separated, conventional (not enforced). Suggested starting taxonomy:
+When a `request` arrives on a bidirectional stream and no application handler is registered (or the handler declines to respond), the daemon returns a default error:
+
+```json
+{
+  "id": "uuid-v4",
+  "kind": "error",
+  "ref": "<original request id>",
+  "payload": {
+    "code": "unhandled",
+    "message": "no application handler registered for request '<request-id>'",
+    "retryable": false
+  }
+}
+```
+
+This ensures that every bidirectional request receives a reply, even if no application logic is wired up.
+
+---
+
+## Payloads
+
+**Payloads are opaque JSON objects.** The AXON protocol does not define payload schemas — applications define their own conventions. The protocol treats `payload` as an arbitrary JSON object and passes it through without inspection.
+
+This means:
+
+- The protocol layer never validates payload contents beyond ensuring it is valid JSON.
+- Applications are free to define whatever payload structure they need.
+- Different agents can use different payload conventions as long as they agree amongst themselves.
+- Unknown fields in payloads **MUST** be ignored (forward compatibility).
+
+### Error Payloads
+
+Error payloads **SHOULD** follow this conventional shape:
+
+```json
+{
+  "code": "<machine-readable-code>",
+  "message": "Human-readable explanation",
+  "retryable": false
+}
+```
+
+The `code` field is a snake\_case string. Applications may define their own error codes. The protocol itself uses:
+
+| Code | Meaning |
+|------|---------|
+| `unhandled` | No handler registered for the request |
+
+Error messages **SHOULD** be instructive — not just "failed" but an explanation of what went wrong and what the caller might try instead.
+
+---
+
+## Domain Conventions (Non-Normative)
+
+Since payloads are opaque, applications may adopt domain conventions to organize interactions. A common pattern is to include a `domain` field in request payloads:
+
+```json
+{
+  "kind": "request",
+  "payload": {
+    "domain": "family.calendar",
+    "question": "What events are on the calendar this week?"
+  }
+}
+```
+
+Domains are dot-separated strings, conventional (not enforced by the protocol). Suggested starting taxonomy:
 
 ```
 family.*          — household, family life
@@ -301,16 +167,14 @@ AXON must be usable by any LLM agent with NO pre-existing training on the protoc
 
 1. **Self-describing CLI.** `axon --help` and `axon <command> --help` must be clear enough that an LLM reading the output can use the tool correctly. Use full English words, not abbreviations.
 
-2. **Connection bootstrap is automatic.** When two daemons connect over QUIC, they exchange `hello` messages automatically — the agent does not need to initiate this. The `hello` handshake negotiates protocol version and advertises supported features. No other messages can be sent until `hello` completes.
+2. **Connection bootstrap is automatic.** When two daemons discover each other (via mDNS or static config), they connect over QUIC with mutual TLS. No handshake or version negotiation is needed — the connection is ready for application messages immediately.
 
-3. **`axon discover` is the first agent action.** After the daemon has connected and completed `hello`, the agent's first action should be `axon discover <agent>` to learn what a peer can do. The `capabilities` response gives the agent a complete map of that peer's domains, tools, and capacity.
+3. **Only four kinds.** `request`, `response`, `message`, `error`. An agent can learn the entire protocol in seconds. Requests get responses. Messages are fire-and-forget. Errors report failures.
 
-4. **Instructive errors.** Error messages should explain what went wrong AND suggest what to do instead. "Unknown domain 'work.calendar'. This agent handles: family, calendar, groceries. Try querying agent b3c4... for work domains."
+4. **Instructive errors.** Error messages should explain what went wrong AND suggest what to do instead. Not just "failed" but "no handler registered for this request — the peer may not support this domain."
 
-5. **`axon examples` command.** Prints a complete annotated example interaction (hello → discover → query → response). LLMs learn from examples faster than from specifications.
+5. **`axon examples` command.** Prints annotated example interactions (`request` → `response`, fire-and-forget `message`). LLMs learn from examples faster than from specifications.
 
-6. **Semantic field names.** `question` not `q`. `report_back` not `rb`. `max_tokens` not `mt`. LLMs infer meaning from names.
+6. **Semantic field names.** `payload` not `p`. `kind` not `k`. LLMs infer meaning from names.
 
-7. **OpenClaw SKILL.md.** When installed as a skill, the description and SKILL.md teach the agent the patterns: "You can talk to other agents using AXON. Start with `axon peers` to see who's available, then `axon discover <agent>` to learn what they can do."
-
-8. **Consistent patterns.** Every request that expects a response uses the same pattern: send on bidir stream, read response. Every fire-and-forget uses unidir. No exceptions, no special cases.
+7. **Consistent patterns.** Every request that expects a response uses the same pattern: send `request` on a bidi stream, read `response` or `error`. Every fire-and-forget uses `message` on a uni stream. No exceptions, no special cases.

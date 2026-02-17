@@ -33,8 +33,8 @@ AXON is purpose-built for agents talking to agents. It's structured, authenticat
 ## Design Principles
 
 1. **Context-budget-aware** — Every message costs tokens. The protocol minimizes unnecessary context consumption.
-2. **Structured-first** — No natural language overhead. Payloads are typed, schema'd, and machine-parseable.
-3. **Resumable** — Agents restart frequently. AXON handles reconnection, deduplication, and state recovery automatically.
+2. **Structured-first** — No natural language overhead. Payloads are JSON, machine-parseable.
+3. **Resumable** — Agents restart frequently. AXON handles reconnection and peer rediscovery automatically.
 4. **Minimal round-trips** — Prefer rich single exchanges over chatty back-and-forth.
 5. **Zero-trust locally** — Agents authenticate even on LAN. Different agents have different access levels.
 
@@ -48,8 +48,8 @@ Each machine runs a lightweight daemon (<5 MB RSS, negligible CPU when idle). Ag
 
 - **Identity** — Ed25519 keypair generated on first run. Agent ID derived from the public key. Self-signed X.509 cert for QUIC/TLS 1.3.
 - **Discovery** — mDNS on LAN (zero-config) or static peers in `config.toml` for VPN/Tailscale setups.
-- **Transport** — QUIC with TLS 1.3, forward secrecy, and 0-RTT reconnection.
-- **Security** — Mutual peer pinning, hello-first handshake gating, replay protection with UUID deduplication.
+- **Transport** — QUIC with TLS 1.3 and forward secrecy.
+- **Security** — Mutual TLS peer pinning — unknown peers rejected at the transport layer.
 
 ## Quickstart
 
@@ -113,17 +113,17 @@ axon daemon --disable-mdns
 ### Send messages
 
 ```sh
-# Query another agent
+# Send a request to another agent (bidirectional, waits for response)
 axon send <agent_id> "What is the capital of France?"
 
-# Delegate a task
-axon delegate <agent_id> "Summarize today's news"
+# Fire-and-forget notification (unidirectional)
+axon notify <agent_id> '{"state":"ready"}'
 
-# Fire-and-forget notification
-axon notify <agent_id> meta.status '{"state":"ready"}'
+# List peers
+axon peers
 
-# Discover capabilities
-axon discover <agent_id>
+# Daemon status
+axon status
 
 # See all commands
 axon --help
@@ -132,21 +132,17 @@ axon --help
 ### Example interaction
 
 ```sh
-axon examples    # prints a full annotated hello → discover → query → delegate flow
+axon examples    # prints a full annotated example interaction
 ```
 
 ## Message Types
 
 | Kind | Stream | Purpose |
 |------|--------|---------|
-| `hello` | Bidirectional | Identity exchange + version negotiation |
-| `ping` / `pong` | Bidirectional | Liveness check |
-| `query` → `response` | Bidirectional | Ask a question, get an answer |
-| `delegate` → `ack` → `result` | Bidir + Unidir | Assign a task, track completion |
-| `notify` | Unidirectional | Fire-and-forget information |
-| `cancel` → `ack` | Bidirectional | Cancel a pending delegation |
-| `discover` → `capabilities` | Bidirectional | Capability negotiation |
-| `error` | Bidir or Unidir | Error response or unsolicited error |
+| `request` | Bidirectional | Send a request, get a `response` or `error` |
+| `response` | Bidirectional | Reply to a request |
+| `message` | Unidirectional | Fire-and-forget |
+| `error` | Bidirectional or Unidirectional | Error reply or unsolicited error |
 
 See [`spec/MESSAGE_TYPES.md`](./spec/MESSAGE_TYPES.md) for full payload schemas and [`spec/WIRE_FORMAT.md`](./spec/WIRE_FORMAT.md) for the normative wire format.
 
@@ -193,7 +189,6 @@ These are compile-time constants and cannot be changed via configuration.
 | Stale cleanup interval | `5s` | `daemon/mod.rs` | How often the daemon checks for and removes stale discovered peers. |
 | Reconnect interval | `1s` | `daemon/mod.rs` | How often the daemon checks for peers needing reconnection. |
 | Initial reconnect backoff | `1s` | `daemon/reconnect.rs` | First reconnect attempt delay after a connection failure. Doubles up to `RECONNECT_MAX_BACKOFF`. |
-| Initiator-rule wait | `2s` | `daemon/command_handler.rs` | When the higher-ID daemon sends a message, it waits this long for the lower-ID peer to initiate a connection. |
 
 ## Documentation
 
@@ -202,7 +197,7 @@ These are compile-time constants and cannot be changed via configuration.
 | [`spec/SPEC.md`](./spec/SPEC.md) | Protocol architecture — QUIC, Ed25519, discovery, lifecycle |
 | [`spec/MESSAGE_TYPES.md`](./spec/MESSAGE_TYPES.md) | All message kinds, payload schemas, stream mapping |
 | [`spec/WIRE_FORMAT.md`](./spec/WIRE_FORMAT.md) | Normative wire format for interoperable implementations |
-| [`spec/IPC.md`](./spec/IPC.md) | IPC protocol — Unix socket commands, auth, receive buffer |
+| [`spec/IPC.md`](./spec/IPC.md) | IPC protocol — Unix socket commands |
 | [`CONTRIBUTING.md`](./CONTRIBUTING.md) | Development guide, module map, testing requirements |
 | [`rubrics/`](./rubrics/) | Evaluation rubrics — quality, documentation, alignment |
 | [`SECURITY.md`](./SECURITY.md) | Security policy and vulnerability reporting |

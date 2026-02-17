@@ -11,32 +11,31 @@ Working implementation. The Rust crate in `axon/` includes the daemon, CLI, IPC,
 ```
 README.md                  Project overview, quickstart, docs index
 AGENTS.md                  This file (LLM agent onboarding/orientation)
-CONTRIBUTING.md            Contribution workflow, full module map, invariants, detailed testing requirements
+CONTRIBUTING.md            Contribution workflow, full module map, invariants, testing requirements
 LICENSE
 
 spec/                      Protocol specifications (authoritative)
-  SPEC.md                  Architecture + lifecycle (QUIC, identity, discovery, handshake)
-  MESSAGE_TYPES.md         Message kinds + payload schemas + stream mapping
+  SPEC.md                  Architecture + lifecycle (QUIC, identity, discovery, transport)
+  MESSAGE_TYPES.md         Message kinds (4) + stream mapping
   WIRE_FORMAT.md           Normative interoperable wire format
-  IPC.md                   IPC protocol, Unix socket commands, auth, receive buffer
+  IPC.md                   IPC protocol, Unix socket commands
 
 rubrics/                   Evaluation rubrics (quality, documentation, alignment)
-evaluations/               Agent evaluation results (not part of the implementation)
 
 axon/                      Rust implementation (Cargo crate)
   Cargo.toml               Dependencies and package metadata (Rust 2024 edition)
-  Makefile                 Canonical build/test/verify entrypoints (preferred over raw cargo commands)
+  Makefile                 Canonical build/test/verify entrypoints
   src/                     Implementation
-    main.rs                CLI entrypoint (also hosts subcommands)
+    main.rs                CLI entrypoint (subcommands: daemon, send, notify, peers, status, identity, examples)
     lib.rs                 Crate root
-    daemon/                Daemon orchestration, lifecycle, reconnect, replay cache
-    discovery.rs           mDNS + static peer discovery
+    daemon/                Daemon orchestration, lifecycle, reconnect
+    discovery.rs           mDNS + static peer discovery (plain async functions)
     identity.rs            Ed25519 identity + agent_id derivation
-    config.rs              TOML config parsing + precedence rules
+    config.rs              TOML config parsing (name, port, peers)
     ipc/                   Unix socket IPC protocol + server
-    message/               Message kinds, envelopes, payloads, wire encoding
-    transport/             QUIC/TLS, handshake, framing, connections
-    peer_table.rs          Peer storage, pinning, cleanup
+    message/               MessageKind (4 variants), Envelope, encode/decode
+    transport/             QUIC/TLS, connections, framing
+    peer_table.rs          Peer storage, pinning, shared PubkeyMap
   tests/                   Integration, spec compliance, adversarial, e2e tests
   benches/                 Criterion benchmarks
   fuzz/                    cargo-fuzz harness + fuzz_targets/
@@ -50,23 +49,23 @@ Client (OpenClaw/CLI) ←→ [Unix Socket IPC] ←→ AXON Daemon ←→ [QUIC/U
 ```
 
 - **Identity**: Ed25519 signing keypair. Agent ID derived from SHA-256 of public key. Self-signed X.509 cert generated on each startup for QUIC TLS.
-- **Discovery**: mDNS (`_axon._udp.local.`) broadcasts agent ID and public key. Static peers via config file for Tailscale/VPN. Discovery is trait-based for future extensibility.
-- **Transport**: QUIC via `quinn`. TLS 1.3 with forward secrecy. Unidirectional streams for fire-and-forget messages, bidirectional streams for request/response. 0-RTT reconnection.
-- **IPC**: Unix domain socket at `~/.axon/axon.sock`. Line-delimited JSON. IPC v1: `send`, `peers`, `status` with legacy broadcast. IPC v2: `hello` handshake, token/peer-credential auth, `req_id` correlation, `whoami`, `inbox`, `ack`, `subscribe`. v1 clients receive all inbound (broadcast); v2 clients receive nothing unsolicited unless subscribed.
-- **Messages**: JSON envelopes with version, UUID, sender/receiver, timestamp, kind, and payload. Kinds: `hello`, `ping/pong`, `query/response`, `delegate/ack/result`, `notify`, `cancel`, `discover/capabilities`, `error`.
+- **Discovery**: mDNS (`_axon._udp.local.`) broadcasts agent ID and public key. Static peers via config file for Tailscale/VPN. Plain async functions.
+- **Transport**: QUIC via `quinn`. TLS 1.3 with forward secrecy. Unidirectional streams for fire-and-forget messages, bidirectional streams for request/response.
+- **IPC**: Unix domain socket at `~/.axon/axon.sock`. Line-delimited JSON. 4 commands: `send`, `peers`, `status`, `whoami`. All connected IPC clients receive all inbound messages via broadcast.
+- **Messages**: JSON envelopes with UUID, kind, payload, and optional ref. 4 kinds: `request`, `response`, `message`, `error`.
 
 ## Module Map (summary)
 
 Use this to navigate quickly; for the full "change → file(s)" table, see `CONTRIBUTING.md`.
 
 - **Daemon lifecycle / reconnection**: `axon/src/daemon/`
-- **Discovery (mDNS + static peers)**: `axon/src/discovery.rs`
-- **Transport (QUIC/TLS/handshake/framing)**: `axon/src/transport/`
-- **Message model + wire encoding**: `axon/src/message/`
+- **Discovery (mDNS + static peers, plain functions)**: `axon/src/discovery.rs`
+- **Transport (QUIC/TLS/connections/framing)**: `axon/src/transport/`
+- **Message kinds + envelopes + encode/decode**: `axon/src/message/`
 - **IPC protocol + server**: `axon/src/ipc/`
 - **Identity + agent_id derivation**: `axon/src/identity.rs`
 - **Config parsing**: `axon/src/config.rs`
-- **Peer table + pinning + replay/dedupe**: `axon/src/peer_table.rs`
+- **Peer table + pinning**: `axon/src/peer_table.rs`
 - **CLI**: `axon/src/main.rs`
 
 ## Key Invariants (summary)
@@ -74,12 +73,8 @@ Use this to navigate quickly; for the full "change → file(s)" table, see `CONT
 These are load-bearing. Do not change behavior without updating spec + tests. Full list: `CONTRIBUTING.md`.
 
 - **Configuration reference**: when adding or changing a configurable setting (in `Config` / `config.toml`) or an internal constant (timeout, limit, interval, etc.), update the Configuration Reference tables in `README.md`.
-
-- **Hello must be first**: no application messages until QUIC connection completes the `hello` handshake.
 - **Agent ID = SHA-256(pubkey)**: peer identity must match TLS certificate/public key; reject mismatches.
-- **Peer pinning**: unknown peers must not be accepted at TLS/transport; expected peers must be set before connect.
-- **Single-connection rule**: deterministic initiator selection (lower `agent_id` initiates) prevents duplicate links.
-- **Replay protection**: inbound message UUIDs are tracked; duplicates are dropped within TTL.
+- **Peer pinning**: unknown peers must not be accepted at TLS/transport; peers must be in the PeerTable's shared PubkeyMap before connection.
 
 ## Building & Verification
 
@@ -125,8 +120,8 @@ Detailed requirements and recipes live in `CONTRIBUTING.md`. Key conventions:
 
 ## Specs to Read First
 
-1. `spec/SPEC.md` — architecture + lifecycle (identity, discovery, transport, handshake)
-2. `spec/MESSAGE_TYPES.md` — message kinds, payload schemas, stream mapping
+1. `spec/SPEC.md` — architecture + lifecycle (identity, discovery, transport)
+2. `spec/MESSAGE_TYPES.md` — message kinds (4), stream mapping
 3. `spec/WIRE_FORMAT.md` — normative interoperable wire format
-4. `spec/IPC.md` — IPC protocol, Unix socket commands, auth, receive buffer
+4. `spec/IPC.md` — IPC protocol, Unix socket commands
 5. `CONTRIBUTING.md` — contribution workflow, full module map, invariants, testing requirements
