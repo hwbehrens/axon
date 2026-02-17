@@ -4,7 +4,7 @@ use crate::*;
 // §8 IPC framing boundary conditions
 // =========================================================================
 
-/// >64KiB line must produce invalid_command error and close the connection.
+/// >64KiB line must produce command_too_large error and close the connection.
 /// This verifies the MAX_IPC_LINE_LENGTH enforcement in server.rs.
 #[tokio::test]
 async fn ipc_overlong_line_rejects_and_closes() {
@@ -34,6 +34,10 @@ async fn ipc_overlong_line_rejects_and_closes() {
             assert!(
                 line.contains("\"ok\":false"),
                 "overlong line should get error reply, got: {line}"
+            );
+            assert!(
+                line.contains("command_too_large"),
+                "overlong line should surface command_too_large, got: {line}"
             );
         }
 

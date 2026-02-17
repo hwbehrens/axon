@@ -203,6 +203,10 @@ axon [--state-root <dir>] identity
 axon [--state-root <dir>] whoami
     Query daemon identity and metadata over IPC.
 
+axon [--state-root <dir>] doctor [--fix] [--rekey]
+    Diagnose local AXON state (identity, config, IPC socket).
+    Defaults to check mode. `--fix` applies safe repairs, and `--rekey` regenerates identity material when paired with `--fix`.
+
 axon [--state-root <dir>] examples
     Print example usage.
 
@@ -213,7 +217,7 @@ axon -V
 
 CLI execution contracts:
 - `send`/`notify`/`peers`/`status`/`whoami` use IPC and print daemon JSON responses.
-- `identity` is local and does not use IPC.
+- `identity` and `doctor` are local and do not use IPC.
 - Exit code `0`: success.
 - Exit code `1`: local/runtime failure after argument parsing (I/O, socket connect, decode).
 - Exit code `2`: CLI parse/usage failure (Clap) or daemon/application-level failure (`{"ok":false}` reply).

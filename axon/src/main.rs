@@ -15,6 +15,7 @@ use axon::daemon::{DaemonOptions, run_daemon};
 use axon::identity::Identity;
 
 mod cli_examples;
+mod doctor;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -33,6 +34,10 @@ struct Cli {
         value_name = "DIR"
     )]
     state_root: Option<PathBuf>,
+
+    /// Enable debug-level logging when RUST_LOG is unset.
+    #[arg(long, short = 'v', global = true)]
+    verbose: bool,
 
     #[command(subcommand)]
     command: Commands,
@@ -68,9 +73,15 @@ enum Commands {
     /// Show daemon status.
     Status,
     /// Print this agent's identity.
-    Identity,
+    Identity {
+        /// Print a ready-to-copy static peer TOML snippet for this identity.
+        #[arg(long)]
+        peer_config: bool,
+    },
     /// Print running daemon identity and metadata via IPC.
     Whoami,
+    /// Diagnose local AXON state and optionally apply safe repairs.
+    Doctor(doctor::DoctorArgs),
     /// Print example interactions.
     Examples,
     /// Generate shell completions and man page (internal, for packaging).
@@ -85,8 +96,9 @@ enum Commands {
 
 #[tokio::main]
 async fn main() -> ExitCode {
-    init_tracing();
-    match run().await {
+    let cli = Cli::parse();
+    init_tracing(cli.verbose);
+    match run(cli).await {
         Ok(code) => code,
         Err(err) => {
             eprintln!("Error: {err:#}");
@@ -95,11 +107,12 @@ async fn main() -> ExitCode {
     }
 }
 
-async fn run() -> Result<ExitCode> {
+async fn run(cli: Cli) -> Result<ExitCode> {
     let Cli {
         state_root,
+        verbose: _,
         command,
-    } = Cli::parse();
+    } = cli;
     let resolve_paths = || AxonPaths::discover_with_override(state_root.as_deref());
 
     match command {
@@ -148,22 +161,40 @@ async fn run() -> Result<ExitCode> {
             let response = send_ipc(&paths, json!({"cmd": "status"})).await?;
             return print_ipc_response_and_classify(response);
         }
-        Commands::Identity => {
+        Commands::Identity { peer_config } => {
             let paths = resolve_paths()?;
             let identity = Identity::load_or_generate(&paths)?;
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&json!({
-                    "agent_id": identity.agent_id(),
-                    "public_key": identity.public_key_base64(),
-                }))
-                .context("failed to encode identity output")?
-            );
+            if peer_config {
+                println!(
+                    "{}",
+                    peer_config_snippet(identity.agent_id(), identity.public_key_base64())
+                );
+            } else {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&json!({
+                        "agent_id": identity.agent_id(),
+                        "public_key": identity.public_key_base64(),
+                    }))
+                    .context("failed to encode identity output")?
+                );
+            }
         }
         Commands::Whoami => {
             let paths = resolve_paths()?;
             let response = send_ipc(&paths, json!({"cmd": "whoami"})).await?;
             return print_ipc_response_and_classify(response);
+        }
+        Commands::Doctor(args) => {
+            let paths = resolve_paths()?;
+            let report = doctor::run(&paths, &args).await?;
+            let rendered =
+                serde_json::to_string_pretty(&report).context("failed to encode doctor output")?;
+            println!("{rendered}");
+            if report.ok {
+                return Ok(ExitCode::SUCCESS);
+            }
+            return Ok(ExitCode::from(2));
         }
         #[cfg(feature = "generate-docs")]
         Commands::GenDocs { out_dir } => {
@@ -214,8 +245,9 @@ fn generate_docs(out_dir: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
-fn init_tracing() {
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+fn init_tracing(verbose: bool) {
+    let default = if verbose { "debug" } else { "info" };
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default));
     let _ = tracing_subscriber::fmt().with_env_filter(filter).try_init();
 }
 
@@ -253,6 +285,12 @@ fn parse_notify_payload(data: &str, force_text: bool) -> Result<Value> {
     }
 }
 
+fn peer_config_snippet(agent_id: &str, public_key: &str) -> String {
+    format!(
+        "[[peers]]\nagent_id = \"{agent_id}\"\npubkey = \"{public_key}\"\naddr = \"<this-machine>:7100\""
+    )
+}
+
 fn daemon_reply_exit_code(response: &Value) -> ExitCode {
     if response.get("ok") == Some(&json!(false)) {
         return ExitCode::from(2);
@@ -287,9 +325,9 @@ async fn send_ipc(paths: &AxonPaths, command: Value) -> Result<Value> {
 
     let mut reader = BufReader::new(stream);
     loop {
-        let mut response = String::new();
+        let mut response = Vec::new();
         let bytes = reader
-            .read_line(&mut response)
+            .read_until(b'\n', &mut response)
             .await
             .context("failed to read IPC response")?;
         if bytes == 0 {
@@ -298,8 +336,17 @@ async fn send_ipc(paths: &AxonPaths, command: Value) -> Result<Value> {
             ));
         }
 
-        let decoded: Value =
-            serde_json::from_str(response.trim()).context("failed to decode IPC response")?;
+        if response.last() == Some(&b'\n') {
+            response.pop();
+        }
+        let line = std::str::from_utf8(&response)
+            .context("failed to decode IPC response as UTF-8")?
+            .trim();
+        if line.is_empty() {
+            continue;
+        }
+
+        let decoded: Value = serde_json::from_str(line).context("failed to decode IPC response")?;
         if decoded.get("event").and_then(Value::as_str) == Some("inbound") {
             continue;
         }
@@ -310,6 +357,7 @@ async fn send_ipc(paths: &AxonPaths, command: Value) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::error::ErrorKind;
 
     #[test]
     fn daemon_reply_failure_maps_to_exit_2() {
@@ -328,5 +376,36 @@ mod tests {
         let parsed = parse_agent_id_arg("ED25519.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
             .expect("mixed/upper case should parse");
         assert_eq!(parsed, "ed25519.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    }
+
+    #[test]
+    fn cli_verbose_flag_parses_short_and_long() {
+        let long = Cli::try_parse_from(["axon", "--verbose", "status"]).expect("parse --verbose");
+        assert!(long.verbose);
+        assert!(matches!(long.command, Commands::Status));
+
+        let short = Cli::try_parse_from(["axon", "-v", "status"]).expect("parse -v");
+        assert!(short.verbose);
+        assert!(matches!(short.command, Commands::Status));
+
+        let default = Cli::try_parse_from(["axon", "status"]).expect("parse without verbose");
+        assert!(!default.verbose);
+        assert!(matches!(default.command, Commands::Status));
+    }
+
+    #[test]
+    fn doctor_rekey_requires_fix_flag() {
+        let err = Cli::try_parse_from(["axon", "doctor", "--rekey"])
+            .expect_err("--rekey without --fix should fail");
+        assert_eq!(err.kind(), ErrorKind::MissingRequiredArgument);
+    }
+
+    #[test]
+    fn peer_config_snippet_has_expected_toml_shape() {
+        let snippet = peer_config_snippet("ed25519.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "Zm9vYmFy");
+        assert_eq!(
+            snippet,
+            "[[peers]]\nagent_id = \"ed25519.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"\npubkey = \"Zm9vYmFy\"\naddr = \"<this-machine>:7100\""
+        );
     }
 }
