@@ -19,6 +19,10 @@ pub type PubkeyMap = Arc<StdRwLock<HashMap<String, String>>>;
 
 pub const STALE_TIMEOUT: Duration = Duration::from_secs(60);
 
+fn canonical_agent_id(agent_id: &str) -> AgentId {
+    AgentId::from(agent_id.to_ascii_lowercase())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PeerSource {
@@ -49,8 +53,9 @@ pub struct PeerRecord {
 
 impl PeerRecord {
     pub fn from_static(cfg: &StaticPeerConfig) -> Self {
+        let agent_id = canonical_agent_id(cfg.agent_id.as_str());
         Self {
-            agent_id: cfg.agent_id.clone(),
+            agent_id,
             addr: cfg.addr,
             pubkey: cfg.pubkey.clone(),
             source: PeerSource::Static,
@@ -61,8 +66,9 @@ impl PeerRecord {
     }
 
     pub fn from_cached(peer: &KnownPeer) -> Self {
+        let agent_id = canonical_agent_id(peer.agent_id.as_str());
         Self {
-            agent_id: peer.agent_id.clone(),
+            agent_id,
             addr: peer.addr,
             pubkey: peer.pubkey.clone(),
             source: PeerSource::Cached,
@@ -115,6 +121,7 @@ impl PeerTable {
     }
 
     pub async fn upsert_discovered(&self, agent_id: AgentId, addr: SocketAddr, pubkey: String) {
+        let agent_id = canonical_agent_id(agent_id.as_str());
         let mut table = self.inner.write().await;
         table
             .entry(agent_id.clone())
@@ -140,35 +147,39 @@ impl PeerTable {
     }
 
     pub async fn upsert_static(&self, cfg: &StaticPeerConfig) {
+        let agent_id = canonical_agent_id(cfg.agent_id.as_str());
         let mut table = self.inner.write().await;
-        table.insert(cfg.agent_id.clone(), PeerRecord::from_static(cfg));
+        table.insert(agent_id.clone(), PeerRecord::from_static(cfg));
         let mut map = self.pubkeys_write_guard("upsert_static");
-        map.insert(cfg.agent_id.to_string(), cfg.pubkey.clone());
+        map.insert(agent_id.to_string(), cfg.pubkey.clone());
     }
 
     pub async fn upsert_cached(&self, peer: &KnownPeer) {
+        let agent_id = canonical_agent_id(peer.agent_id.as_str());
         let mut table = self.inner.write().await;
         let inserted = table
-            .entry(peer.agent_id.clone())
+            .entry(agent_id.clone())
             .or_insert_with(|| PeerRecord::from_cached(peer));
         let mut map = self.pubkeys_write_guard("upsert_cached");
-        map.entry(peer.agent_id.to_string())
+        map.entry(agent_id.to_string())
             .or_insert_with(|| inserted.pubkey.clone());
     }
 
     pub async fn remove(&self, agent_id: &str) -> Option<PeerRecord> {
+        let agent_id = canonical_agent_id(agent_id);
         let mut table = self.inner.write().await;
-        let removed = table.remove(agent_id);
+        let removed = table.remove(agent_id.as_str());
         if removed.is_some() {
             let mut map = self.pubkeys_write_guard("remove");
-            map.remove(agent_id);
+            map.remove(agent_id.as_str());
         }
         removed
     }
 
     pub async fn get(&self, agent_id: &str) -> Option<PeerRecord> {
+        let agent_id = canonical_agent_id(agent_id);
         let table = self.inner.read().await;
-        table.get(agent_id).cloned()
+        table.get(agent_id.as_str()).cloned()
     }
 
     pub async fn list(&self) -> Vec<PeerRecord> {
@@ -179,38 +190,43 @@ impl PeerTable {
     }
 
     pub async fn set_status(&self, agent_id: &str, status: ConnectionStatus) {
+        let agent_id = canonical_agent_id(agent_id);
         let mut table = self.inner.write().await;
-        if let Some(peer) = table.get_mut(agent_id) {
+        if let Some(peer) = table.get_mut(agent_id.as_str()) {
             peer.status = status;
         }
     }
 
     pub async fn set_connected(&self, agent_id: &str, rtt_ms: Option<f64>) {
+        let agent_id = canonical_agent_id(agent_id);
         let mut table = self.inner.write().await;
-        if let Some(peer) = table.get_mut(agent_id) {
+        if let Some(peer) = table.get_mut(agent_id.as_str()) {
             peer.status = ConnectionStatus::Connected;
             peer.rtt_ms = rtt_ms;
         }
     }
 
     pub async fn set_disconnected(&self, agent_id: &str) {
+        let agent_id = canonical_agent_id(agent_id);
         let mut table = self.inner.write().await;
-        if let Some(peer) = table.get_mut(agent_id) {
+        if let Some(peer) = table.get_mut(agent_id.as_str()) {
             peer.status = ConnectionStatus::Disconnected;
             peer.rtt_ms = None;
         }
     }
 
     pub async fn set_rtt(&self, agent_id: &str, rtt_ms: f64) {
+        let agent_id = canonical_agent_id(agent_id);
         let mut table = self.inner.write().await;
-        if let Some(peer) = table.get_mut(agent_id) {
+        if let Some(peer) = table.get_mut(agent_id.as_str()) {
             peer.rtt_ms = Some(rtt_ms);
         }
     }
 
     pub async fn touch(&self, agent_id: &str) {
+        let agent_id = canonical_agent_id(agent_id);
         let mut table = self.inner.write().await;
-        if let Some(peer) = table.get_mut(agent_id) {
+        if let Some(peer) = table.get_mut(agent_id.as_str()) {
             peer.last_seen = Instant::now();
         }
     }

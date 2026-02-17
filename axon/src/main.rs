@@ -1,14 +1,13 @@
 use std::path::PathBuf;
-use std::time::Duration;
+use std::process::ExitCode;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 #[cfg(feature = "generate-docs")]
 use clap::CommandFactory;
 use clap::{Parser, Subcommand};
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
-use tokio::time::{Instant, timeout};
 use tracing_subscriber::EnvFilter;
 
 use axon::config::AxonPaths;
@@ -18,8 +17,23 @@ use axon::identity::Identity;
 mod cli_examples;
 
 #[derive(Debug, Parser)]
-#[command(name = "axon", about = "AXON — Agent eXchange Over Network")]
+#[command(
+    name = "axon",
+    about = "AXON — Agent eXchange Over Network",
+    version = env!("CARGO_PKG_VERSION"),
+    propagate_version = true
+)]
 struct Cli {
+    /// AXON state root directory (socket/identity/config/known_peers).
+    /// Falls back to AXON_ROOT, then ~/.axon.
+    #[arg(
+        long = "state-root",
+        visible_aliases = ["state", "root"],
+        global = true,
+        value_name = "DIR"
+    )]
+    state_root: Option<PathBuf>,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -33,20 +47,30 @@ enum Commands {
         /// Disable mDNS discovery (use static peers only).
         #[arg(long)]
         disable_mdns: bool,
-        /// AXON root directory (for multi-agent-per-host layouts).
-        #[arg(long, value_name = "DIR")]
-        axon_root: Option<PathBuf>,
     },
     /// Send a request to another agent and wait for a response.
-    Send { agent_id: String, message: String },
+    Send {
+        #[arg(value_parser = parse_agent_id_arg)]
+        agent_id: String,
+        message: String,
+    },
     /// Send a fire-and-forget message to another agent.
-    Notify { agent_id: String, data: String },
+    Notify {
+        #[arg(value_parser = parse_agent_id_arg)]
+        agent_id: String,
+        /// Force data to be treated as raw text payload.
+        #[arg(long)]
+        text: bool,
+        data: String,
+    },
     /// List discovered and connected peers.
     Peers,
     /// Show daemon status.
     Status,
     /// Print this agent's identity.
     Identity,
+    /// Print running daemon identity and metadata via IPC.
+    Whoami,
     /// Print example interactions.
     Examples,
     /// Generate shell completions and man page (internal, for packaging).
@@ -60,53 +84,72 @@ enum Commands {
 }
 
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() -> ExitCode {
     init_tracing();
-    let cli = Cli::parse();
+    match run().await {
+        Ok(code) => code,
+        Err(err) => {
+            eprintln!("Error: {err:#}");
+            ExitCode::from(1)
+        }
+    }
+}
 
-    match cli.command {
-        Commands::Daemon {
-            port,
-            disable_mdns,
-            axon_root,
-        } => {
+async fn run() -> Result<ExitCode> {
+    let Cli {
+        state_root,
+        command,
+    } = Cli::parse();
+    let resolve_paths = || AxonPaths::discover_with_override(state_root.as_deref());
+
+    match command {
+        Commands::Daemon { port, disable_mdns } => {
+            let paths = resolve_paths()?;
             run_daemon(DaemonOptions {
                 port,
                 disable_mdns,
-                axon_root,
+                axon_root: Some(paths.root.clone()),
                 cancel: None,
             })
             .await?;
         }
         Commands::Send { agent_id, message } => {
+            let paths = resolve_paths()?;
             let payload = json!({ "message": message });
-            let line = send_ipc(
+            let response = send_ipc(
+                &paths,
                 json!({"cmd": "send", "to": agent_id, "kind": "request", "payload": payload}),
-                false,
             )
             .await?;
-            println!("{line}");
+            return print_ipc_response_and_classify(response);
         }
-        Commands::Notify { agent_id, data } => {
-            let parsed_data = serde_json::from_str::<Value>(&data).unwrap_or_else(|_| json!(data));
+        Commands::Notify {
+            agent_id,
+            text,
+            data,
+        } => {
+            let paths = resolve_paths()?;
+            let parsed_data = parse_notify_payload(&data, text)?;
             let payload = json!({ "data": parsed_data });
-            let line = send_ipc(
+            let response = send_ipc(
+                &paths,
                 json!({"cmd": "send", "to": agent_id, "kind": "message", "payload": payload}),
-                false,
             )
             .await?;
-            println!("{line}");
+            return print_ipc_response_and_classify(response);
         }
         Commands::Peers => {
-            let line = send_ipc(json!({"cmd": "peers"}), false).await?;
-            println!("{line}");
+            let paths = resolve_paths()?;
+            let response = send_ipc(&paths, json!({"cmd": "peers"})).await?;
+            return print_ipc_response_and_classify(response);
         }
         Commands::Status => {
-            let line = send_ipc(json!({"cmd": "status"}), false).await?;
-            println!("{line}");
+            let paths = resolve_paths()?;
+            let response = send_ipc(&paths, json!({"cmd": "status"})).await?;
+            return print_ipc_response_and_classify(response);
         }
         Commands::Identity => {
-            let paths = AxonPaths::discover()?;
+            let paths = resolve_paths()?;
             let identity = Identity::load_or_generate(&paths)?;
             println!(
                 "{}",
@@ -117,6 +160,11 @@ async fn main() -> Result<()> {
                 .context("failed to encode identity output")?
             );
         }
+        Commands::Whoami => {
+            let paths = resolve_paths()?;
+            let response = send_ipc(&paths, json!({"cmd": "whoami"})).await?;
+            return print_ipc_response_and_classify(response);
+        }
         #[cfg(feature = "generate-docs")]
         Commands::GenDocs { out_dir } => {
             generate_docs(&out_dir)?;
@@ -126,7 +174,7 @@ async fn main() -> Result<()> {
         }
     }
 
-    Ok(())
+    Ok(ExitCode::SUCCESS)
 }
 
 #[cfg(feature = "generate-docs")]
@@ -171,8 +219,55 @@ fn init_tracing() {
     let _ = tracing_subscriber::fmt().with_env_filter(filter).try_init();
 }
 
-async fn send_ipc(command: Value, wait_for_correlated_inbound: bool) -> Result<String> {
-    let paths = AxonPaths::discover()?;
+fn parse_agent_id_arg(input: &str) -> std::result::Result<String, String> {
+    canonicalize_agent_id(input)
+        .ok_or_else(|| format!("invalid agent_id '{input}'; expected format ed25519.<32 hex>"))
+}
+
+fn canonicalize_agent_id(input: &str) -> Option<String> {
+    let (prefix, hex) = input.split_once('.')?;
+    if !prefix.eq_ignore_ascii_case("ed25519") {
+        return None;
+    }
+    if hex.len() != 32 || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    Some(format!("ed25519.{}", hex.to_ascii_lowercase()))
+}
+
+fn parse_notify_payload(data: &str, force_text: bool) -> Result<Value> {
+    if force_text {
+        return Ok(json!(data));
+    }
+
+    let trimmed = data.trim_start();
+    let looks_json_like = matches!(trimmed.chars().next(), Some('{') | Some('[') | Some('"'));
+
+    match serde_json::from_str::<Value>(data) {
+        Ok(value) => Ok(value),
+        Err(err) if looks_json_like => Err(anyhow!(
+            "notify payload appears JSON-like but is invalid: {err}. \
+             Fix the JSON or pass --text to send literal text."
+        )),
+        Err(_) => Ok(json!(data)),
+    }
+}
+
+fn daemon_reply_exit_code(response: &Value) -> ExitCode {
+    if response.get("ok") == Some(&json!(false)) {
+        return ExitCode::from(2);
+    }
+    ExitCode::SUCCESS
+}
+
+fn print_ipc_response_and_classify(response: Value) -> Result<ExitCode> {
+    let rendered =
+        serde_json::to_string_pretty(&response).context("failed to encode response output")?;
+    println!("{rendered}");
+    Ok(daemon_reply_exit_code(&response))
+}
+
+async fn send_ipc(paths: &AxonPaths, command: Value) -> Result<Value> {
     let mut stream = UnixStream::connect(&paths.socket).await.with_context(|| {
         format!(
             "failed to connect to daemon socket: {}. Is the daemon running?",
@@ -191,62 +286,47 @@ async fn send_ipc(command: Value, wait_for_correlated_inbound: bool) -> Result<S
         .context("failed to write IPC newline")?;
 
     let mut reader = BufReader::new(stream);
-    let mut response = String::new();
-    let bytes = reader
-        .read_line(&mut response)
-        .await
-        .context("failed to read IPC response")?;
-    if bytes == 0 {
-        return Err(anyhow::anyhow!(
-            "daemon closed connection without a response"
-        ));
-    }
-
-    let first: Value =
-        serde_json::from_str(response.trim()).context("failed to decode IPC response")?;
-
-    if !wait_for_correlated_inbound {
-        return serde_json::to_string_pretty(&first).context("failed to encode response");
-    }
-
-    let Some(msg_id) = first.get("msg_id").and_then(Value::as_str) else {
-        return serde_json::to_string_pretty(&first).context("failed to encode response");
-    };
-    if first.get("ok") != Some(&json!(true)) {
-        return serde_json::to_string_pretty(&first).context("failed to encode response");
-    }
-    let deadline = Instant::now() + Duration::from_secs(30);
-
     loop {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            return serde_json::to_string_pretty(&first).context("timed out waiting for response");
-        }
-
-        let mut line = String::new();
-        let bytes = timeout(remaining, reader.read_line(&mut line))
+        let mut response = String::new();
+        let bytes = reader
+            .read_line(&mut response)
             .await
-            .context("timed out waiting for correlated response")?
-            .context("failed reading correlated response")?;
+            .context("failed to read IPC response")?;
         if bytes == 0 {
-            return serde_json::to_string_pretty(&first).context("connection closed");
+            return Err(anyhow::anyhow!(
+                "daemon closed connection without a command response"
+            ));
         }
 
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
+        let decoded: Value =
+            serde_json::from_str(response.trim()).context("failed to decode IPC response")?;
+        if decoded.get("event").and_then(Value::as_str) == Some("inbound") {
             continue;
         }
+        return Ok(decoded);
+    }
+}
 
-        let value: Value =
-            serde_json::from_str(trimmed).context("failed decoding inbound IPC line")?;
-        let is_match = value.get("event") == Some(&json!("inbound"))
-            && value
-                .get("envelope")
-                .and_then(|e| e.get("ref"))
-                .and_then(Value::as_str)
-                == Some(msg_id);
-        if is_match {
-            return serde_json::to_string_pretty(&value).context("failed encoding response");
-        }
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn daemon_reply_failure_maps_to_exit_2() {
+        let code = daemon_reply_exit_code(&json!({"ok": false}));
+        assert_eq!(code, ExitCode::from(2));
+    }
+
+    #[test]
+    fn daemon_reply_success_maps_to_exit_0() {
+        let code = daemon_reply_exit_code(&json!({"ok": true}));
+        assert_eq!(code, ExitCode::SUCCESS);
+    }
+
+    #[test]
+    fn parse_agent_id_arg_normalizes_case() {
+        let parsed = parse_agent_id_arg("ED25519.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
+            .expect("mixed/upper case should parse");
+        assert_eq!(parsed, "ed25519.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
     }
 }

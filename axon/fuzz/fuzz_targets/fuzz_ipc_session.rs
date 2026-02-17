@@ -47,7 +47,7 @@ fuzz_target!(|data: &[u8]| {
             agent_id: "ed25519.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
             public_key: "cHVia2V5".to_string(),
             name: Some("fuzz".to_string()),
-            version: "0.3.0".to_string(),
+            version: "0.4.0".to_string(),
             max_client_queue: 64,
             uptime_secs: Arc::new(|| 0),
         };

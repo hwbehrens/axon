@@ -4,7 +4,7 @@
 
 ## Contribution Checklist
 
-Self-assessment against [`RUBRIC.md`](../RUBRIC.md). Check each item you've verified:
+Self-assessment against [`rubrics/QUALITY.md`](../rubrics/QUALITY.md), [`rubrics/DOCUMENTATION.md`](../rubrics/DOCUMENTATION.md), and [`rubrics/ALIGNMENT.md`](../rubrics/ALIGNMENT.md). Check each item you've verified:
 
 ### Security & Hardening
 - [ ] mTLS peer pinning and identity binding remain correct
@@ -33,6 +33,7 @@ Self-assessment against [`RUBRIC.md`](../RUBRIC.md). Check each item you've veri
 - [ ] Tracing events include peer identifiers and message IDs
 - [ ] Config precedence (CLI > config.toml > defaults) preserved if modified
 - [ ] Daemon startup/shutdown lifecycle remains clean
+- [ ] If CLI/path/persisted-format behavior changed, linked `cli_contract` tests and docs/spec/help updates are included
 
 ### Adversarial Robustness
 - [ ] Fuzz target added for any new deserialization entrypoint
@@ -50,6 +51,6 @@ Self-assessment against [`RUBRIC.md`](../RUBRIC.md). Check each item you've veri
 
 ## Self-Assessment Score
 
-<!-- Score your PR against RUBRIC.md (0-100). Be honest — reviewers will validate. -->
+<!-- Score your PR against the rubrics in /rubrics (0-100). Be honest — reviewers will validate. -->
 
 **Score: /100**

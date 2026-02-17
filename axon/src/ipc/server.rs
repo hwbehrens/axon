@@ -9,6 +9,7 @@ use anyhow::{Context, Result};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{Mutex, mpsc};
+use tokio_util::sync::CancellationToken;
 
 use super::auth;
 use super::protocol::{CommandEvent, DaemonReply, IpcCommand, IpcErrorCode, WhoamiInfo};
@@ -29,6 +30,12 @@ static INVALID_COMMAND_LINE: LazyLock<Arc<str>> = LazyLock::new(|| {
     )
 });
 
+#[derive(Clone)]
+struct ClientHandle {
+    tx: mpsc::Sender<Arc<str>>,
+    cancel: CancellationToken,
+}
+
 // ---------------------------------------------------------------------------
 // IPC server config
 // ---------------------------------------------------------------------------
@@ -48,7 +55,7 @@ impl Default for IpcServerConfig {
             agent_id: String::new(),
             public_key: String::new(),
             name: None,
-            version: "0.3.0".to_string(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
             max_client_queue: 1024,
             uptime_secs: Arc::new(|| 0),
         }
@@ -65,7 +72,7 @@ impl Default for IpcServerConfig {
 pub struct IpcServer {
     socket_path: PathBuf,
     max_clients: usize,
-    clients: Arc<Mutex<HashMap<u64, mpsc::Sender<Arc<str>>>>>,
+    clients: Arc<Mutex<HashMap<u64, ClientHandle>>>,
     next_client_id: Arc<AtomicU64>,
     owner_uid: u32,
     max_client_queue: usize,
@@ -146,7 +153,7 @@ impl IpcServer {
             Arc::from(serde_json::to_string(reply).context("failed to serialize daemon reply")?);
         let tx = {
             let clients = self.clients.lock().await;
-            clients.get(&client_id).cloned()
+            clients.get(&client_id).map(|client| client.tx.clone())
         };
         if let Some(tx) = tx {
             let send_result =
@@ -172,9 +179,17 @@ impl IpcServer {
             envelope: envelope.clone(),
         };
         let line: Arc<str> = Arc::from(serde_json::to_string(&event)?);
-        let clients = self.clients.lock().await;
-        for tx in clients.values() {
-            let _ = tx.try_send(line.clone());
+        let mut clients = self.clients.lock().await;
+        let mut disconnected = Vec::new();
+        for (client_id, client) in clients.iter() {
+            if client.tx.try_send(line.clone()).is_err() {
+                disconnected.push(*client_id);
+            }
+        }
+        for client_id in disconnected {
+            if let Some(client) = clients.remove(&client_id) {
+                client.cancel.cancel();
+            }
         }
         Ok(())
     }
@@ -201,10 +216,12 @@ impl IpcServer {
         }
     }
 
-    /// Close a client connection by removing it from the client map.
-    /// The client's write loop will end when the sender is dropped.
+    /// Close a client connection by removing it from the client map and
+    /// signaling cancellation to terminate its read/write loops.
     pub async fn close_client(&self, client_id: u64) {
-        self.clients.lock().await.remove(&client_id);
+        if let Some(client) = self.clients.lock().await.remove(&client_id) {
+            client.cancel.cancel();
+        }
     }
 
     pub async fn client_count(&self) -> usize {
@@ -277,15 +294,31 @@ impl IpcServer {
                 tracing::debug!(client_id, peer_uid = ?peer_uid, "accepted IPC client connection");
 
                 let (out_tx, out_rx) = mpsc::channel::<Arc<str>>(max_client_queue);
-                clients.lock().await.insert(client_id, out_tx.clone());
+                let cancel = CancellationToken::new();
+                clients.lock().await.insert(
+                    client_id,
+                    ClientHandle {
+                        tx: out_tx.clone(),
+                        cancel: cancel.clone(),
+                    },
+                );
 
                 let clients_for_remove = clients.clone();
                 let cmd_tx_for_client = cmd_tx.clone();
 
                 tokio::spawn(async move {
-                    let _ =
-                        handle_client(socket, client_id, out_tx, out_rx, cmd_tx_for_client).await;
-                    clients_for_remove.lock().await.remove(&client_id);
+                    let _ = handle_client(
+                        socket,
+                        client_id,
+                        out_tx,
+                        out_rx,
+                        cmd_tx_for_client,
+                        cancel.clone(),
+                    )
+                    .await;
+                    if let Some(client) = clients_for_remove.lock().await.remove(&client_id) {
+                        client.cancel.cancel();
+                    }
                 });
             }
         });
@@ -302,29 +335,46 @@ async fn handle_client(
     out_tx: mpsc::Sender<Arc<str>>,
     mut out_rx: mpsc::Receiver<Arc<str>>,
     cmd_tx: mpsc::Sender<CommandEvent>,
+    cancel: CancellationToken,
 ) -> Result<()> {
     let (read_half, mut write_half) = socket.into_split();
+    let writer_cancel = cancel.clone();
 
     tokio::spawn(async move {
-        while let Some(line) = out_rx.recv().await {
-            if write_half.write_all(line.as_bytes()).await.is_err() {
-                break;
-            }
-            if write_half.write_all(b"\n").await.is_err() {
-                break;
+        loop {
+            tokio::select! {
+                _ = writer_cancel.cancelled() => break,
+                maybe_line = out_rx.recv() => {
+                    let Some(line) = maybe_line else {
+                        break;
+                    };
+                    if write_half.write_all(line.as_bytes()).await.is_err() {
+                        break;
+                    }
+                    if write_half.write_all(b"\n").await.is_err() {
+                        break;
+                    }
+                }
             }
         }
+        let _ = write_half.shutdown().await;
     });
 
     let mut reader = BufReader::new(read_half);
     let mut buf = Vec::with_capacity(MAX_IPC_LINE_LENGTH + 1);
     loop {
+        if cancel.is_cancelled() {
+            break;
+        }
         buf.clear();
         let mut found_newline = false;
         let mut exceeded = false;
 
         loop {
-            let available = reader.fill_buf().await.context("failed reading IPC")?;
+            let available = tokio::select! {
+                _ = cancel.cancelled() => break,
+                read_result = reader.fill_buf() => read_result.context("failed reading IPC")?,
+            };
             if available.is_empty() {
                 break; // EOF
             }
@@ -380,5 +430,10 @@ async fn handle_client(
         }
     }
 
+    cancel.cancel();
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "server_tests.rs"]
+mod tests;

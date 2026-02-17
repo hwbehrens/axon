@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
@@ -25,6 +26,32 @@ fn ensure_crypto_provider() {
             .install_default()
             .ok();
     });
+}
+
+fn canonicalize_agent_id(input: &str) -> Option<String> {
+    let (prefix, hex) = input.split_once('.')?;
+    if hex.len() != 32 || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    Some(format!(
+        "{}.{}",
+        prefix.to_ascii_lowercase(),
+        hex.to_ascii_lowercase()
+    ))
+}
+
+fn lookup_expected_pubkey<'a>(
+    expected: &'a HashMap<String, String>,
+    canonical_agent_id: &str,
+) -> Option<&'a String> {
+    expected.get(canonical_agent_id).or_else(|| {
+        expected.iter().find_map(|(agent_id, pubkey)| {
+            canonicalize_agent_id(agent_id)
+                .as_deref()
+                .is_some_and(|id| id == canonical_agent_id)
+                .then_some(pubkey)
+        })
+    })
 }
 
 pub(crate) fn build_endpoint(
@@ -112,7 +139,12 @@ impl ServerCertVerifier for PeerCertVerifier {
         _ocsp_response: &[u8],
         _now: rustls::pki_types::UnixTime,
     ) -> std::result::Result<ServerCertVerified, rustls::Error> {
-        let expected_agent_id = server_name.to_str().to_string();
+        let expected_agent_id_raw = server_name.to_str();
+        let expected_agent_id = canonicalize_agent_id(&expected_agent_id_raw).ok_or_else(|| {
+            rustls::Error::General(format!(
+                "invalid expected server agent_id in SNI: {expected_agent_id_raw}"
+            ))
+        })?;
 
         let cert_key =
             extract_ed25519_pubkey_from_cert_der(end_entity.as_ref()).map_err(|err| {
@@ -132,7 +164,7 @@ impl ServerCertVerifier for PeerCertVerifier {
             .expected_pubkeys
             .read()
             .map_err(|_| rustls::Error::General("expected peer table lock poisoned".to_string()))?;
-        if let Some(expected_pubkey_b64) = expected.get(&expected_agent_id) {
+        if let Some(expected_pubkey_b64) = lookup_expected_pubkey(&expected, &expected_agent_id) {
             if cert_key_b64 != *expected_pubkey_b64 {
                 return Err(rustls::Error::General(
                     "server cert public key mismatch against discovery data".to_string(),
@@ -205,7 +237,7 @@ impl ClientCertVerifier for PeerClientCertVerifier {
             .expected_pubkeys
             .read()
             .map_err(|_| rustls::Error::General("expected peer table lock poisoned".to_string()))?;
-        if let Some(expected_pubkey_b64) = expected.get(&agent_id) {
+        if let Some(expected_pubkey_b64) = lookup_expected_pubkey(&expected, &agent_id) {
             if &cert_pubkey_b64 != expected_pubkey_b64 {
                 return Err(rustls::Error::General(
                     "client cert public key does not match discovered peer key".to_string(),

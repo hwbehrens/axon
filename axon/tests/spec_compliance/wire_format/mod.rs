@@ -173,7 +173,7 @@ fn ipc_inbound_shape() {
 // Config — static peers per spec §2
 // =========================================================================
 
-/// `spec/SPEC.md` static peer config includes agent_id, addr, pubkey.
+/// `spec/SPEC.md` static peer config includes agent_id, addr (ip or hostname), pubkey.
 #[tokio::test]
 async fn config_static_peers_match_spec() {
     let dir = tempfile::tempdir().unwrap();
@@ -187,15 +187,27 @@ port = 7100
 agent_id = "ed25519.a1b2c3d4e5f6a7b8a1b2c3d4e5f6a7b8"
 addr = "100.64.0.5:7100"
 pubkey = "cHVia2V5MQ=="
+
+[[peers]]
+agent_id = "ed25519.b1b2c3d4e5f6a7b8a1b2c3d4e5f6a7b8"
+addr = "localhost:7101"
+pubkey = "cHVia2V5Mg=="
 "#,
     )
     .unwrap();
     let config = axon::config::Config::load(&path).await.unwrap();
-    assert_eq!(config.peers.len(), 1);
+    assert_eq!(config.peers.len(), 2);
     assert_eq!(
         config.peers[0].agent_id,
         "ed25519.a1b2c3d4e5f6a7b8a1b2c3d4e5f6a7b8"
     );
     assert_eq!(config.peers[0].addr.to_string(), "100.64.0.5:7100");
     assert_eq!(config.peers[0].pubkey, "cHVia2V5MQ==");
+    assert_eq!(
+        config.peers[1].agent_id,
+        "ed25519.b1b2c3d4e5f6a7b8a1b2c3d4e5f6a7b8"
+    );
+    assert_eq!(config.peers[1].addr.port(), 7101);
+    assert!(config.peers[1].addr.ip().is_loopback());
+    assert_eq!(config.peers[1].pubkey, "cHVia2V5Mg==");
 }

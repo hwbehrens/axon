@@ -390,8 +390,10 @@ For bidirectional requests (`request`), the response is included inline:
 
 #### Whoami
 ```json
-{"ok":true,"agent_id":"<agent_id>"}
+{"ok":true,"agent_id":"<agent_id>","public_key":"<base64-ed25519-pubkey>","name":"<optional-display-name>","version":"<daemon-version>","uptime_secs":3600}
 ```
+
+`name` is optional and may be omitted when unset.
 
 #### Error
 ```json
@@ -404,7 +406,7 @@ IPC error codes:
 - `peer_unreachable`
 - `internal_error`
 
-#### InboundEvent (broadcast to all connected clients)
+#### InboundEvent (broadcast to connected clients)
 ```json
 {"event":"inbound","from":"<agent_id>","envelope":{...}}
 ```
@@ -413,8 +415,9 @@ IPC error codes:
 
 - Multiple clients may connect simultaneously (default limit: **64**).
 - If the client limit is reached, new connections are rejected.
-- All connected IPC clients receive all inbound messages via broadcast as `InboundEvent` lines.
-- There is no subscription mechanism and no buffering; messages are delivered as they arrive.
+- Connected IPC clients receive inbound messages via broadcast as `InboundEvent` lines while they keep up with delivery.
+- Each client has a bounded outbound queue. If `InboundEvent` delivery would overflow that queue, the daemon disconnects that lagging client (deliver-or-disconnect).
+- There is no subscription mechanism; messages are dropped when no IPC client is connected.
 
 ---
 

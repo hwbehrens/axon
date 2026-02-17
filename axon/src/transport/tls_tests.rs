@@ -145,6 +145,40 @@ fn server_verifier_accepts_known_peer() {
 }
 
 #[test]
+fn server_verifier_accepts_uppercase_expected_agent_id() {
+    ensure_crypto_provider();
+    let dir = tempdir().expect("tempdir");
+    let paths = AxonPaths::from_root(PathBuf::from(dir.path()));
+    let identity = Identity::load_or_generate(&paths).expect("identity");
+    let cert = identity.make_quic_certificate().expect("cert");
+
+    let uppercase_id = identity.agent_id().to_ascii_uppercase();
+    let pubkey_map = Arc::new(StdRwLock::new(HashMap::new()));
+    pubkey_map.write().unwrap().insert(
+        uppercase_id.clone(),
+        identity.public_key_base64().to_string(),
+    );
+
+    let verifier = PeerCertVerifier {
+        expected_pubkeys: pubkey_map,
+    };
+    let cert_der = CertificateDer::from(cert.cert_der);
+    let server_name = ServerName::try_from(uppercase_id.as_str()).unwrap();
+
+    let result = verifier.verify_server_cert(
+        &cert_der,
+        &[],
+        &server_name,
+        &[],
+        rustls::pki_types::UnixTime::now(),
+    );
+    assert!(
+        result.is_ok(),
+        "server verifier should accept uppercase expected agent id"
+    );
+}
+
+#[test]
 fn server_verifier_rejects_pubkey_mismatch() {
     ensure_crypto_provider();
     let dir = tempdir().expect("tempdir");
@@ -192,6 +226,34 @@ fn client_verifier_rejects_unknown_peer() {
 
     let result = verifier.verify_client_cert(&cert_der, &[], rustls::pki_types::UnixTime::now());
     assert!(result.is_err(), "unknown client must be rejected");
+}
+
+#[test]
+fn client_verifier_accepts_uppercase_peer_table_key() {
+    ensure_crypto_provider();
+    let dir = tempdir().expect("tempdir");
+    let paths = AxonPaths::from_root(PathBuf::from(dir.path()));
+    let identity = Identity::load_or_generate(&paths).expect("identity");
+    let cert = identity.make_quic_certificate().expect("cert");
+
+    let uppercase_id = identity.agent_id().to_ascii_uppercase();
+    let pubkey_map = Arc::new(StdRwLock::new(HashMap::new()));
+    pubkey_map
+        .write()
+        .unwrap()
+        .insert(uppercase_id, identity.public_key_base64().to_string());
+
+    let verifier = PeerClientCertVerifier {
+        expected_pubkeys: pubkey_map,
+        roots: vec![],
+    };
+    let cert_der = CertificateDer::from(cert.cert_der);
+
+    let result = verifier.verify_client_cert(&cert_der, &[], rustls::pki_types::UnixTime::now());
+    assert!(
+        result.is_ok(),
+        "client verifier should accept uppercase peer-table key"
+    );
 }
 
 #[test]

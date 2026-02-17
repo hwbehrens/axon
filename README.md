@@ -46,7 +46,7 @@ Agent ←→ [Unix Socket IPC] ←→ AXON Daemon ←→ [QUIC/UDP] ←→ AXON 
 
 Each machine runs a lightweight daemon (<5 MB RSS, negligible CPU when idle). Agents connect to it over a Unix socket and exchange structured JSON messages. The daemon handles everything else:
 
-- **Identity** — Ed25519 keypair generated on first run. Agent ID derived from the public key. Self-signed X.509 cert for QUIC/TLS 1.3.
+- **Identity** — Ed25519 keypair generated on first run. `identity.key` stores a base64-encoded 32-byte seed. Agent ID derived from the public key. Self-signed X.509 cert for QUIC/TLS 1.3.
 - **Discovery** — mDNS on LAN (zero-config) or static peers in `config.toml` for VPN/Tailscale setups.
 - **Transport** — QUIC with TLS 1.3 and forward secrecy.
 - **Security** — Mutual TLS peer pinning — unknown peers rejected at the transport layer.
@@ -69,6 +69,7 @@ axon daemon
 ```
 
 Starts on port 7100, creates `~/.axon/` with a fresh Ed25519 identity, enables mDNS discovery, and listens for IPC on `~/.axon/axon.sock`.
+Use `--state-root <DIR>` (aliases: `--state`, `--root`) to override the state directory, or set `AXON_ROOT`.
 
 ### Connect agents on a LAN
 
@@ -100,7 +101,7 @@ Create `~/.axon/config.toml` on each machine with the other's info:
 ```toml
 [[peers]]
 agent_id = "ed25519.<peer-agent-id>"
-addr = "<peer-ip>:7100"
+addr = "<peer-host-or-ip>:7100"
 pubkey = "<peer-public-key>"
 ```
 
@@ -116,8 +117,11 @@ axon daemon --disable-mdns
 # Send a request to another agent (bidirectional, waits for response)
 axon send <agent_id> "What is the capital of France?"
 
-# Fire-and-forget notification (unidirectional)
+# Fire-and-forget notification (unidirectional, JSON payload)
 axon notify <agent_id> '{"state":"ready"}'
+
+# Force literal text payload (even if it looks like JSON)
+axon notify --text <agent_id> '{"state":"ready"'
 
 # List peers
 axon peers
@@ -125,9 +129,28 @@ axon peers
 # Daemon status
 axon status
 
+# Daemon identity (IPC)
+axon whoami
+
+# Local identity (state root files, no daemon required)
+axon identity
+
 # See all commands
 axon --help
 ```
+
+### CLI Behavior Contracts
+
+- Global state-root override is available on all commands:
+  - `--state-root <DIR>` (aliases: `--state`, `--root`)
+  - fallback order: CLI flag -> `AXON_ROOT` -> `~/.axon`
+- Exit codes:
+  - `0`: success
+  - `1`: local/runtime failure after argument parsing (I/O, daemon socket connect/decode, etc.)
+  - `2`: CLI parse/usage failure (Clap) or daemon/application-level failure reply (`"ok": false`)
+- IPC inbound event delivery:
+  - connected clients receive inbound broadcast events
+  - per-client delivery uses bounded queues; lagging clients are disconnected instead of silently dropped
 
 ### Example interaction
 
@@ -152,7 +175,7 @@ All settings are optional. AXON uses sensible defaults; you only need `config.to
 
 ### `config.toml`
 
-Located at `~/.axon/config.toml` (or `<axon_root>/config.toml`).
+Located at `~/.axon/config.toml` by default (or `<state_root>/config.toml` when overridden).
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
@@ -164,9 +187,13 @@ Located at `~/.axon/config.toml` (or `<axon_root>/config.toml`).
 ```toml
 [[peers]]
 agent_id = "ed25519.<hex>"
-addr = "10.0.0.5:7100"
+addr = "10.0.0.5:7100"              # IP:port
+# or
+addr = "my-peer.example.net:7100"   # hostname:port
 pubkey = "<base64-encoded-ed25519-public-key>"
 ```
+
+Hostname peers are resolved at startup/config load time (IPv4 preferred). Unresolvable peers are skipped with warning logs.
 
 ### Internal constants
 
@@ -183,7 +210,7 @@ These are compile-time constants and cannot be changed via configuration.
 | `IDLE_TIMEOUT` | `60s` | `daemon/mod.rs` | QUIC idle timeout. Connections with no traffic for this duration are closed. |
 | `INBOUND_READ_TIMEOUT` | `10s` | `daemon/mod.rs` | Maximum time to wait for data on an inbound QUIC stream. |
 | `MAX_IPC_CLIENTS` | `64` | `daemon/mod.rs` | Maximum simultaneous IPC client connections. |
-| `MAX_CLIENT_QUEUE` | `1024` | `daemon/mod.rs` | Per-IPC-client outbound message queue depth. |
+| `MAX_CLIENT_QUEUE` | `1024` | `daemon/mod.rs` | Per-IPC-client outbound message queue depth; overflow disconnects lagging clients. |
 | `RECONNECT_MAX_BACKOFF` | `30s` | `daemon/mod.rs` | Maximum backoff between reconnection attempts. Backoff starts at 1s and doubles. |
 | Save interval | `60s` | `daemon/mod.rs` | How often the daemon persists `known_peers.json` to disk. |
 | Stale cleanup interval | `5s` | `daemon/mod.rs` | How often the daemon checks for and removes stale discovered peers. |
