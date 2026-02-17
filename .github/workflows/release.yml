@@ -63,33 +63,65 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: gh release upload "${{ github.ref_name }}" "${{ env.ARCHIVE }}"
 
-  homebrew-tap-check:
-    name: homebrew tap check
+  homebrew-tap-update:
+    name: homebrew tap update
+    needs: build
     runs-on: ubuntu-latest
     steps:
-      - name: Check if homebrew-axon tracks this release
+      - name: Open PR in homebrew-axon
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
 
-          formula_content="$(gh api 'repos/hwbehrens/homebrew-axon/contents/Formula/axon.rb?ref=main' --jq .content | tr -d '\n' | base64 --decode)"
-
-          if grep -Fq "refs/tags/${RELEASE_TAG}.tar.gz" <<< "$formula_content"; then
-            {
-              echo "### Homebrew Tap Status"
-              echo ""
-              echo "- \`homebrew-axon\` already references \`${RELEASE_TAG}\`."
-            } >> "$GITHUB_STEP_SUMMARY"
+          if [[ -z "${GH_TOKEN}" ]]; then
+            echo "::warning ::HOMEBREW_TAP_TOKEN is not configured; skipping tap update."
             exit 0
           fi
+
+          TAP_REPO="hwbehrens/homebrew-axon"
+          TARBALL_URL="https://github.com/hwbehrens/axon/archive/refs/tags/${RELEASE_TAG}.tar.gz"
+          BRANCH="bump-axon-${RELEASE_TAG}"
+
+          # Check if formula already references this tag
+          formula_content="$(gh api "repos/${TAP_REPO}/contents/Formula/axon.rb?ref=main" --jq .content | tr -d '\n' | base64 --decode)"
+          if grep -Fq "refs/tags/${RELEASE_TAG}.tar.gz" <<< "$formula_content"; then
+            echo "::notice ::homebrew-axon already references ${RELEASE_TAG}."
+            exit 0
+          fi
+
+          # Compute sha256 of the source tarball
+          SHA256="$(curl -fsSL "$TARBALL_URL" | sha256sum | awk '{print $1}')"
+          echo "Computed sha256: ${SHA256}"
+
+          # Clone the tap repo and create a branch
+          gh repo clone "$TAP_REPO" homebrew-axon
+          cd homebrew-axon
+          git checkout -b "$BRANCH"
+
+          # Update url and sha256 in the formula
+          sed -i "s|url \"https://github.com/hwbehrens/axon/archive/refs/tags/.*\.tar\.gz\"|url \"${TARBALL_URL}\"|" Formula/axon.rb
+          sed -i "s|sha256 \"[a-f0-9]\{64\}\"|sha256 \"${SHA256}\"|" Formula/axon.rb
+
+          # Commit and push
+          git add Formula/axon.rb
+          git commit -m "axon ${RELEASE_TAG}"
+          git push origin "$BRANCH"
+
+          # Open PR (brew test-bot will build bottles; label with pr-pull to publish)
+          PR_URL="$(gh pr create \
+            --repo "$TAP_REPO" \
+            --base main \
+            --head "$BRANCH" \
+            --title "axon ${RELEASE_TAG}" \
+            --body "Automated formula update for [axon ${RELEASE_TAG}](https://github.com/hwbehrens/axon/releases/tag/${RELEASE_TAG}).
+
+          Once CI passes, apply the \`pr-pull\` label to build and publish bottles.")"
 
           {
             echo "### Homebrew Tap Status"
             echo ""
-            echo "- \`homebrew-axon\` does not yet reference \`${RELEASE_TAG}\`."
-            echo "- Update: https://github.com/hwbehrens/homebrew-axon/blob/main/Formula/axon.rb"
+            echo "- Opened PR in \`${TAP_REPO}\` for \`${RELEASE_TAG}\`."
+            echo "- ${PR_URL}"
           } >> "$GITHUB_STEP_SUMMARY"
-
-          echo "::warning title=Homebrew tap update needed::Update hwbehrens/homebrew-axon to ${RELEASE_TAG}."
