@@ -101,9 +101,10 @@ jobs:
           git config --global user.name "${GIT_USER}"
           git config --global user.email "${GIT_ID}+${GIT_USER}@users.noreply.github.com"
 
-          # Clone the tap repo and create a branch
+          # Clone the tap repo with token-authenticated remote
           gh repo clone "$TAP_REPO" homebrew-axon
           cd homebrew-axon
+          git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${TAP_REPO}.git"
           git checkout -b "$BRANCH"
 
           # Update url and sha256 in the formula
