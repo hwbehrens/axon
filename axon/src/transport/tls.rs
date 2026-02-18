@@ -77,6 +77,7 @@ pub(crate) fn build_endpoint(
         .with_client_cert_verifier(Arc::new(mtls_verifier))
         .with_single_cert(cert_chain.clone(), private_key.clone_key().into())
         .context("failed to build rustls server config")?;
+    rustls_server.alpn_protocols = vec![b"axon/1".to_vec()];
     rustls_server.max_early_data_size = 0;
 
     let quic_server_config = QuicServerConfig::try_from(rustls_server)
@@ -103,6 +104,7 @@ pub(crate) fn build_endpoint(
         .with_custom_certificate_verifier(Arc::new(PeerCertVerifier { expected_pubkeys }))
         .with_client_auth_cert(cert_chain, private_key.into())
         .context("failed to configure client mTLS certificate")?;
+    rustls_client.alpn_protocols = vec![b"axon/1".to_vec()];
     rustls_client.enable_early_data = false;
 
     let quic_client_config = QuicClientConfig::try_from(rustls_client)

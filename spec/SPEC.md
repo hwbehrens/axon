@@ -89,7 +89,7 @@ enum PeerEvent {
 ### Connection Lifecycle
 1. Peer discovered (via mDNS or static config).
 2. Either side can initiate a QUIC connection (no deterministic initiator rule).
-3. mTLS handshake: both sides present self-signed certificates. Each side validates the peer's certificate public key against the expected pubkey from discovery. Reject if mismatch (prevents MITM).
+3. mTLS handshake: both sides present self-signed certificates with ALPN token `axon/1`. Each side validates the peer's certificate public key against the expected pubkey from discovery. Reject if mismatch (prevents MITM) or ALPN negotiation fails.
 4. Connection stays open. Keepalive pings at 15s, idle timeout 60s.
 5. On disconnect: reconnect with exponential backoff (1s, 2s, 4s, ... max 30s).
 

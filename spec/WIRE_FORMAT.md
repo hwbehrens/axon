@@ -75,6 +75,10 @@ Other implementations do **not** need to match CN/SAN values, but they **MUST**:
 - Provide an X.509 cert containing the correct Ed25519 public key.
 - Support mTLS and enforce the peer-validation rules below.
 
+### 2.4 ALPN (normative)
+
+Both client and server **MUST** advertise the ALPN protocol token `axon/1` during the TLS handshake. A connection **MUST** be rejected if ALPN negotiation fails (i.e., the peer does not offer a compatible token). Future protocol revisions will use new tokens (e.g., `axon/2`).
+
 ---
 
 ## 3. QUIC connection lifecycle (network protocol)

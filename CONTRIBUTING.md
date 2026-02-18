@@ -80,6 +80,10 @@ All source files must stay **under 500 lines**. If a file approaches this limit,
 - No comments unless the code is genuinely complex. The code should be self-documenting.
 - Prefer separating mechanical refactors (file splits, renames) from functional changes into distinct commits when possible.
 
+### Pull request self-assessment
+
+Every PR body **must** include a self-assessment score line in the format `**Score: NN/100**`. CI will reject PRs without one, and scores below 70 fail the build. Evaluate your change against the rubrics in [`rubrics/`](./rubrics) to determine the score.
+
 ### Commit messages
 
 - State the user-visible behavior change in the subject line, not just what code was touched.
