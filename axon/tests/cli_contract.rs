@@ -1,6 +1,5 @@
 use std::fs;
-use std::io::{BufRead, BufReader, Write};
-use std::io::{Error, ErrorKind};
+use std::io::{BufRead, BufReader, Error, ErrorKind, Write};
 use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
