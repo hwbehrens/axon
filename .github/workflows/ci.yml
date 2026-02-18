@@ -136,7 +136,4 @@ jobs:
       - run: cargo install cargo-fuzz
       - name: Fuzz all targets (short run)
         working-directory: axon
-        run: |
-          for target in fuzz_envelope_decode fuzz_envelope_roundtrip fuzz_wire_decode fuzz_ipc_command fuzz_config_toml fuzz_known_peers; do
-            cargo fuzz run "$target" -- -max_total_time=30
-          done
+        run: make fuzz
