@@ -5,12 +5,14 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::thread::JoinHandle;
 
-use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde_json::{Value, json};
 use tempfile::tempdir;
 
 const VALID_AGENT_ID: &str = "ed25519.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const VALID_AGENT_ID_UPPER: &str = "ED25519.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+
+#[path = "cli_contract/identity_migration.rs"]
+mod identity_migration;
 
 fn axon_bin() -> PathBuf {
     if let Some(bin) = std::env::var_os("CARGO_BIN_EXE_axon") {
@@ -469,34 +471,4 @@ fn identity_default_outputs_peer_uri_and_json_flag_expands_fields() {
             .unwrap_or_default()
             .starts_with("axon://")
     );
-}
-
-#[test]
-fn legacy_raw_identity_key_is_auto_migrated() {
-    let bin = axon_bin();
-    let root = tempdir().expect("tempdir");
-    fs::create_dir_all(root.path()).expect("create root");
-    fs::write(root.path().join("identity.key"), [7u8; 32]).expect("write raw key");
-
-    let output = run_command(Command::new(&bin).args([
-        "--state-root",
-        root.path().to_str().expect("utf8 path"),
-        "identity",
-    ]));
-    assert!(output.status.success());
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("Your enrollment token"));
-    assert!(stdout.lines().any(|line| line.starts_with("axon://")));
-
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains(
-        "Notice: migrated identity.key from legacy raw format to base64. Agent ID unchanged."
-    ));
-
-    let migrated = fs::read_to_string(root.path().join("identity.key")).expect("read migrated key");
-    let decoded = STANDARD
-        .decode(migrated.trim())
-        .expect("migrated identity.key should be base64");
-    assert_eq!(decoded.len(), 32);
 }
