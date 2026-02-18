@@ -24,6 +24,7 @@ OpenClaw ←→ [Unix Socket] ←→ AXON Daemon ←→ [QUIC/UDP] ←→ AXON D
 - On first run, generate an **Ed25519** signing keypair.
 - Store private key seed at `~/.axon/identity.key` as base64 text encoding of 32 bytes (chmod 600).
 - Store public key at `~/.axon/identity.pub` (base64).
+- Implementations MUST reject non-base64 or non-UTF-8 `identity.key` contents; automatic in-place migration from legacy raw seed files is not supported.
 - **Agent ID** = `ed25519.` prefix + first 16 bytes of SHA-256(public key), hex-encoded. 40 chars total (e.g. `ed25519.a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4`). The type prefix enables future algorithm agility.
 
 ### Self-Signed Certificate

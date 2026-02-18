@@ -46,32 +46,6 @@ pub(super) fn check_identity(
                 );
             }
         }
-        IdentityHealth::LegacyRaw => {
-            if args.fix {
-                let identity = Identity::load_or_generate(paths)?;
-                report.add_fix(
-                    "identity_migrate",
-                    format!(
-                        "migrated legacy raw identity.key to base64 ({})",
-                        identity.agent_id()
-                    ),
-                );
-                report.add_check(
-                    "identity",
-                    true,
-                    true,
-                    format!("legacy key migrated in place ({})", identity.agent_id()),
-                );
-            } else {
-                report.add_check(
-                    "identity",
-                    false,
-                    true,
-                    "identity.key appears to be legacy raw format (run `axon doctor --fix` to migrate)"
-                        .to_string(),
-                );
-            }
-        }
         IdentityHealth::Invalid(reason) => {
             if args.fix && args.rekey {
                 let backups = backup_identity_files(paths)?;
@@ -152,7 +126,6 @@ fn backup_identity_files(paths: &AxonPaths) -> Result<Vec<String>> {
 enum IdentityHealth {
     Valid,
     Missing,
-    LegacyRaw,
     Invalid(String),
 }
 
@@ -166,24 +139,15 @@ fn inspect_identity_key(path: &Path) -> Result<IdentityHealth> {
         Ok(text) => {
             if decode_seed_text_for_check(text).is_ok() {
                 Ok(IdentityHealth::Valid)
-            } else if is_legacy_raw_seed_candidate(&raw, text) {
-                Ok(IdentityHealth::LegacyRaw)
             } else {
                 Ok(IdentityHealth::Invalid(
                     "base64 decode failed for identity.key".to_string(),
                 ))
             }
         }
-        Err(_) => {
-            if raw.len() == 32 {
-                Ok(IdentityHealth::LegacyRaw)
-            } else {
-                Ok(IdentityHealth::Invalid(format!(
-                    "non-UTF-8 identity.key has invalid length {} (expected 32 bytes)",
-                    raw.len()
-                )))
-            }
-        }
+        Err(_) => Ok(IdentityHealth::Invalid(
+            "identity.key is non-UTF-8; expected base64 text".to_string(),
+        )),
     }
 }
 
@@ -195,11 +159,4 @@ fn decode_seed_text_for_check(text: &str) -> Result<[u8; 32]> {
         .try_into()
         .map_err(|v: Vec<u8>| anyhow!("decoded identity key length {} != 32", v.len()))?;
     Ok(seed)
-}
-
-fn is_legacy_raw_seed_candidate(raw: &[u8], text: &str) -> bool {
-    raw.len() == 32
-        && text
-            .chars()
-            .any(|c| !(c.is_ascii_graphic() || c.is_ascii_whitespace()))
 }

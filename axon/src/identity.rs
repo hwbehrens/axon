@@ -30,16 +30,15 @@ impl Identity {
         let signing_key = if paths.identity_key.exists() {
             let raw = fs::read(&paths.identity_key)
                 .with_context(|| format!("failed to read {}", paths.identity_key.display()))?;
-            let seed = match std::str::from_utf8(&raw) {
-                Ok(text) => match decode_seed_from_base64_text(text, &paths.identity_key) {
-                    Ok(seed) => seed,
-                    Err(err) if is_legacy_raw_seed_candidate(&raw, text) => {
-                        migrate_legacy_raw_seed(&raw, &paths.identity_key)?
-                    }
-                    Err(err) => return Err(err),
-                },
-                Err(_) => migrate_legacy_raw_seed(&raw, &paths.identity_key)?,
-            };
+            let text = std::str::from_utf8(&raw).map_err(|_| {
+                anyhow!(
+                    "invalid identity.key format at {}: expected base64 text containing a 32-byte seed; \
+                     non-text key data is unsupported. \
+                     Remove identity.key and identity.pub from this root to re-initialize identity.",
+                    paths.identity_key.display()
+                )
+            })?;
+            let seed = decode_seed_from_base64_text(text, &paths.identity_key)?;
             SigningKey::from_bytes(&seed)
         } else {
             let mut seed = [0u8; 32];
@@ -125,32 +124,6 @@ fn decode_seed_from_base64_text(text: &str, path: &Path) -> Result<[u8; 32]> {
         )
     })?;
     Ok(seed)
-}
-
-fn migrate_legacy_raw_seed(raw: &[u8], path: &Path) -> Result<[u8; 32]> {
-    if raw.len() != 32 {
-        anyhow::bail!(
-            "invalid identity.key format at {}: expected base64 text containing a 32-byte seed; \
-             found non-UTF-8 key data with {} bytes. \
-             Remove identity.key and identity.pub from this root to re-initialize identity.",
-            path.display(),
-            raw.len()
-        );
-    }
-    let mut seed = [0u8; 32];
-    seed.copy_from_slice(raw);
-    write_seed_as_base64(path, &seed)?;
-    eprintln!(
-        "Notice: migrated identity.key from legacy raw format to base64. Agent ID unchanged."
-    );
-    Ok(seed)
-}
-
-fn is_legacy_raw_seed_candidate(raw: &[u8], text: &str) -> bool {
-    raw.len() == 32
-        && text
-            .chars()
-            .any(|c| !(c.is_ascii_graphic() || c.is_ascii_whitespace()))
 }
 
 fn write_seed_as_base64(path: &Path, seed: &[u8; 32]) -> Result<()> {
@@ -282,7 +255,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_raw_key_is_migrated_to_base64() {
+    fn legacy_raw_key_is_rejected() {
         let dir = tempdir().expect("tempdir");
         let paths = AxonPaths::from_root(PathBuf::from(dir.path()));
         paths.ensure_root_exists().expect("ensure root");
@@ -290,18 +263,9 @@ mod tests {
         let raw_seed = [7u8; 32];
         fs::write(&paths.identity_key, raw_seed).expect("write raw key");
 
-        let identity = Identity::load_or_generate(&paths).expect("migrate raw key");
-
-        let migrated_text = fs::read_to_string(&paths.identity_key).expect("read migrated key");
-        let decoded = STANDARD
-            .decode(migrated_text.trim())
-            .expect("migrated key should be base64");
-        assert_eq!(decoded, raw_seed);
-
-        let expected = SigningKey::from_bytes(&raw_seed);
-        assert_eq!(
-            identity.agent_id(),
-            derive_agent_id(&expected.verifying_key())
-        );
+        let result = Identity::load_or_generate(&paths);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("invalid identity.key"));
     }
 }

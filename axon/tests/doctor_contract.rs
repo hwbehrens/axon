@@ -143,6 +143,29 @@ fn doctor_fix_requires_rekey_for_unrecoverable_identity() {
 }
 
 #[test]
+fn doctor_fix_requires_rekey_for_legacy_raw_identity() {
+    let root = tempdir().expect("tempdir");
+    fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).expect("set perms");
+    fs::write(root.path().join("identity.key"), [7u8; 32]).expect("write legacy raw key");
+
+    let output = run_doctor_json(root.path(), &["--fix"]);
+    assert_eq!(output.status.code(), Some(2));
+
+    let report = parse_report(&output);
+    assert_eq!(report["mode"], "fix");
+    assert_eq!(report["ok"], false);
+
+    let identity = check_by_name(&report, "identity");
+    assert_eq!(identity["ok"], false);
+    assert!(
+        identity["message"]
+            .as_str()
+            .expect("identity message")
+            .contains("--rekey")
+    );
+}
+
+#[test]
 fn doctor_fix_rekey_backs_up_and_regenerates_identity() {
     let root = tempdir().expect("tempdir");
     fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).expect("set perms");

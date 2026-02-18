@@ -11,9 +11,6 @@ use tempfile::tempdir;
 const VALID_AGENT_ID: &str = "ed25519.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const VALID_AGENT_ID_UPPER: &str = "ED25519.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
 
-#[path = "cli_contract/identity_migration.rs"]
-mod identity_migration;
-
 fn axon_bin() -> PathBuf {
     if let Some(bin) = std::env::var_os("CARGO_BIN_EXE_axon") {
         return PathBuf::from(bin);
@@ -471,4 +468,22 @@ fn identity_default_outputs_peer_uri_and_json_flag_expands_fields() {
             .unwrap_or_default()
             .starts_with("axon://")
     );
+}
+
+#[test]
+fn legacy_raw_identity_key_is_rejected() {
+    let bin = axon_bin();
+    let root = tempdir().expect("tempdir");
+    fs::create_dir_all(root.path()).expect("create root");
+    fs::write(root.path().join("identity.key"), [7u8; 32]).expect("write raw key");
+
+    let output = run_command(Command::new(&bin).args([
+        "--state-root",
+        root.path().to_str().expect("utf8 path"),
+        "identity",
+    ]));
+    assert_eq!(output.status.code(), Some(1));
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("invalid identity.key"));
 }

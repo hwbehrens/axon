@@ -46,7 +46,7 @@ Agent ←→ [Unix Socket IPC] ←→ AXON Daemon ←→ [QUIC/UDP] ←→ AXON 
 
 Each machine runs a lightweight daemon (<5 MB RSS, negligible CPU when idle). Agents connect to it over a Unix socket and exchange structured JSON messages. The daemon handles everything else:
 
-- **Identity** — Ed25519 keypair generated on first run. `identity.key` stores a base64-encoded 32-byte seed. Agent ID derived from the public key. Self-signed X.509 cert for QUIC/TLS 1.3.
+- **Identity** — Ed25519 keypair generated on first run. `identity.key` stores a base64-encoded 32-byte seed (strictly required; non-base64 or raw legacy formats are rejected). Agent ID derived from the public key. Self-signed X.509 cert for QUIC/TLS 1.3.
 - **Discovery** — mDNS on LAN (zero-config) or static peers in `config.yaml` for VPN/Tailscale setups.
 - **Transport** — QUIC with TLS 1.3 and forward secrecy.
 - **Security** — Mutual TLS peer pinning — unknown peers rejected at the transport layer.
@@ -194,7 +194,7 @@ axon --help
 - Doctor command behavior:
   - `axon doctor` runs local health checks and prints a human-readable checklist
   - `axon doctor --json` prints the structured report (`checks`, `fixes_applied`, `ok`)
-  - `axon doctor --fix` applies safe local repairs; `--rekey` (requires `--fix`) allows identity reset when key data is unrecoverable
+  - `axon doctor --fix` applies safe local repairs; `--rekey` (requires `--fix`) allows identity reset when key data is unrecoverable (including non-base64/legacy raw `identity.key` contents)
   - returns exit code `2` when unresolved check failures remain (`ok: false`)
 
 ### Example interaction
