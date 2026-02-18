@@ -141,6 +141,52 @@ async fn send_to_unreachable_peer_returns_error() {
     daemon_a.shutdown().await;
 }
 
+/// add_peer IPC command enrolls a peer at runtime without daemon restart.
+#[tokio::test]
+async fn add_peer_hotloads_into_peer_table() {
+    let daemon_root = tempdir().unwrap();
+    let peer_root = tempdir().unwrap();
+
+    let daemon_paths = AxonPaths::from_root(PathBuf::from(daemon_root.path()));
+    daemon_paths.ensure_root_exists().unwrap();
+    let daemon_id = Identity::load_or_generate(&daemon_paths).unwrap();
+
+    let peer_paths = AxonPaths::from_root(PathBuf::from(peer_root.path()));
+    peer_paths.ensure_root_exists().unwrap();
+    let peer_id = Identity::load_or_generate(&peer_paths).unwrap();
+
+    let daemon = spawn_daemon(daemon_root.path(), pick_free_port(), vec![]);
+    assert!(wait_for_socket(&daemon.paths, Duration::from_secs(5)).await);
+
+    let add_reply = ipc_command(
+        &daemon.paths.socket,
+        json!({
+            "cmd": "add_peer",
+            "pubkey": peer_id.public_key_base64(),
+            "addr": format!("127.0.0.1:{}", pick_free_port())
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(add_reply["ok"], json!(true));
+    assert_eq!(add_reply["agent_id"], json!(peer_id.agent_id()));
+
+    let peers = ipc_command(&daemon.paths.socket, json!({"cmd": "peers"}))
+        .await
+        .unwrap();
+    let list = peers["peers"].as_array().unwrap();
+    let found = list
+        .iter()
+        .find(|entry| entry["agent_id"].as_str() == Some(peer_id.agent_id()))
+        .expect("added peer should appear in peers list");
+    assert_eq!(found["source"], json!("static"));
+
+    // Sanity: local daemon identity should not equal added peer identity.
+    assert_ne!(daemon_id.agent_id(), peer_id.agent_id());
+
+    daemon.shutdown().await;
+}
+
 /// Shutdown during active reconnect churn: daemon has a static peer that
 /// is unreachable, so the reconnect loop is actively retrying. Cancel
 /// should still shut down cleanly within a bounded time.

@@ -1,11 +1,11 @@
 use std::fs;
-use std::io::{BufRead, BufReader, Write};
-use std::io::{Error, ErrorKind};
+use std::io::{BufRead, BufReader, Error, ErrorKind, Write};
 use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::thread::JoinHandle;
 
+use axon::peer_token;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde_json::{Value, json};
 use tempfile::tempdir;
@@ -374,28 +374,35 @@ fn whoami_uses_ipc_while_identity_is_local() {
 }
 
 #[test]
-fn identity_peer_config_flag_prints_static_peer_snippet() {
+fn identity_default_outputs_peer_uri_and_json_flag_expands_fields() {
     let bin = axon_bin();
     let root = tempdir().expect("tempdir");
+    let root_str = root.path().to_str().expect("utf8 path");
 
-    let output = run_command(Command::new(&bin).args([
-        "--state-root",
-        root.path().to_str().expect("utf8 path"),
-        "identity",
-        "--peer-config",
-    ]));
-    assert!(output.status.success());
+    let uri_out = run_command(Command::new(&bin).args(["--state-root", root_str, "identity"]));
+    assert!(uri_out.status.success());
+    let uri = String::from_utf8_lossy(&uri_out.stdout);
+    assert!(uri.trim().starts_with("axon://"));
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("[[peers]]"));
-    assert!(stdout.contains("agent_id = \"ed25519."));
-    assert!(stdout.contains("pubkey = \""));
-    assert!(stdout.contains("addr = \"<this-machine>:7100\""));
+    let json_out =
+        run_command(Command::new(&bin).args(["--state-root", root_str, "identity", "--json"]));
+    assert!(json_out.status.success());
+    let parsed: Value = serde_json::from_slice(&json_out.stdout).expect("identity json");
 
-    // Ensure the flag prints TOML snippet rather than JSON.
     assert!(
-        !stdout.contains("\"public_key\""),
-        "peer-config output should be TOML snippet, not identity JSON"
+        parsed["agent_id"]
+            .as_str()
+            .unwrap_or_default()
+            .starts_with("ed25519.")
+    );
+    assert!(parsed["public_key"].as_str().unwrap_or_default().len() > 10);
+    assert!(parsed["addr"].as_str().is_some());
+    assert!(parsed["port"].as_u64().is_some());
+    assert!(
+        parsed["uri"]
+            .as_str()
+            .unwrap_or_default()
+            .starts_with("axon://")
     );
 }
 
@@ -414,8 +421,7 @@ fn legacy_raw_identity_key_is_auto_migrated() {
     assert!(output.status.success());
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("\"agent_id\": \"ed25519."));
-    assert!(stdout.contains("\"public_key\": \""));
+    assert!(stdout.trim().starts_with("axon://"));
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains(
@@ -427,4 +433,67 @@ fn legacy_raw_identity_key_is_auto_migrated() {
         .decode(migrated.trim())
         .expect("migrated identity.key should be base64");
     assert_eq!(decoded.len(), 32);
+}
+
+#[test]
+fn connect_writes_config_and_sends_add_peer_ipc() {
+    let bin = axon_bin();
+    let root = tempdir().expect("tempdir");
+    let root_str = root.path().to_str().expect("utf8 path");
+
+    let pubkey = STANDARD.encode([9u8; 32]);
+    let token = peer_token::encode(&pubkey, "127.0.0.1:7710").expect("token");
+    let expected_agent = peer_token::derive_agent_id_from_pubkey_base64(&pubkey)
+        .expect("derive")
+        .to_string();
+
+    let Some(server) =
+        require_socket_server(root.path(), json!({"ok": true, "agent_id": expected_agent}))
+    else {
+        return;
+    };
+
+    let output =
+        run_command(Command::new(&bin).args(["--state-root", root_str, "connect", &token]));
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Added peer"));
+
+    let command = server.join().expect("server thread");
+    assert_eq!(command["cmd"], "add_peer");
+    assert_eq!(command["addr"], "127.0.0.1:7710");
+    assert_eq!(command["pubkey"], pubkey);
+
+    let saved = fs::read_to_string(root.path().join("config.yaml")).expect("config saved");
+    assert!(saved.contains("127.0.0.1:7710"));
+}
+
+#[test]
+fn connect_returns_error_when_hotload_fails_after_config_write() {
+    let bin = axon_bin();
+    let root = tempdir().expect("tempdir");
+    let root_str = root.path().to_str().expect("utf8 path");
+
+    let pubkey = STANDARD.encode([11u8; 32]);
+    let token = peer_token::encode(&pubkey, "127.0.0.1:7720").expect("token");
+
+    let Some(server) = require_socket_server(
+        root.path(),
+        json!({"ok": false, "error": "invalid_command", "message": "bad peer"}),
+    ) else {
+        return;
+    };
+
+    let output =
+        run_command(Command::new(&bin).args(["--state-root", root_str, "connect", &token]));
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("peer saved to"));
+    assert!(stderr.contains("hot-load failed"));
+
+    let saved = fs::read_to_string(root.path().join("config.yaml")).expect("config saved");
+    assert!(saved.contains("127.0.0.1:7720"));
+
+    let command = server.join().expect("server thread");
+    assert_eq!(command["cmd"], "add_peer");
 }

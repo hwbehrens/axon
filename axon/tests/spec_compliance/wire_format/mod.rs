@@ -117,6 +117,18 @@ fn ipc_status_command_shape() {
     assert!(matches!(cmd, axon::ipc::IpcCommand::Status { .. }));
 }
 
+/// `spec/IPC.md` command schema: `{"cmd":"add_peer","pubkey":"...","addr":"host:port"}` is valid.
+#[test]
+fn ipc_add_peer_command_shape() {
+    let cmd: axon::ipc::IpcCommand = serde_json::from_value(json!({
+        "cmd": "add_peer",
+        "pubkey": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+        "addr": "127.0.0.1:7100"
+    }))
+    .unwrap();
+    assert!(matches!(cmd, axon::ipc::IpcCommand::AddPeer { .. }));
+}
+
 /// `spec/IPC.md` send command includes to, kind, and payload.
 #[test]
 fn ipc_send_command_shape() {
@@ -223,21 +235,18 @@ fn ipc_inbound_shape() {
 #[tokio::test]
 async fn config_static_peers_match_spec() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("config.toml");
+    let path = dir.path().join("config.yaml");
     std::fs::write(
         &path,
         r#"
-port = 7100
-
-[[peers]]
-agent_id = "ed25519.a1b2c3d4e5f6a7b8a1b2c3d4e5f6a7b8"
-addr = "100.64.0.5:7100"
-pubkey = "cHVia2V5MQ=="
-
-[[peers]]
-agent_id = "ed25519.b1b2c3d4e5f6a7b8a1b2c3d4e5f6a7b8"
-addr = "localhost:7101"
-pubkey = "cHVia2V5Mg=="
+port: 7100
+peers:
+  - agent_id: "ed25519.a1b2c3d4e5f6a7b8a1b2c3d4e5f6a7b8"
+    addr: "100.64.0.5:7100"
+    pubkey: "cHVia2V5MQ=="
+  - agent_id: "ed25519.b1b2c3d4e5f6a7b8a1b2c3d4e5f6a7b8"
+    addr: "localhost:7101"
+    pubkey: "cHVia2V5Mg=="
 "#,
     )
     .unwrap();

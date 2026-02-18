@@ -46,7 +46,7 @@ impl AxonPaths {
         Self {
             identity_key: root.join("identity.key"),
             identity_pub: root.join("identity.pub"),
-            config: root.join("config.toml"),
+            config: root.join("config.yaml"),
             known_peers: root.join("known_peers.json"),
             socket: root.join("axon.sock"),
             root,
@@ -91,22 +91,15 @@ pub struct Config {
     #[serde(default)]
     pub port: Option<u16>,
     #[serde(default)]
+    pub advertise_addr: Option<String>,
+    #[serde(default)]
     pub peers: Vec<StaticPeerConfig>,
 }
 
 impl Config {
     pub async fn load(path: &Path) -> Result<Self> {
-        let raw = match tokio::fs::read_to_string(path).await {
-            Ok(raw) => raw,
-            Err(err) if err.kind() == ErrorKind::NotFound => return Ok(Self::default()),
-            Err(err) => {
-                return Err(err)
-                    .with_context(|| format!("failed to read config: {}", path.display()));
-            }
-        };
-        let parsed = toml::from_str::<RawConfig>(&raw)
-            .with_context(|| format!("failed to parse config: {}", path.display()))?;
-        Ok(parsed.resolve(path).await)
+        let persisted = load_persisted_config(path).await?;
+        Ok(persisted.resolve(path).await)
     }
 
     pub fn effective_port(&self, cli_override: Option<u16>) -> u16 {
@@ -135,7 +128,7 @@ impl PeerAddr {
             .ok_or_else(|| anyhow!("resolution returned no addresses for '{host}:{port}'"))
     }
 
-    fn parse(input: &str) -> Result<Self> {
+    pub fn parse(input: &str) -> Result<Self> {
         if let Ok(addr) = input.parse::<SocketAddr>() {
             return Ok(Self::Socket(addr));
         }
@@ -220,16 +213,18 @@ pub struct StaticPeerConfig {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
-struct RawConfig {
+pub struct PersistedConfig {
     #[serde(default)]
-    name: Option<String>,
+    pub name: Option<String>,
     #[serde(default)]
-    port: Option<u16>,
+    pub port: Option<u16>,
     #[serde(default)]
-    peers: Vec<RawStaticPeerConfig>,
+    pub advertise_addr: Option<String>,
+    #[serde(default)]
+    pub peers: Vec<PersistedStaticPeerConfig>,
 }
 
-impl RawConfig {
+impl PersistedConfig {
     async fn resolve(self, path: &Path) -> Config {
         let mut peers = Vec::with_capacity(self.peers.len());
         for peer in self.peers {
@@ -254,16 +249,67 @@ impl RawConfig {
         Config {
             name: self.name,
             port: self.port,
+            advertise_addr: self.advertise_addr,
             peers,
         }
     }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
-struct RawStaticPeerConfig {
+pub struct PersistedStaticPeerConfig {
+    pub agent_id: AgentId,
+    pub addr: PeerAddr,
+    pub pubkey: String,
+}
+
+pub async fn load_persisted_config(path: &Path) -> Result<PersistedConfig> {
+    let raw = match tokio::fs::read_to_string(path).await {
+        Ok(raw) => raw,
+        Err(err) if err.kind() == ErrorKind::NotFound => return Ok(PersistedConfig::default()),
+        Err(err) => {
+            return Err(err).with_context(|| format!("failed to read config: {}", path.display()));
+        }
+    };
+    let parsed = serde_yaml::from_str::<PersistedConfig>(&raw)
+        .with_context(|| format!("failed to parse config: {}", path.display()))?;
+    Ok(parsed)
+}
+
+pub async fn save_persisted_config(path: &Path, config: &PersistedConfig) -> Result<()> {
+    if let Some(parent) = path.parent()
+        && !parent.exists()
+    {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .with_context(|| format!("failed to create directory: {}", parent.display()))?;
+    }
+
+    let serialized = serde_yaml::to_string(config)
+        .with_context(|| format!("failed to serialize config: {}", path.display()))?;
+    tokio::fs::write(path, serialized)
+        .await
+        .with_context(|| format!("failed to write config: {}", path.display()))?;
+    Ok(())
+}
+
+pub async fn append_static_peer(path: &Path, peer: PersistedStaticPeerConfig) -> Result<()> {
+    let mut config = load_persisted_config(path).await?;
+    config.peers.push(peer);
+    save_persisted_config(path, &config).await
+}
+
+pub async fn resolve_static_peer(
     agent_id: AgentId,
-    addr: PeerAddr,
+    addr: &str,
     pubkey: String,
+) -> Result<StaticPeerConfig> {
+    let addr = PeerAddr::parse(addr)?;
+    let resolved = addr.resolve_for_config_load().await?;
+    Ok(StaticPeerConfig {
+        agent_id,
+        addr: resolved,
+        pubkey,
+    })
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]

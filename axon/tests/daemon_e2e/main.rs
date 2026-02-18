@@ -54,8 +54,8 @@ pub(crate) fn spawn_daemon_with_config(
     let paths = AxonPaths::from_root(PathBuf::from(dir));
     paths.ensure_root_exists().unwrap();
 
-    let toml = toml::to_string_pretty(&config).unwrap();
-    std::fs::write(&paths.config, toml).unwrap();
+    let yaml = serde_yaml::to_string(&config).unwrap();
+    std::fs::write(&paths.config, yaml).unwrap();
 
     let opts = DaemonOptions {
         port: Some(port),

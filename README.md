@@ -47,7 +47,7 @@ Agent ←→ [Unix Socket IPC] ←→ AXON Daemon ←→ [QUIC/UDP] ←→ AXON 
 Each machine runs a lightweight daemon (<5 MB RSS, negligible CPU when idle). Agents connect to it over a Unix socket and exchange structured JSON messages. The daemon handles everything else:
 
 - **Identity** — Ed25519 keypair generated on first run. `identity.key` stores a base64-encoded 32-byte seed. Agent ID derived from the public key. Self-signed X.509 cert for QUIC/TLS 1.3.
-- **Discovery** — mDNS on LAN (zero-config) or static peers in `config.toml` for VPN/Tailscale setups.
+- **Discovery** — mDNS on LAN (zero-config) or static peers in `config.yaml` for VPN/Tailscale setups.
 - **Transport** — QUIC with TLS 1.3 and forward secrecy.
 - **Security** — Mutual TLS peer pinning — unknown peers rejected at the transport layer.
 
@@ -91,18 +91,15 @@ axon peers
 When mDNS isn't available, configure static peers:
 
 ```sh
-# On each machine, get the identity:
+# On each machine, get the share token:
 axon identity
-# → { "agent_id": "ed25519.a1b2c3d4...", "public_key": "base64..." }
+# → axon://<pubkey_base64url>@<host-or-ip>:7100
 ```
 
-Create `~/.axon/config.toml` on each machine with the other's info:
+Enroll each remote peer token:
 
-```toml
-[[peers]]
-agent_id = "ed25519.<peer-agent-id>"
-addr = "<peer-host-or-ip>:7100"
-pubkey = "<peer-public-key>"
+```sh
+axon connect axon://<pubkey_base64url>@<peer-host-or-ip>:7100
 ```
 
 Then start:
@@ -120,6 +117,9 @@ axon send <agent_id> "What is the capital of France?"
 # Fire-and-forget notification (unidirectional, JSON payload)
 axon notify <agent_id> '{"state":"ready"}'
 
+# Enroll a peer from an axon:// token
+axon connect axon://<pubkey_base64url>@<host>:<port>
+
 # Force literal text payload (even if it looks like JSON)
 axon notify --text <agent_id> '{"state":"ready"'
 
@@ -132,8 +132,14 @@ axon status
 # Daemon identity (IPC)
 axon whoami
 
-# Local identity (state root files, no daemon required)
+# Local identity URI (state root files, no daemon required)
 axon identity
+
+# Local identity details as JSON
+axon identity --json
+
+# One-shot override for URI address output
+axon identity --addr my-host.tailnet:7100
 
 # Diagnose local state (read-only report)
 axon doctor
@@ -187,26 +193,31 @@ See [`spec/MESSAGE_TYPES.md`](./spec/MESSAGE_TYPES.md) for message kinds and str
 
 ## Configuration Reference
 
-All settings are optional. AXON uses sensible defaults; you only need `config.toml` to configure static peers or override defaults.
+All settings are optional. AXON uses sensible defaults; you only need `config.yaml` to configure static peers or override defaults.
 
-### `config.toml`
+### `config.yaml`
 
-Located at `~/.axon/config.toml` by default (or `<state_root>/config.toml` when overridden).
+Located at `~/.axon/config.yaml` by default (or `<state_root>/config.yaml` when overridden).
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `name` | `String` | _(none)_ | Optional display name for this agent. |
 | `port` | `u16` | `7100` | QUIC listen port. CLI `--port` overrides this. |
+| `advertise_addr` | `String` | _(none)_ | Optional `host:port` override used by `axon identity` URI output. |
 
 #### Static peers
 
-```toml
-[[peers]]
-agent_id = "ed25519.<hex>"
-addr = "10.0.0.5:7100"              # IP:port
-# or
-addr = "my-peer.example.net:7100"   # hostname:port
-pubkey = "<base64-encoded-ed25519-public-key>"
+```yaml
+name: alice
+port: 7100
+advertise_addr: "alice.tailnet:7100" # optional
+peers:
+  - agent_id: "ed25519.<hex>"
+    addr: "10.0.0.5:7100"            # IP:port
+    pubkey: "<base64-encoded-ed25519-public-key>"
+  - agent_id: "ed25519.<hex>"
+    addr: "my-peer.example.net:7100" # hostname:port
+    pubkey: "<base64-encoded-ed25519-public-key>"
 ```
 
 Hostname peers are resolved at startup/config load time (IPv4 preferred). Unresolvable peers are skipped with warning logs.

@@ -166,9 +166,7 @@ async fn handle_uni_stream(ctx: &ConnectionContext, peer_id: &str, mut recv: qui
         Ok(Ok(bytes)) => match serde_json::from_slice::<Envelope>(&bytes) {
             Ok(mut envelope) => {
                 overwrite_authenticated_identity(&mut envelope, peer_id, &ctx.local_agent_id);
-                if envelope.kind == MessageKind::Unknown {
-                    debug!("dropping unknown kind on uni stream");
-                } else if envelope.kind.expects_response() {
+                if envelope.kind.expects_response() {
                     debug!("dropping request kind on uni stream");
                 } else if let Err(err) = envelope.validate() {
                     debug!(error = %err, "dropping invalid uni envelope");

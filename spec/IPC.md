@@ -7,7 +7,7 @@
 
 ## 1. Overview
 
-The IPC interface connects local client processes (CLI tools, agents) with the AXON daemon over a Unix domain socket. It provides message sending, peer listing, daemon status, and identity queries via a simple line-delimited JSON protocol.
+The IPC interface connects local client processes (CLI tools, agents) with the AXON daemon over a Unix domain socket. It provides message sending, peer listing, daemon status, identity queries, and runtime peer enrollment via a simple line-delimited JSON protocol.
 
 All inbound messages from peers are broadcast to connected IPC clients (deliver-or-disconnect under bounded-queue backpressure).
 
@@ -95,6 +95,20 @@ Daemon identity.
 Response shape notes:
 - `public_key` is standard base64 (Ed25519 public key).
 - `name` is optional and may be omitted when unset.
+
+### 3.5 `add_peer`
+
+Enroll a static peer while the daemon is running.
+
+**Request:**
+```json
+{"cmd": "add_peer", "pubkey": "<base64>", "addr": "host:port"}
+```
+
+**Response:**
+```json
+{"ok": true, "agent_id": "ed25519.a1b2..."}
+```
 
 ---
 

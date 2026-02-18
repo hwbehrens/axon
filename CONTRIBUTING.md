@@ -98,7 +98,7 @@ Every change must include tests. The test structure:
 ### Required review gates for user-visible changes
 
 - If you touch CLI parsing/output/routing in `axon/src/main.rs`, add or update at least one black-box CLI contract test in `axon/tests/cli_contract.rs`.
-- If you change persisted files or on-disk formats (`identity.key`, `identity.pub`, `known_peers.json`, `config.toml` semantics), document reset/re-init guidance in the same PR (README/spec/release notes as appropriate).
+- If you change persisted files or on-disk formats (`identity.key`, `identity.pub`, `known_peers.json`, `config.yaml` semantics), document reset/re-init guidance in the same PR (README/spec/release notes as appropriate).
 - If you change behavior shown in CLI help, examples, or spec text, update all affected artifacts in the same PR (`--help`, `README.md`, `spec/`).
 - If you change CLI command inventory/help semantics, update docs-conformance coverage (`axon/tests/spec_compliance/cli_help.rs`) as needed.
 - If you change `doctor` behavior (CLI wiring or reported checks), update `axon/tests/doctor_contract.rs` to preserve black-box contract coverage.

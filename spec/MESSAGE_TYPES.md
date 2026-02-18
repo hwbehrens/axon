@@ -15,7 +15,7 @@ AXON defines four message kinds plus a forward-compatibility sentinel:
 
 ### Forward Compatibility: `unknown`
 
-The `MessageKind` enum uses `#[serde(other)]` to deserialize any unrecognized kind string as `Unknown`. This allows older implementations to receive messages with kinds defined in future protocol versions without failing to parse. Unknown-kind messages received on a bidirectional stream receive a default error response (see §Default Error Response).
+The `MessageKind` enum uses `#[serde(other)]` to deserialize any unrecognized kind string as `Unknown`. This allows older implementations to receive messages with kinds defined in future protocol versions without failing to parse. Unknown-kind messages received on a **bidirectional** stream receive a default error response (see §Default Error Response). Unknown-kind messages received on a **unidirectional** stream are forwarded to IPC clients, allowing applications to decide how to handle future message kinds.
 
 ---
 

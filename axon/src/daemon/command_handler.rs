@@ -3,11 +3,13 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 
+use crate::config::resolve_static_peer;
 use crate::ipc::{
     CommandEvent, DaemonReply, IpcCommand, IpcErrorCode, IpcSendKind, IpcServer, PeerSummary,
 };
 use crate::message::{AgentId, Envelope};
 use crate::peer_table::{ConnectionStatus, PeerSource, PeerTable};
+use crate::peer_token::derive_agent_id_from_pubkey_base64;
 use crate::transport::QuicTransport;
 
 #[derive(Default)]
@@ -158,6 +160,60 @@ pub(crate) async fn handle_command(cmd: CommandEvent, ctx: &DaemonContext<'_>) -
                 })
                 .await?
         }
+        IpcCommand::AddPeer {
+            pubkey,
+            addr,
+            req_id,
+        } => match derive_agent_id_from_pubkey_base64(&pubkey) {
+            Err(_) => {
+                let error = IpcErrorCode::InvalidCommand;
+                DaemonReply::Error {
+                    ok: false,
+                    message: error.message(),
+                    error,
+                    req_id,
+                }
+            }
+            Ok(agent_id) => {
+                if matches!(agent_id.as_str(), id if id == ctx.local_agent_id.as_str()) {
+                    let error = IpcErrorCode::SelfSend;
+                    DaemonReply::Error {
+                        ok: false,
+                        message: error.message(),
+                        error,
+                        req_id,
+                    }
+                } else if ctx.peer_table.get(agent_id.as_str()).await.is_some() {
+                    let error = IpcErrorCode::InvalidCommand;
+                    DaemonReply::Error {
+                        ok: false,
+                        message: error.message(),
+                        error,
+                        req_id,
+                    }
+                } else {
+                    match resolve_static_peer(agent_id.clone(), &addr, pubkey).await {
+                        Ok(peer) => {
+                            ctx.peer_table.upsert_static(&peer).await;
+                            DaemonReply::AddPeer {
+                                ok: true,
+                                agent_id: agent_id.to_string(),
+                                req_id,
+                            }
+                        }
+                        Err(_) => {
+                            let error = IpcErrorCode::InvalidCommand;
+                            DaemonReply::Error {
+                                ok: false,
+                                message: error.message(),
+                                error,
+                                req_id,
+                            }
+                        }
+                    }
+                }
+            }
+        },
     };
 
     ctx.ipc.send_reply(client_id, &reply).await?;

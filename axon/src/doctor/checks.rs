@@ -305,7 +305,7 @@ pub(super) async fn check_known_peers(
 
 pub(super) async fn check_config(paths: &AxonPaths, report: &mut DoctorReport) -> Result<()> {
     if !paths.config.exists() {
-        report.add_check("config", true, false, "config.toml not present".to_string());
+        report.add_check("config", true, false, "config.yaml not present".to_string());
         return Ok(());
     }
 
@@ -315,7 +315,7 @@ pub(super) async fn check_config(paths: &AxonPaths, report: &mut DoctorReport) -
                 "config",
                 true,
                 false,
-                format!("config.toml parsed ({} static peers)", cfg.peers.len()),
+                format!("config.yaml parsed ({} static peers)", cfg.peers.len()),
             );
         }
         Err(err) => {
@@ -323,7 +323,7 @@ pub(super) async fn check_config(paths: &AxonPaths, report: &mut DoctorReport) -
                 "config",
                 false,
                 false,
-                format!("config.toml parse/load error: {err}"),
+                format!("config.yaml parse/load error: {err}"),
             );
         }
     }

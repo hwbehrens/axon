@@ -25,3 +25,15 @@ fn ipc_whoami_command_and_response_shape() {
     assert_eq!(j["agent_id"], "ed25519.test");
     assert_eq!(j["uptime_secs"], 123);
 }
+
+#[test]
+fn ipc_add_peer_response_shape() {
+    let reply = axon::ipc::DaemonReply::AddPeer {
+        ok: true,
+        agent_id: "ed25519.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+        req_id: None,
+    };
+    let j: Value = serde_json::to_value(&reply).unwrap();
+    assert_eq!(j["ok"], true);
+    assert_eq!(j["agent_id"], "ed25519.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+}

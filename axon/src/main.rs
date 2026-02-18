@@ -10,9 +10,13 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use tracing_subscriber::EnvFilter;
 
-use axon::config::AxonPaths;
+use axon::config::{
+    AxonPaths, Config, PeerAddr, PersistedStaticPeerConfig, load_persisted_config,
+    save_persisted_config,
+};
 use axon::daemon::{DaemonOptions, run_daemon};
 use axon::identity::Identity;
+use axon::peer_token;
 
 mod cli_examples;
 mod doctor;
@@ -74,10 +78,15 @@ enum Commands {
     Status,
     /// Print this agent's identity.
     Identity {
-        /// Print a ready-to-copy static peer TOML snippet for this identity.
+        /// Print rich identity metadata as JSON.
         #[arg(long)]
-        peer_config: bool,
+        json: bool,
+        /// Override address used for URI output (`host:port` or `ip:port`).
+        #[arg(long, value_name = "ADDR")]
+        addr: Option<String>,
     },
+    /// Enroll a peer from an `axon://` token.
+    Connect { token: String },
     /// Print running daemon identity and metadata via IPC.
     Whoami,
     /// Diagnose local AXON state and optionally apply safe repairs.
@@ -161,24 +170,92 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             let response = send_ipc(&paths, json!({"cmd": "status"})).await?;
             return print_ipc_response_and_classify(response);
         }
-        Commands::Identity { peer_config } => {
+        Commands::Identity { json, addr } => {
             let paths = resolve_paths()?;
             let identity = Identity::load_or_generate(&paths)?;
-            if peer_config {
-                println!(
-                    "{}",
-                    peer_config_snippet(identity.agent_id(), identity.public_key_base64())
-                );
-            } else {
+            let config = Config::load(&paths.config).await?;
+            let port = config.effective_port(None);
+            let addr =
+                select_identity_addr(addr.as_deref(), config.advertise_addr.as_deref(), port)
+                    .context("failed to determine identity advertise address")?;
+            let uri = peer_token::encode(identity.public_key_base64(), &addr)
+                .context("failed to construct peer URI")?;
+            if json {
+                let (addr_host, addr_port) = split_addr_port(&addr)?;
                 println!(
                     "{}",
                     serde_json::to_string_pretty(&json!({
                         "agent_id": identity.agent_id(),
                         "public_key": identity.public_key_base64(),
+                        "addr": addr_host,
+                        "port": addr_port,
+                        "uri": uri,
                     }))
                     .context("failed to encode identity output")?
                 );
+            } else {
+                println!("{uri}");
             }
+        }
+        Commands::Connect { token } => {
+            let paths = resolve_paths()?;
+            let identity = Identity::load_or_generate(&paths)?;
+            let decoded = peer_token::decode(&token).context("failed to parse peer token")?;
+
+            if decoded.agent_id.as_str() == identity.agent_id() {
+                anyhow::bail!("refusing to enroll self ({})", decoded.agent_id);
+            }
+
+            let mut persisted = load_persisted_config(&paths.config).await?;
+            if persisted
+                .peers
+                .iter()
+                .any(|peer| peer.agent_id.as_str() == decoded.agent_id.as_str())
+            {
+                anyhow::bail!(
+                    "peer {} already exists in {}",
+                    decoded.agent_id,
+                    paths.config.display()
+                );
+            }
+
+            let parsed_addr =
+                PeerAddr::parse(&decoded.addr).context("peer token has invalid addr")?;
+            persisted.peers.push(PersistedStaticPeerConfig {
+                agent_id: decoded.agent_id.clone(),
+                addr: parsed_addr,
+                pubkey: decoded.pubkey.clone(),
+            });
+            save_persisted_config(&paths.config, &persisted).await?;
+
+            if paths.socket.exists() {
+                let hotload = send_ipc(
+                    &paths,
+                    json!({"cmd": "add_peer", "pubkey": decoded.pubkey, "addr": decoded.addr}),
+                )
+                .await;
+                match hotload {
+                    Ok(response) if response.get("ok") == Some(&json!(true)) => {}
+                    Ok(response) => {
+                        let rendered = serde_json::to_string_pretty(&response)
+                            .unwrap_or_else(|_| response.to_string());
+                        anyhow::bail!(
+                            "peer saved to {} but daemon hot-load failed.\nDaemon response: {}",
+                            paths.config.display(),
+                            rendered
+                        );
+                    }
+                    Err(err) => {
+                        anyhow::bail!(
+                            "peer saved to {} but daemon hot-load failed: {}",
+                            paths.config.display(),
+                            err
+                        );
+                    }
+                }
+            }
+
+            println!("✓ Added peer {} ({})", decoded.agent_id, decoded.addr);
         }
         Commands::Whoami => {
             let paths = resolve_paths()?;
@@ -285,10 +362,47 @@ fn parse_notify_payload(data: &str, force_text: bool) -> Result<Value> {
     }
 }
 
-fn peer_config_snippet(agent_id: &str, public_key: &str) -> String {
-    format!(
-        "[[peers]]\nagent_id = \"{agent_id}\"\npubkey = \"{public_key}\"\naddr = \"<this-machine>:7100\""
-    )
+fn select_identity_addr(
+    addr_override: Option<&str>,
+    advertise_addr: Option<&str>,
+    port: u16,
+) -> Result<String> {
+    if let Some(addr) = addr_override {
+        return normalize_addr(addr);
+    }
+    if let Some(addr) = advertise_addr {
+        return normalize_addr(addr);
+    }
+
+    let ip = discover_default_route_ip().context(
+        "unable to auto-discover a routable IP; pass --addr host:port or set advertise_addr in config.yaml",
+    )?;
+    Ok(format!("{ip}:{port}"))
+}
+
+fn normalize_addr(input: &str) -> Result<String> {
+    let parsed = PeerAddr::parse(input)?;
+    Ok(parsed.to_string())
+}
+
+fn split_addr_port(addr: &str) -> Result<(String, u16)> {
+    let parsed = PeerAddr::parse(addr)?;
+    match parsed {
+        PeerAddr::Socket(socket) => Ok((socket.ip().to_string(), socket.port())),
+        PeerAddr::Host { host, port } => Ok((host, port)),
+    }
+}
+
+fn discover_default_route_ip() -> Result<std::net::IpAddr> {
+    let socket = std::net::UdpSocket::bind("0.0.0.0:0")
+        .context("failed to open UDP socket for route probe")?;
+    socket
+        .connect("8.8.8.8:80")
+        .context("failed to perform UDP route probe")?;
+    let local = socket
+        .local_addr()
+        .context("failed to read local address from route probe")?;
+    Ok(local.ip())
 }
 
 fn daemon_reply_exit_code(response: &Value) -> ExitCode {
@@ -355,57 +469,5 @@ async fn send_ipc(paths: &AxonPaths, command: Value) -> Result<Value> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use clap::error::ErrorKind;
-
-    #[test]
-    fn daemon_reply_failure_maps_to_exit_2() {
-        let code = daemon_reply_exit_code(&json!({"ok": false}));
-        assert_eq!(code, ExitCode::from(2));
-    }
-
-    #[test]
-    fn daemon_reply_success_maps_to_exit_0() {
-        let code = daemon_reply_exit_code(&json!({"ok": true}));
-        assert_eq!(code, ExitCode::SUCCESS);
-    }
-
-    #[test]
-    fn parse_agent_id_arg_normalizes_case() {
-        let parsed = parse_agent_id_arg("ED25519.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
-            .expect("mixed/upper case should parse");
-        assert_eq!(parsed, "ed25519.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
-    }
-
-    #[test]
-    fn cli_verbose_flag_parses_short_and_long() {
-        let long = Cli::try_parse_from(["axon", "--verbose", "status"]).expect("parse --verbose");
-        assert!(long.verbose);
-        assert!(matches!(long.command, Commands::Status));
-
-        let short = Cli::try_parse_from(["axon", "-v", "status"]).expect("parse -v");
-        assert!(short.verbose);
-        assert!(matches!(short.command, Commands::Status));
-
-        let default = Cli::try_parse_from(["axon", "status"]).expect("parse without verbose");
-        assert!(!default.verbose);
-        assert!(matches!(default.command, Commands::Status));
-    }
-
-    #[test]
-    fn doctor_rekey_requires_fix_flag() {
-        let err = Cli::try_parse_from(["axon", "doctor", "--rekey"])
-            .expect_err("--rekey without --fix should fail");
-        assert_eq!(err.kind(), ErrorKind::MissingRequiredArgument);
-    }
-
-    #[test]
-    fn peer_config_snippet_has_expected_toml_shape() {
-        let snippet = peer_config_snippet("ed25519.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "Zm9vYmFy");
-        assert_eq!(
-            snippet,
-            "[[peers]]\nagent_id = \"ed25519.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"\npubkey = \"Zm9vYmFy\"\naddr = \"<this-machine>:7100\""
-        );
-    }
-}
+#[path = "main_tests.rs"]
+mod tests;

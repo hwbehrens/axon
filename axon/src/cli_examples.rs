@@ -10,17 +10,18 @@ Agent IDs used:
   Alice: ed25519.a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4
   Bob:   ed25519.f6e5d4c3b2a1f6e5d4c3b2a1f6e5d4c3
 
-Configuration — Static peers (config.toml)
+Configuration — Static peers (config.yaml)
 ──────────────────────────────────────────────
-# ~/.axon/config.toml (Alice's machine)
-name = "alice"
+# ~/.axon/config.yaml (Alice's machine)
+name: alice
+peers:
+  - agent_id: "ed25519.f6e5d4c3b2a1f6e5d4c3b2a1f6e5d4c3"
+    addr: "192.168.1.42:7100"
+    pubkey: "<Bob's public_key from `axon identity --json`>"
 
-[[peers]]
-agent_id = "ed25519.f6e5d4c3b2a1f6e5d4c3b2a1f6e5d4c3"
-addr = "192.168.1.42:7100"
-pubkey = "<Bob's public_key from `axon identity`>"
-
-Tip: run `axon identity --peer-config` to print a ready-to-share snippet.
+Alternative one-token enrollment:
+  1) Bob runs:   axon identity
+  2) Alice runs: axon connect axon://<pubkey_base64url>@192.168.1.42:7100
 
 Network Protocol (QUIC)
 ──────────────────────────────────────────────
@@ -34,7 +35,7 @@ $ axon daemon --port 7100
   INFO starting AXON daemon agent_id=ed25519.a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4 port=7100
 
   (The daemon binds QUIC on 0.0.0.0:7100, creates ~/.axon/axon.sock for IPC,
-   and begins connecting to any peers listed in ~/.axon/config.toml.)
+   and begins connecting to any peers listed in ~/.axon/config.yaml.)
 
 ──────────────────────────────────────────────
 Step 1: List known peers

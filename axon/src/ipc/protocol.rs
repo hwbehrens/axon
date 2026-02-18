@@ -27,7 +27,7 @@ impl IpcSendKind {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(tag = "cmd", rename_all = "lowercase")]
+#[serde(tag = "cmd", rename_all = "snake_case")]
 pub enum IpcCommand {
     Send {
         to: String,
@@ -50,6 +50,12 @@ pub enum IpcCommand {
         #[serde(default)]
         req_id: Option<String>,
     },
+    AddPeer {
+        pubkey: String,
+        addr: String,
+        #[serde(default)]
+        req_id: Option<String>,
+    },
 }
 
 impl IpcCommand {
@@ -58,7 +64,8 @@ impl IpcCommand {
             IpcCommand::Send { req_id, .. }
             | IpcCommand::Peers { req_id, .. }
             | IpcCommand::Status { req_id, .. }
-            | IpcCommand::Whoami { req_id, .. } => req_id.as_deref(),
+            | IpcCommand::Whoami { req_id, .. }
+            | IpcCommand::AddPeer { req_id, .. } => req_id.as_deref(),
         }
     }
 
@@ -68,6 +75,7 @@ impl IpcCommand {
             IpcCommand::Peers { .. } => "peers",
             IpcCommand::Status { .. } => "status",
             IpcCommand::Whoami { .. } => "whoami",
+            IpcCommand::AddPeer { .. } => "add_peer",
         }
     }
 }
@@ -194,6 +202,12 @@ pub enum DaemonReply {
         ok: bool,
         #[serde(flatten)]
         info: WhoamiInfo,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        req_id: Option<String>,
+    },
+    AddPeer {
+        ok: bool,
+        agent_id: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         req_id: Option<String>,
     },
