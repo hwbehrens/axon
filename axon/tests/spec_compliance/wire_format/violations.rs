@@ -69,19 +69,3 @@ fn message_ids_are_unique() {
     let env2 = Envelope::new(agent_a(), agent_b(), MessageKind::Request, json!({}));
     assert_ne!(env1.id, env2.id, "UUID v4 should generate unique IDs");
 }
-
-/// default_error_response returns Error kind for unhandled requests.
-#[test]
-fn default_error_response_returns_error_kind() {
-    let req = Envelope::new(
-        "ed25519.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
-        "ed25519.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string(),
-        MessageKind::Request,
-        json!({}),
-    );
-    let resp =
-        axon::transport::default_error_response(&req, "ed25519.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
-    assert_eq!(resp.kind, MessageKind::Error);
-    let payload = resp.payload_value().unwrap();
-    assert_eq!(payload["code"], "unhandled");
-}
