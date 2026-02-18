@@ -1,4 +1,4 @@
-//! Fuzz target: deserialize arbitrary input as an AXON `Config` from TOML.
+//! Fuzz target: deserialize arbitrary input as AXON persisted config YAML.
 //! Uses lossy UTF-8 conversion since config files are text-based.
 //! Must not panic regardless of input.
 
@@ -6,9 +6,9 @@
 
 use libfuzzer_sys::fuzz_target;
 
-use axon::config::Config;
+use axon::config::PersistedConfig;
 
 fuzz_target!(|data: &[u8]| {
     let text = String::from_utf8_lossy(data);
-    let _ = toml::from_str::<Config>(&text);
+    let _ = serde_yaml::from_str::<PersistedConfig>(&text);
 });

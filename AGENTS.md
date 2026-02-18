@@ -26,12 +26,12 @@ axon/                      Rust implementation (Cargo crate)
   Cargo.toml               Dependencies and package metadata (Rust 2024 edition)
   Makefile                 Canonical build/test/verify entrypoints
   src/                     Implementation
-    main.rs                CLI entrypoint (subcommands: daemon, send, notify, peers, status, identity, connect, whoami, doctor, examples)
+    main.rs                CLI entrypoint (subcommands: daemon, request, notify, peers, status, identity, connect, whoami, doctor, config, examples)
     lib.rs                 Crate root
     daemon/                Daemon orchestration, lifecycle, reconnect
     discovery.rs           mDNS + static peer discovery (plain async functions)
     identity.rs            Ed25519 identity + agent_id derivation
-    config.rs              TOML config parsing (name, port, peers)
+    config.rs              YAML config parsing (name, port, peers)
     ipc/                   Unix socket IPC protocol + server
     message/               MessageKind (4 variants), Envelope, encode/decode
     transport/             QUIC/TLS, connections, framing

@@ -13,7 +13,7 @@ quinn-proto = { version = "0.10", features = ["arbitrary"] }
 axon = { path = ".." }
 serde_json = "1"
 tokio = { version = "1", features = ["rt", "io-util", "net", "macros"] }
-toml = "0.8"
+serde_yaml = "0.9"
 
 [[bin]]
 name = "fuzz_envelope_decode"
@@ -31,8 +31,8 @@ path = "fuzz_targets/fuzz_ipc_command.rs"
 doc = false
 
 [[bin]]
-name = "fuzz_config_toml"
-path = "fuzz_targets/fuzz_config_toml.rs"
+name = "fuzz_config_yaml"
+path = "fuzz_targets/fuzz_config_yaml.rs"
 doc = false
 
 [[bin]]
