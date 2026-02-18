@@ -16,7 +16,7 @@ OpenClaw ←→ [Unix Socket] ←→ AXON Daemon ←→ [QUIC/UDP] ←→ AXON D
 2. **Zero-config on LAN.** Agents discover each other automatically. No IP addresses to configure for the common case.
 3. **Secure by default.** All traffic encrypted with forward secrecy. Agents authenticate cryptographically via mTLS.
 4. **Lightweight.** <5MB RSS, negligible CPU when idle. Runs indefinitely.
-5. **Simple.** Minimal protocol surface. Four message kinds, four IPC commands. No unnecessary abstraction layers.
+5. **Simple.** Minimal protocol surface. Four message kinds, five IPC commands. No unnecessary abstraction layers.
 
 ## 1. Identity
 
@@ -47,17 +47,17 @@ OpenClaw ←→ [Unix Socket] ←→ AXON Daemon ←→ [QUIC/UDP] ←→ AXON D
 - Re-advertise on startup and periodically.
 
 ### Fallback: Static Peers (config file)
-```toml
-# ~/.axon/config.toml
-[[peers]]
-agent_id = "ed25519.a1b2c3d4..."
-addr = "100.64.0.5:7100"                 # IP:port
-pubkey = "base64..."
-
-[[peers]]
-agent_id = "ed25519.e5f6a7b8..."
-addr = "my-laptop.tail1234.ts.net:7100" # hostname:port
-pubkey = "base64..."
+```yaml
+# ~/.axon/config.yaml
+port: 7100
+advertise_addr: "my-laptop.tail1234.ts.net:7100" # optional override for `axon identity`
+peers:
+  - agent_id: "ed25519.a1b2c3d4..."
+    addr: "100.64.0.5:7100"                    # IP:port
+    pubkey: "base64..."
+  - agent_id: "ed25519.e5f6a7b8..."
+    addr: "my-laptop.tail1234.ts.net:7100"     # hostname:port
+    pubkey: "base64..."
 ```
 - Static peers are always in the peer table; mDNS-discovered peers are added/removed dynamically.
 - Static config enables Tailscale/VPN use immediately without any protocol changes.
@@ -109,7 +109,7 @@ Authentication is solely via mTLS. The `PeerTable` owns a shared `PubkeyMap` tha
 - No HOL blocking — each message gets its own stream.
 
 ### Listening
-- Default port: 7100 (configurable via `--port` or config.toml).
+- Default port: 7100 (configurable via `--port` or config.yaml).
 - Bind to `0.0.0.0:7100` (accept from any interface).
 
 ## 4. Message Format
@@ -157,12 +157,14 @@ Line-delimited JSON over Unix socket. Each line is one complete JSON object. Sin
 {"cmd": "peers"}
 {"cmd": "status"}
 {"cmd": "whoami"}
+{"cmd": "add_peer", "pubkey": "<base64>", "addr": "host:port"}
 ```
 
 - **`send`** — Send a message to a remote peer. Requires `to`, `kind` (`request` or `message`), and `payload`.
 - **`peers`** — List discovered and connected peers.
 - **`status`** — Daemon health: uptime, connections, message counts.
 - **`whoami`** — Daemon identity and metadata (`ok`, `agent_id`, `public_key`, optional `name`, `version`, `uptime_secs`).
+- **`add_peer`** — Enroll a new static peer at runtime from `pubkey` + `addr`.
 
 ### Authentication
 Unix socket permissions (`0600`, user-only) as baseline. Peer UID credential check (`SO_PEERCRED`/`getpeereid`) verifies connecting processes belong to the same user. No token-based auth.
@@ -197,8 +199,13 @@ axon [--state-root <dir>] status
     Daemon health: uptime, connections, message counts.
 
 axon [--state-root <dir>] identity
-    Print this agent's ID and public key.
+    Print this agent's share URI (`axon://...`) by default.
+    Use `--json` for full details (`agent_id`, `public_key`, `addr`, `port`, `uri`).
+    Use `--addr host:port` to override the emitted URI address.
     This command is local/offline; it reads/writes identity files in the selected state root.
+
+axon [--state-root <dir>] connect <axon://token>
+    Enroll a peer from token into config.yaml and hot-load it into a running daemon via IPC.
 
 axon [--state-root <dir>] whoami
     Query daemon identity and metadata over IPC.
@@ -228,30 +235,30 @@ CLI execution contracts:
 ~/.axon/
 ├── identity.key        # Ed25519 private seed (base64 text, chmod 600)
 ├── identity.pub        # Ed25519 public key (base64)
-├── config.toml         # Optional: port, name, static peers
+├── config.yaml         # Optional: name, port, advertise_addr, static peers
 ├── known_peers.json    # Cache of last-seen peer addresses (auto-managed)
 └── axon.sock           # Unix domain socket (runtime only)
 ```
 
 ### Config Format
-```toml
-name = "my-agent"    # optional display name
-port = 7100          # optional, default 7100
-
-[[peers]]
-agent_id = "ed25519.abc..."
-addr = "10.0.0.2:7100"           # or "hostname:7100"
-pubkey = "base64..."
+```yaml
+name: my-agent                         # optional display name
+port: 7100                             # optional, default 7100
+advertise_addr: "my-host.tail:7100"    # optional `axon identity` output override
+peers:
+  - agent_id: "ed25519.abc..."
+    addr: "10.0.0.2:7100"              # or "hostname:7100"
+    pubkey: "base64..."
 ```
 
-Only `name`, `port`, and `peers` are configurable. All tuning values (timeouts, buffer sizes, intervals) are hardcoded as constants.
+Only `name`, `port`, `advertise_addr`, and `peers` are configurable. All tuning values (timeouts, buffer sizes, intervals) are hardcoded as constants.
 
 ## 8. Daemon Lifecycle
 
 ### Startup
 1. Load or generate identity keypair.
 2. Generate ephemeral self-signed X.509 cert from keypair.
-3. Read config.toml (if exists) for port, name, and static peers.
+3. Read config.yaml (if exists) for port, name, advertise_addr, and static peers.
 4. Load known_peers.json cache.
 5. Start QUIC endpoint (bind port).
 6. Start mDNS advertisement + browsing.
@@ -304,7 +311,7 @@ ed25519-dalek = "2"
 mdns-sd = "0.11"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-toml = "0.8"
+serde_yaml = "0.9"
 clap = { version = "4", features = ["derive"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

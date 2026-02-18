@@ -197,7 +197,7 @@ async fn known_peers_corruption_resilience() {
 #[tokio::test]
 async fn config_corruption_resilience() {
     let dir = tempdir().unwrap();
-    let path = dir.path().join("config.toml");
+    let path = dir.path().join("config.yaml");
 
     // Random bytes.
     std::fs::write(&path, b"\x80\x81\x82\xff random garbage").unwrap();
@@ -206,29 +206,29 @@ async fn config_corruption_resilience() {
         "random bytes should return Err"
     );
 
-    // Invalid TOML syntax.
-    std::fs::write(&path, b"[invalid toml =====").unwrap();
+    // Invalid YAML syntax.
+    std::fs::write(&path, b"invalid: [yaml").unwrap();
     assert!(
         Config::load(&path).await.is_err(),
-        "invalid TOML should return Err"
+        "invalid YAML should return Err"
     );
 
-    // Valid TOML but wrong types (port as string).
-    std::fs::write(&path, b"port = \"not a number\"").unwrap();
+    // Valid YAML but wrong types (port as string).
+    std::fs::write(&path, b"port: \"not a number\"").unwrap();
     assert!(
         Config::load(&path).await.is_err(),
         "wrong types should return Err"
     );
 
-    // Valid TOML but wrong nested type (peers as string).
-    std::fs::write(&path, b"peers = \"not an array\"").unwrap();
+    // Valid YAML but wrong nested type (peers as string).
+    std::fs::write(&path, b"peers: \"not an array\"").unwrap();
     assert!(
         Config::load(&path).await.is_err(),
         "wrong nested types should return Err"
     );
 
     // Non-existent path returns default config (not Err).
-    let missing = dir.path().join("nonexistent.toml");
+    let missing = dir.path().join("nonexistent.yaml");
     let config = Config::load(&missing).await.unwrap();
     assert_eq!(
         config.effective_port(None),
@@ -241,7 +241,7 @@ async fn config_corruption_resilience() {
     );
 
     // Valid minimal config.
-    std::fs::write(&path, b"port = 9000").unwrap();
+    std::fs::write(&path, b"port: 9000").unwrap();
     let config = Config::load(&path).await.unwrap();
     assert_eq!(config.effective_port(None), 9000);
     assert!(config.peers.is_empty());

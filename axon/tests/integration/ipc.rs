@@ -200,6 +200,20 @@ fn ipc_send_rejects_non_sendable_kinds() {
     }
 }
 
+/// IPC add_peer command parses with required fields.
+#[test]
+fn ipc_add_peer_command_deserializes() {
+    let input = r#"{"cmd":"add_peer","pubkey":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=","addr":"127.0.0.1:7100"}"#;
+    let cmd: IpcCommand = serde_json::from_str(input).unwrap();
+    match cmd {
+        IpcCommand::AddPeer { pubkey, addr, .. } => {
+            assert_eq!(pubkey, "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=");
+            assert_eq!(addr, "127.0.0.1:7100");
+        }
+        _ => panic!("expected AddPeer"),
+    }
+}
+
 /// Invalid send.kind values return invalid_command.
 #[tokio::test]
 async fn ipc_send_invalid_kind_returns_invalid_command() {

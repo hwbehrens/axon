@@ -38,20 +38,19 @@ fn cert_pubkey_matches_identity() {
 // Config integration
 // =========================================================================
 
-/// Config with static peers round-trips through TOML.
+/// Config with static peers round-trips through YAML.
 #[tokio::test]
 async fn config_static_peers_roundtrip() {
     let dir = tempdir().unwrap();
-    let path = dir.path().join("config.toml");
+    let path = dir.path().join("config.yaml");
     std::fs::write(
         &path,
         r#"
-port = 8000
-
-[[peers]]
-agent_id = "ed25519.a1b2c3d4e5f6a7b8a1b2c3d4e5f6a7b8"
-addr = "10.0.0.1:7100"
-pubkey = "dGVzdHB1YmtleQ=="
+port: 8000
+peers:
+  - agent_id: "ed25519.a1b2c3d4e5f6a7b8a1b2c3d4e5f6a7b8"
+    addr: "10.0.0.1:7100"
+    pubkey: "dGVzdHB1YmtleQ=="
 "#,
     )
     .unwrap();

@@ -173,7 +173,7 @@ impl ServerCertVerifier for PeerCertVerifier {
         } else {
             return Err(rustls::Error::General(format!(
                 "rejecting unknown server peer {expected_agent_id}: no public key on record from discovery. \
-                 Add this peer to config.toml or ensure mDNS discovery has seen it first."
+                 Add this peer to config.yaml (or run `axon connect <token>`) or ensure mDNS discovery has seen it first."
             )));
         }
 
@@ -246,7 +246,7 @@ impl ClientCertVerifier for PeerClientCertVerifier {
         } else {
             return Err(rustls::Error::General(format!(
                 "rejecting unknown client peer {agent_id}: no public key on record from discovery. \
-                 Add this peer to config.toml or ensure mDNS discovery has seen it first."
+                 Add this peer to config.yaml (or run `axon connect <token>`) or ensure mDNS discovery has seen it first."
             )));
         }
 

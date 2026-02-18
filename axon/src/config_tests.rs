@@ -4,31 +4,34 @@ use tempfile::tempdir;
 #[tokio::test]
 async fn config_defaults_when_missing() {
     let dir = tempdir().expect("temp dir");
-    let cfg = Config::load(&dir.path().join("missing.toml"))
+    let cfg = Config::load(&dir.path().join("missing.yaml"))
         .await
         .expect("load missing config");
     assert_eq!(cfg.effective_port(None), 7100);
     assert!(cfg.peers.is_empty());
+    assert!(cfg.advertise_addr.is_none());
 }
 
 #[tokio::test]
 async fn config_parses_static_peers() {
     let dir = tempdir().expect("temp dir");
-    let path = dir.path().join("config.toml");
+    let path = dir.path().join("config.yaml");
     std::fs::write(
         &path,
         r#"
-                port = 8111
-                [[peers]]
-                agent_id = "ed25519.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-                addr = "127.0.0.1:7100"
-                pubkey = "Zm9v"
+port: 8111
+advertise_addr: "alice.tailnet:7100"
+peers:
+  - agent_id: "ed25519.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    addr: "127.0.0.1:7100"
+    pubkey: "Zm9v"
             "#,
     )
     .expect("write config");
 
     let cfg = Config::load(&path).await.expect("load config");
     assert_eq!(cfg.effective_port(None), 8111);
+    assert_eq!(cfg.advertise_addr.as_deref(), Some("alice.tailnet:7100"));
     assert_eq!(cfg.peers.len(), 1);
     assert_eq!(cfg.peers[0].addr.to_string(), "127.0.0.1:7100");
 }
@@ -36,14 +39,14 @@ async fn config_parses_static_peers() {
 #[tokio::test]
 async fn config_parses_hostname_peer_addr() {
     let dir = tempdir().expect("temp dir");
-    let path = dir.path().join("config.toml");
+    let path = dir.path().join("config.yaml");
     std::fs::write(
         &path,
         r#"
-                [[peers]]
-                agent_id = "ed25519.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-                addr = "localhost:7100"
-                pubkey = "Zm9v"
+peers:
+  - agent_id: "ed25519.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    addr: "localhost:7100"
+    pubkey: "Zm9v"
             "#,
     )
     .expect("write config");
@@ -57,19 +60,17 @@ async fn config_parses_hostname_peer_addr() {
 #[tokio::test]
 async fn config_skips_unresolvable_or_invalid_peer_addr() {
     let dir = tempdir().expect("temp dir");
-    let path = dir.path().join("config.toml");
+    let path = dir.path().join("config.yaml");
     std::fs::write(
         &path,
         r#"
-                [[peers]]
-                agent_id = "ed25519.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-                addr = "127.0.0.1:7100"
-                pubkey = "Zm9v"
-
-                [[peers]]
-                agent_id = "ed25519.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-                addr = "peer-does-not-exist.invalid:7100"
-                pubkey = "YmFy"
+peers:
+  - agent_id: "ed25519.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    addr: "127.0.0.1:7100"
+    pubkey: "Zm9v"
+  - agent_id: "ed25519.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    addr: "peer-does-not-exist.invalid:7100"
+    pubkey: "YmFy"
             "#,
     )
     .expect("write config");
@@ -87,6 +88,7 @@ fn cli_override_takes_precedence() {
     let cfg = Config {
         name: None,
         port: Some(8000),
+        advertise_addr: None,
         peers: Vec::new(),
     };
     assert_eq!(cfg.effective_port(Some(9999)), 9999);
@@ -94,20 +96,20 @@ fn cli_override_takes_precedence() {
 }
 
 #[tokio::test]
-async fn invalid_toml_returns_error() {
+async fn invalid_yaml_returns_error() {
     let dir = tempdir().expect("temp dir");
-    let path = dir.path().join("config.toml");
-    std::fs::write(&path, "{{{{not toml!").expect("write");
+    let path = dir.path().join("config.yaml");
+    std::fs::write(&path, "not: [valid").expect("write");
     assert!(Config::load(&path).await.is_err());
 }
 
 #[tokio::test]
 async fn config_ignores_unknown_fields() {
     let dir = tempdir().expect("temp dir");
-    let path = dir.path().join("config.toml");
+    let path = dir.path().join("config.yaml");
     std::fs::write(
         &path,
-        "max_ipc_clients = 32\nmax_connections = 256\nkeepalive_secs = 5\nport = 7200\n",
+        "max_ipc_clients: 32\nmax_connections: 256\nkeepalive_secs: 5\nport: 7200\n",
     )
     .expect("write");
     let cfg = Config::load(&path)
@@ -147,7 +149,7 @@ fn discover_paths_from_root() {
     let paths = AxonPaths::from_root(root.clone());
     assert_eq!(paths.identity_key, root.join("identity.key"));
     assert_eq!(paths.identity_pub, root.join("identity.pub"));
-    assert_eq!(paths.config, root.join("config.toml"));
+    assert_eq!(paths.config, root.join("config.yaml"));
     assert_eq!(paths.known_peers, root.join("known_peers.json"));
     assert_eq!(paths.socket, root.join("axon.sock"));
 }
@@ -209,6 +211,7 @@ proptest! {
         let cfg = Config {
             name: None,
             port: config_port,
+            advertise_addr: None,
             peers: Vec::new(),
         };
         prop_assert_eq!(cfg.effective_port(Some(cli_port)), cli_port);
@@ -219,11 +222,36 @@ proptest! {
         let cfg = Config {
             name: None,
             port: config_port,
+            advertise_addr: None,
             peers: Vec::new(),
         };
         let expected = config_port.unwrap_or(7100);
         prop_assert_eq!(cfg.effective_port(None), expected);
     }
+}
+
+#[tokio::test]
+async fn append_static_peer_persists_yaml_entry() {
+    let dir = tempdir().expect("temp dir");
+    let path = dir.path().join("config.yaml");
+
+    append_static_peer(
+        &path,
+        PersistedStaticPeerConfig {
+            agent_id: "ed25519.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            addr: PeerAddr::parse("127.0.0.1:7100").expect("addr"),
+            pubkey: "Zm9v".to_string(),
+        },
+    )
+    .await
+    .expect("append peer");
+
+    let persisted = load_persisted_config(&path).await.expect("load persisted");
+    assert_eq!(persisted.peers.len(), 1);
+    assert_eq!(
+        persisted.peers[0].agent_id,
+        "ed25519.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    );
 }
 
 // =========================================================================
