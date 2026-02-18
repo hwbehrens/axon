@@ -215,10 +215,13 @@ pub struct StaticPeerConfig {
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct PersistedConfig {
     #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub port: Option<u16>,
     #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub advertise_addr: Option<String>,
     #[serde(default)]
     pub peers: Vec<PersistedStaticPeerConfig>,

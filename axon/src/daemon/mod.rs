@@ -158,6 +158,38 @@ pub async fn run_daemon(opts: DaemonOptions) -> Result<()> {
         }
     });
 
+    // --- Pair-request forwarder (transport TLS verifier -> IPC clients) ---
+    let mut pair_request_rx = transport.subscribe_pair_requests();
+    let ipc_for_pair_request = ipc.clone();
+    let cancel_for_pair_request = cancel.clone();
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                _ = cancel_for_pair_request.cancelled() => break,
+                msg = pair_request_rx.recv() => {
+                    match msg {
+                        Ok(pair_request) => {
+                            if let Err(err) = ipc_for_pair_request
+                                .broadcast_pair_request(
+                                    &pair_request.agent_id,
+                                    &pair_request.pubkey,
+                                    pair_request.addr.as_deref(),
+                                )
+                                .await
+                            {
+                                warn!(error = %err, "failed broadcasting pair_request to IPC clients");
+                            }
+                        }
+                        Err(err) => {
+                            warn!(error = %err, "pair_request subscription closed");
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    });
+
     // --- Discovery ---
     let (peer_event_tx, mut peer_event_rx) = mpsc::channel(256);
     {

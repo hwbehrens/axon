@@ -44,9 +44,10 @@ fuzz:
 	cargo +nightly fuzz run fuzz_envelope_decode -- -max_total_time=30
 	cargo +nightly fuzz run fuzz_wire_decode -- -max_total_time=30
 	cargo +nightly fuzz run fuzz_ipc_command -- -max_total_time=30
-	cargo +nightly fuzz run fuzz_config_toml -- -max_total_time=30
+	cargo +nightly fuzz run fuzz_config_yaml -- -max_total_time=30
 	cargo +nightly fuzz run fuzz_known_peers -- -max_total_time=30
 	cargo +nightly fuzz run fuzz_envelope_roundtrip -- -max_total_time=30
+	cargo +nightly fuzz run fuzz_ipc_session -- -max_total_time=30
 	@echo "=== All fuzz targets passed ==="
 
 # Run a specific fuzz target: make fuzz-target TARGET=fuzz_envelope_decode [DURATION=60]

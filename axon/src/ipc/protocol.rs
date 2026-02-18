@@ -33,6 +33,8 @@ pub enum IpcCommand {
         to: String,
         kind: IpcSendKind,
         payload: Value,
+        #[serde(default)]
+        timeout_secs: Option<u64>,
         #[serde(default, rename = "ref")]
         ref_id: Option<Uuid>,
         #[serde(default)]
@@ -122,6 +124,7 @@ pub enum IpcErrorCode {
     PeerNotFound,
     SelfSend,
     PeerUnreachable,
+    Timeout,
     InternalError,
 }
 
@@ -133,6 +136,7 @@ impl std::fmt::Display for IpcErrorCode {
             IpcErrorCode::PeerNotFound => write!(f, "peer_not_found"),
             IpcErrorCode::SelfSend => write!(f, "self_send"),
             IpcErrorCode::PeerUnreachable => write!(f, "peer_unreachable"),
+            IpcErrorCode::Timeout => write!(f, "timeout"),
             IpcErrorCode::InternalError => write!(f, "internal_error"),
         }
     }
@@ -148,7 +152,8 @@ impl IpcErrorCode {
             IpcErrorCode::CommandTooLarge => "IPC command exceeds 64KB limit",
             IpcErrorCode::PeerNotFound => "target agent_id not in peer table",
             IpcErrorCode::SelfSend => "cannot send messages to self",
-            IpcErrorCode::PeerUnreachable => "peer known but connection failed or timed out",
+            IpcErrorCode::PeerUnreachable => "peer known but connection failed",
+            IpcErrorCode::Timeout => "request timed out waiting for peer response",
             IpcErrorCode::InternalError => "unexpected daemon error",
         }
     }
@@ -197,6 +202,13 @@ pub enum DaemonReply {
         event: &'static str, // always "inbound"
         from: String,
         envelope: Envelope,
+    },
+    PairRequestEvent {
+        event: &'static str, // always "pair_request"
+        agent_id: String,
+        pubkey: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        addr: Option<String>,
     },
     Whoami {
         ok: bool,

@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::future::Future;
+use std::future::IntoFuture;
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -13,10 +14,11 @@ use tracing::{debug, info, warn};
 use crate::identity::Identity;
 use crate::message::{AgentId, Envelope};
 use crate::peer_table::{PeerRecord, PubkeyMap};
+use crate::transport::PairRequest;
 
 use super::connection::run_connection;
 use super::connection::{send_request, send_unidirectional};
-use super::tls::build_endpoint;
+use super::tls::{build_endpoint, with_handshake_remote_addr};
 
 /// Optional callback to produce a response for a bidirectional request.
 /// If `None` is returned, the default error response is used.
@@ -33,6 +35,7 @@ pub struct QuicTransport {
     /// Per-peer lock to prevent concurrent connection attempts to the same peer.
     connecting_locks: Arc<RwLock<HashMap<String, Arc<Mutex<()>>>>>,
     inbound_tx: broadcast::Sender<Arc<Envelope>>,
+    pair_request_tx: broadcast::Sender<PairRequest>,
     inbound_semaphore: Arc<Semaphore>,
     cancel: CancellationToken,
     response_handler: Option<ResponseHandlerFn>,
@@ -73,7 +76,7 @@ impl QuicTransport {
         pubkey_map: PubkeyMap,
     ) -> Result<Self> {
         let cert = identity.make_quic_certificate()?;
-        let (endpoint, inbound_tx) =
+        let (endpoint, inbound_tx, pair_request_tx) =
             build_endpoint(bind_addr, &cert, pubkey_map, keepalive, idle_timeout)?;
 
         let transport = Self {
@@ -83,6 +86,7 @@ impl QuicTransport {
             connections: Arc::new(RwLock::new(HashMap::new())),
             connecting_locks: Arc::new(RwLock::new(HashMap::new())),
             inbound_tx,
+            pair_request_tx,
             inbound_semaphore: Arc::new(Semaphore::new(max_connections)),
             cancel,
             response_handler,
@@ -94,6 +98,10 @@ impl QuicTransport {
 
     pub fn subscribe_inbound(&self) -> broadcast::Receiver<Arc<Envelope>> {
         self.inbound_tx.subscribe()
+    }
+
+    pub fn subscribe_pair_requests(&self) -> broadcast::Receiver<PairRequest> {
+        self.pair_request_tx.subscribe()
     }
 
     pub async fn has_connection(&self, agent_id: &str) -> bool {
@@ -137,8 +145,9 @@ impl QuicTransport {
             .endpoint
             .connect(peer.addr, &peer.agent_id)
             .with_context(|| format!("failed to begin QUIC connect to {}", peer.addr))?;
+        let remote_addr = connecting.remote_address();
 
-        let connection = connecting
+        let connection = with_handshake_remote_addr(remote_addr, connecting)
             .await
             .with_context(|| format!("QUIC handshake failed with {}", peer.addr))?;
 
@@ -196,7 +205,8 @@ impl QuicTransport {
                     }
                     maybe_conn = endpoint.accept() => {
                         let Some(connecting) = maybe_conn else { break };
-                        match connecting.await {
+                        let remote_addr = connecting.remote_address();
+                        match with_handshake_remote_addr(remote_addr, connecting.into_future()).await {
                             Ok(connection) => {
                                 let permit = match inbound_semaphore.clone().try_acquire_owned() {
                                     Ok(permit) => permit,

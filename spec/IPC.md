@@ -35,8 +35,10 @@ Send a message to a peer.
 
 **Request:**
 ```json
-{"cmd": "send", "to": "<agent_id>", "kind": "request|message", "payload": {...}, "ref": "<uuid-optional>"}
+{"cmd": "send", "to": "<agent_id>", "kind": "request|message", "payload": {...}, "timeout_secs": 30, "ref": "<uuid-optional>"}
 ```
+
+`timeout_secs` is optional and only meaningful for `kind=request`.
 
 **Response (unidirectional):**
 ```json
@@ -127,7 +129,8 @@ If `req_id` was present on the command, it is echoed in the error response.
 | `command_too_large` | IPC commands over 64 KB are rejected. |
 | `peer_not_found` | Target `agent_id` not in peer table. |
 | `self_send` | Sending to your own `agent_id` is rejected. |
-| `peer_unreachable` | Peer known but QUIC connection failed or timed out. |
+| `peer_unreachable` | Peer known but QUIC connection/setup failed. |
+| `timeout` | Request timed out waiting for a peer response. |
 | `internal_error` | Unexpected daemon error. |
 
 ---
@@ -140,9 +143,17 @@ All inbound messages from peers are broadcast to connected IPC clients as unsoli
 {"event": "inbound", "from": "<agent_id>", "envelope": {...}}
 ```
 
-Inbound events are identified by the presence of `"event": "inbound"`. They never carry `"ok"` or `"req_id"`.
+Rejected unknown-peer handshakes are also broadcast as informational events:
 
-Clients demultiplex by checking for `"event": "inbound"` — if present, it is a pushed event; otherwise it is a command response.
+```json
+{"event": "pair_request", "agent_id": "<agent_id>", "pubkey": "<base64>", "addr": "ip:port-or-host:port"}
+```
+
+`pair_request.addr` is best-effort and may be omitted. AXON captures the remote address from QUIC handshake context when available, but rustls verifier callbacks do not carry it directly.
+
+Inbound events are identified by the presence of an `"event"` key. They never carry `"ok"` or `"req_id"`.
+
+Clients demultiplex by checking for `"event"` — if present, it is a pushed event; otherwise it is a command response.
 
 The daemon uses a bounded per-client outbound queue. If a client cannot keep up and its queue overflows, that client is disconnected (deliver-or-disconnect semantics). Messages arriving when no IPC client is connected are dropped.
 

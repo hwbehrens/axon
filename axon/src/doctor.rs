@@ -9,6 +9,9 @@ mod identity_check;
 
 #[derive(Debug, Clone, Args)]
 pub struct DoctorArgs {
+    /// Print machine-readable JSON report.
+    #[arg(long)]
+    pub json: bool,
     /// Apply safe local fixes for detected issues.
     #[arg(long)]
     pub fix: bool,

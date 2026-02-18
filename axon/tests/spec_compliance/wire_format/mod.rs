@@ -191,6 +191,7 @@ fn ipc_error_codes_match_spec_table() {
         "peer_not_found".to_string(),
         "self_send".to_string(),
         "peer_unreachable".to_string(),
+        "timeout".to_string(),
         "internal_error".to_string(),
     ];
     let actual: Vec<String> = vec![
@@ -199,6 +200,7 @@ fn ipc_error_codes_match_spec_table() {
         axon::ipc::IpcErrorCode::PeerNotFound,
         axon::ipc::IpcErrorCode::SelfSend,
         axon::ipc::IpcErrorCode::PeerUnreachable,
+        axon::ipc::IpcErrorCode::Timeout,
         axon::ipc::IpcErrorCode::InternalError,
     ]
     .into_iter()
@@ -225,6 +227,22 @@ fn ipc_inbound_shape() {
     let j: Value = serde_json::to_value(&reply).unwrap();
     assert_eq!(j["event"], "inbound");
     assert!(j["envelope"]["kind"].is_string());
+}
+
+/// `spec/IPC.md` pair_request events include event, agent_id, and pubkey.
+#[test]
+fn ipc_pair_request_shape() {
+    let reply = axon::ipc::DaemonReply::PairRequestEvent {
+        event: "pair_request",
+        agent_id: agent_a().to_string(),
+        pubkey: "Zm9v".to_string(),
+        addr: Some("127.0.0.1:7100".to_string()),
+    };
+    let j: Value = serde_json::to_value(&reply).unwrap();
+    assert_eq!(j["event"], "pair_request");
+    assert_eq!(j["agent_id"], agent_a().to_string());
+    assert_eq!(j["pubkey"], "Zm9v");
+    assert_eq!(j["addr"], "127.0.0.1:7100");
 }
 
 // =========================================================================

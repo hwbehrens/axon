@@ -79,7 +79,7 @@ async fn wrong_pubkey_prevents_connection() {
 }
 
 /// Send to unreachable peer: when a peer is known but unreachable,
-/// the send should fail with peer_unreachable.
+/// request send should fail with timeout or peer_unreachable.
 #[tokio::test]
 
 async fn send_to_unreachable_peer_returns_error() {
@@ -106,26 +106,26 @@ async fn send_to_unreachable_peer_returns_error() {
     let daemon_a = spawn_daemon(dir_a.path(), port_a, peers_for_a);
     assert!(wait_for_socket(&daemon_a.paths, Duration::from_secs(5)).await);
 
-    // B is NOT running. Send from A → B should fail with peer_unreachable.
-    // Use a longer timeout since the QUIC connect attempt may take time to fail.
+    // B is NOT running. Bound request timeout to make this deterministic.
     let reply = ipc_command_timeout(
         &daemon_a.paths.socket,
         json!({
             "cmd": "send",
             "to": id_b.agent_id(),
             "kind": "request",
+            "timeout_secs": 2,
             "payload": {}
         }),
-        Duration::from_secs(20),
+        Duration::from_secs(10),
     )
     .await
     .unwrap();
 
     assert_eq!(reply["ok"], json!(false));
     let error = reply["error"].as_str().unwrap();
-    assert_eq!(
-        error, "peer_unreachable",
-        "error should be peer_unreachable, got: {error}"
+    assert!(
+        matches!(error, "timeout" | "peer_unreachable"),
+        "error should be timeout or peer_unreachable, got: {error}"
     );
 
     // Status counters should not increment.

@@ -1,13 +1,11 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result};
 #[cfg(feature = "generate-docs")]
 use clap::CommandFactory;
 use clap::{Parser, Subcommand};
-use serde_json::{Value, json};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::UnixStream;
+use serde_json::json;
 use tracing_subscriber::EnvFilter;
 
 use axon::config::{
@@ -18,6 +16,7 @@ use axon::daemon::{DaemonOptions, run_daemon};
 use axon::identity::Identity;
 use axon::peer_token;
 
+mod cli;
 mod cli_examples;
 mod doctor;
 
@@ -58,24 +57,40 @@ enum Commands {
         disable_mdns: bool,
     },
     /// Send a request to another agent and wait for a response.
-    Send {
+    Request {
         #[arg(value_parser = parse_agent_id_arg)]
         agent_id: String,
+        /// Timeout in seconds while waiting for a response.
+        #[arg(
+            long,
+            value_name = "SECONDS",
+            default_value_t = 30,
+            value_parser = clap::value_parser!(u64).range(1..)
+        )]
+        timeout: u64,
         message: String,
     },
     /// Send a fire-and-forget message to another agent.
     Notify {
         #[arg(value_parser = parse_agent_id_arg)]
         agent_id: String,
-        /// Force data to be treated as raw text payload.
+        /// Parse payload as JSON (default sends literal text).
         #[arg(long)]
-        text: bool,
+        json: bool,
         data: String,
     },
     /// List discovered and connected peers.
-    Peers,
+    Peers {
+        /// Print machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// Show daemon status.
-    Status,
+    Status {
+        /// Print machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// Print this agent's identity.
     Identity {
         /// Print rich identity metadata as JSON.
@@ -88,9 +103,15 @@ enum Commands {
     /// Enroll a peer from an `axon://` token.
     Connect { token: String },
     /// Print running daemon identity and metadata via IPC.
-    Whoami,
+    Whoami {
+        /// Print machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// Diagnose local AXON state and optionally apply safe repairs.
     Doctor(doctor::DoctorArgs),
+    /// Read/write scalar config values.
+    Config(cli::config_cmd::ConfigArgs),
     /// Print example interactions.
     Examples,
     /// Generate shell completions and man page (internal, for packaging).
@@ -135,40 +156,78 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             })
             .await?;
         }
-        Commands::Send { agent_id, message } => {
+        Commands::Request {
+            agent_id,
+            timeout,
+            message,
+        } => {
             let paths = resolve_paths()?;
             let payload = json!({ "message": message });
-            let response = send_ipc(
+            let response = cli::ipc_client::send_ipc(
                 &paths,
-                json!({"cmd": "send", "to": agent_id, "kind": "request", "payload": payload}),
+                json!({
+                    "cmd": "send",
+                    "to": agent_id,
+                    "kind": "request",
+                    "timeout_secs": timeout,
+                    "payload": payload
+                }),
             )
             .await?;
-            return print_ipc_response_and_classify(response);
+            print_json_value(&response)?;
+            return Ok(cli::ipc_client::daemon_reply_exit_code(
+                &response,
+                cli::ipc_client::ResponseMode::Request,
+            ));
         }
         Commands::Notify {
             agent_id,
-            text,
+            json,
             data,
         } => {
             let paths = resolve_paths()?;
-            let parsed_data = parse_notify_payload(&data, text)?;
+            let parsed_data = cli::notify_payload::parse_notify_payload(&data, json)?;
             let payload = json!({ "data": parsed_data });
-            let response = send_ipc(
+            let response = cli::ipc_client::send_ipc(
                 &paths,
                 json!({"cmd": "send", "to": agent_id, "kind": "message", "payload": payload}),
             )
             .await?;
-            return print_ipc_response_and_classify(response);
+            print_json_value(&response)?;
+            return Ok(cli::ipc_client::daemon_reply_exit_code(
+                &response,
+                cli::ipc_client::ResponseMode::Generic,
+            ));
         }
-        Commands::Peers => {
+        Commands::Peers { json } => {
             let paths = resolve_paths()?;
-            let response = send_ipc(&paths, json!({"cmd": "peers"})).await?;
-            return print_ipc_response_and_classify(response);
+            let response = cli::ipc_client::send_ipc(&paths, json!({"cmd": "peers"})).await?;
+            if json {
+                print_json_value(&response)?;
+            } else if let Some(rendered) = cli::format::render_peers_human(&response) {
+                println!("{rendered}");
+            } else {
+                print_json_value(&response)?;
+            }
+            return Ok(cli::ipc_client::daemon_reply_exit_code(
+                &response,
+                cli::ipc_client::ResponseMode::Generic,
+            ));
         }
-        Commands::Status => {
+        Commands::Status { json } => {
             let paths = resolve_paths()?;
-            let response = send_ipc(&paths, json!({"cmd": "status"})).await?;
-            return print_ipc_response_and_classify(response);
+            let response = cli::ipc_client::send_ipc(&paths, json!({"cmd": "status"})).await?;
+            if json {
+                print_json_value(&response)?;
+            } else if let Some(rendered) = cli::format::render_status_human(&response) {
+                println!("{rendered}");
+            } else {
+                print_json_value(&response)?;
+            }
+            return Ok(cli::ipc_client::daemon_reply_exit_code(
+                &response,
+                cli::ipc_client::ResponseMode::Generic,
+            ));
         }
         Commands::Identity { json, addr } => {
             let paths = resolve_paths()?;
@@ -182,19 +241,16 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                 .context("failed to construct peer URI")?;
             if json {
                 let (addr_host, addr_port) = split_addr_port(&addr)?;
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&json!({
-                        "agent_id": identity.agent_id(),
-                        "public_key": identity.public_key_base64(),
-                        "addr": addr_host,
-                        "port": addr_port,
-                        "uri": uri,
-                    }))
-                    .context("failed to encode identity output")?
-                );
+                let rendered = cli::identity_output::render_identity_json(
+                    identity.agent_id(),
+                    identity.public_key_base64(),
+                    &addr_host,
+                    addr_port,
+                    &uri,
+                )?;
+                println!("{rendered}");
             } else {
-                println!("{uri}");
+                println!("{}", cli::identity_output::render_identity_human(&uri));
             }
         }
         Commands::Connect { token } => {
@@ -229,7 +285,7 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             save_persisted_config(&paths.config, &persisted).await?;
 
             if paths.socket.exists() {
-                let hotload = send_ipc(
+                let hotload = cli::ipc_client::send_ipc(
                     &paths,
                     json!({"cmd": "add_peer", "pubkey": decoded.pubkey, "addr": decoded.addr}),
                 )
@@ -257,32 +313,55 @@ async fn run(cli: Cli) -> Result<ExitCode> {
 
             println!("✓ Added peer {} ({})", decoded.agent_id, decoded.addr);
         }
-        Commands::Whoami => {
+        Commands::Whoami { json } => {
             let paths = resolve_paths()?;
-            let response = send_ipc(&paths, json!({"cmd": "whoami"})).await?;
-            return print_ipc_response_and_classify(response);
+            let response = cli::ipc_client::send_ipc(&paths, json!({"cmd": "whoami"})).await?;
+            if json {
+                print_json_value(&response)?;
+            } else if let Some(rendered) = cli::format::render_whoami_human(&response) {
+                println!("{rendered}");
+            } else {
+                print_json_value(&response)?;
+            }
+            return Ok(cli::ipc_client::daemon_reply_exit_code(
+                &response,
+                cli::ipc_client::ResponseMode::Generic,
+            ));
         }
         Commands::Doctor(args) => {
             let paths = resolve_paths()?;
             let report = doctor::run(&paths, &args).await?;
-            let rendered =
-                serde_json::to_string_pretty(&report).context("failed to encode doctor output")?;
-            println!("{rendered}");
+            if args.json {
+                let rendered = serde_json::to_string_pretty(&report)
+                    .context("failed to encode doctor output")?;
+                println!("{rendered}");
+            } else {
+                println!("{}", cli::format::render_doctor_human(&report));
+            }
             if report.ok {
                 return Ok(ExitCode::SUCCESS);
             }
             return Ok(ExitCode::from(2));
         }
-        #[cfg(feature = "generate-docs")]
-        Commands::GenDocs { out_dir } => {
-            generate_docs(&out_dir)?;
+        Commands::Config(args) => {
+            let paths = resolve_paths()?;
+            return cli::config_cmd::run(&paths, args).await;
         }
         Commands::Examples => {
             cli_examples::print_annotated_examples();
         }
+        #[cfg(feature = "generate-docs")]
+        Commands::GenDocs { out_dir } => {
+            generate_docs(&out_dir)?;
+        }
     }
 
     Ok(ExitCode::SUCCESS)
+}
+
+fn print_json_value(value: &serde_json::Value) -> Result<()> {
+    println!("{}", cli::ipc_client::render_json(value)?);
+    Ok(())
 }
 
 #[cfg(feature = "generate-docs")]
@@ -344,24 +423,6 @@ fn canonicalize_agent_id(input: &str) -> Option<String> {
     Some(format!("ed25519.{}", hex.to_ascii_lowercase()))
 }
 
-fn parse_notify_payload(data: &str, force_text: bool) -> Result<Value> {
-    if force_text {
-        return Ok(json!(data));
-    }
-
-    let trimmed = data.trim_start();
-    let looks_json_like = matches!(trimmed.chars().next(), Some('{') | Some('[') | Some('"'));
-
-    match serde_json::from_str::<Value>(data) {
-        Ok(value) => Ok(value),
-        Err(err) if looks_json_like => Err(anyhow!(
-            "notify payload appears JSON-like but is invalid: {err}. \
-             Fix the JSON or pass --text to send literal text."
-        )),
-        Err(_) => Ok(json!(data)),
-    }
-}
-
 fn select_identity_addr(
     addr_override: Option<&str>,
     advertise_addr: Option<&str>,
@@ -403,69 +464,6 @@ fn discover_default_route_ip() -> Result<std::net::IpAddr> {
         .local_addr()
         .context("failed to read local address from route probe")?;
     Ok(local.ip())
-}
-
-fn daemon_reply_exit_code(response: &Value) -> ExitCode {
-    if response.get("ok") == Some(&json!(false)) {
-        return ExitCode::from(2);
-    }
-    ExitCode::SUCCESS
-}
-
-fn print_ipc_response_and_classify(response: Value) -> Result<ExitCode> {
-    let rendered =
-        serde_json::to_string_pretty(&response).context("failed to encode response output")?;
-    println!("{rendered}");
-    Ok(daemon_reply_exit_code(&response))
-}
-
-async fn send_ipc(paths: &AxonPaths, command: Value) -> Result<Value> {
-    let mut stream = UnixStream::connect(&paths.socket).await.with_context(|| {
-        format!(
-            "failed to connect to daemon socket: {}. Is the daemon running?",
-            paths.socket.display()
-        )
-    })?;
-
-    let line = serde_json::to_string(&command).context("failed to serialize IPC command")?;
-    stream
-        .write_all(line.as_bytes())
-        .await
-        .context("failed to write IPC command")?;
-    stream
-        .write_all(b"\n")
-        .await
-        .context("failed to write IPC newline")?;
-
-    let mut reader = BufReader::new(stream);
-    loop {
-        let mut response = Vec::new();
-        let bytes = reader
-            .read_until(b'\n', &mut response)
-            .await
-            .context("failed to read IPC response")?;
-        if bytes == 0 {
-            return Err(anyhow::anyhow!(
-                "daemon closed connection without a command response"
-            ));
-        }
-
-        if response.last() == Some(&b'\n') {
-            response.pop();
-        }
-        let line = std::str::from_utf8(&response)
-            .context("failed to decode IPC response as UTF-8")?
-            .trim();
-        if line.is_empty() {
-            continue;
-        }
-
-        let decoded: Value = serde_json::from_str(line).context("failed to decode IPC response")?;
-        if decoded.get("event").and_then(Value::as_str) == Some("inbound") {
-            continue;
-        }
-        return Ok(decoded);
-    }
 }
 
 #[cfg(test)]

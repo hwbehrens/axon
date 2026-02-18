@@ -59,7 +59,7 @@ $ axon peers
 ──────────────────────────────────────────────
 Step 2: Send a request
 ──────────────────────────────────────────────
-$ axon send ed25519.f6e5d4c3b2a1f6e5d4c3b2a1f6e5d4c3 "What is the capital of France?"
+$ axon request ed25519.f6e5d4c3b2a1f6e5d4c3b2a1f6e5d4c3 "What is the capital of France?"
 
   IPC sent:     {{"cmd":"send","to":"ed25519.f6e5d4c3b2a1f6e5d4c3b2a1f6e5d4c3","kind":"request","payload":{{"message":"What is the capital of France?"}}}}
   Wire message: {{
@@ -78,7 +78,7 @@ $ axon send ed25519.f6e5d4c3b2a1f6e5d4c3b2a1f6e5d4c3 "What is the capital of Fra
 ──────────────────────────────────────────────
 Step 3: Send a fire-and-forget message
 ──────────────────────────────────────────────
-$ axon notify ed25519.f6e5d4c3b2a1f6e5d4c3b2a1f6e5d4c3 '{{"state":"ready"}}'
+$ axon notify --json ed25519.f6e5d4c3b2a1f6e5d4c3b2a1f6e5d4c3 '{{"state":"ready"}}'
 
   IPC sent:     {{"cmd":"send","to":"ed25519.f6e5d4c3b2a1f6e5d4c3b2a1f6e5d4c3","kind":"message","payload":{{"data":{{"state":"ready"}}}}}}
   IPC ack:      {{"ok":true,"msg_id":"..."}}

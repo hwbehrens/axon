@@ -28,8 +28,8 @@ fn axon_bin() -> PathBuf {
 fn spec_cli_commands_are_present_in_help_output() {
     // SPEC.md §6 command inventory (at minimum these commands must exist).
     let expected = [
-        "daemon", "send", "notify", "peers", "status", "identity", "connect", "whoami", "doctor",
-        "examples",
+        "daemon", "request", "notify", "peers", "status", "identity", "connect", "whoami",
+        "doctor", "config", "examples",
     ];
 
     let output = Command::new(axon_bin())

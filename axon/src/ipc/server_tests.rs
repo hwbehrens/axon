@@ -106,3 +106,31 @@ async fn close_client_cancels_client_handle() {
         "close_client should signal cancellation for active client handler"
     );
 }
+
+#[tokio::test]
+async fn broadcast_pair_request_reaches_connected_clients() {
+    let (tx_a, mut rx_a) = mpsc::channel::<Arc<str>>(8);
+    let (tx_b, mut rx_b) = mpsc::channel::<Arc<str>>(8);
+
+    let mut clients = HashMap::new();
+    clients.insert(1, tx_a);
+    clients.insert(2, tx_b);
+    let server = test_server_with_clients(clients);
+
+    server
+        .broadcast_pair_request(
+            "ed25519.cccccccccccccccccccccccccccccccc",
+            "cHVia2V5",
+            Some("127.0.0.1:7100"),
+        )
+        .await
+        .expect("pair request broadcast");
+
+    let line_a = rx_a.recv().await.expect("client A event");
+    let line_b = rx_b.recv().await.expect("client B event");
+
+    assert!(line_a.contains("\"event\":\"pair_request\""));
+    assert!(line_a.contains("\"pubkey\":\"cHVia2V5\""));
+    assert!(line_b.contains("\"event\":\"pair_request\""));
+    assert!(line_b.contains("\"agent_id\":\"ed25519.cccccccccccccccccccccccccccccccc\""));
+}

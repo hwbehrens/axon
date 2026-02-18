@@ -178,8 +178,26 @@ fn ipc_send_without_ref_defaults_to_none() {
     let input = r#"{"cmd":"send","to":"ed25519.deadbeef01234567deadbeef01234567","kind":"request","payload":{"question":"hello?"}}"#;
     let cmd: IpcCommand = serde_json::from_str(input).unwrap();
     match cmd {
-        IpcCommand::Send { ref_id, .. } => {
+        IpcCommand::Send {
+            ref_id,
+            timeout_secs,
+            ..
+        } => {
             assert!(ref_id.is_none());
+            assert!(timeout_secs.is_none());
+        }
+        _ => panic!("expected Send"),
+    }
+}
+
+/// IPC send with timeout field deserializes correctly.
+#[test]
+fn ipc_send_with_timeout_deserializes() {
+    let input = r#"{"cmd":"send","to":"ed25519.deadbeef01234567deadbeef01234567","kind":"request","timeout_secs":12,"payload":{"question":"hello?"}}"#;
+    let cmd: IpcCommand = serde_json::from_str(input).unwrap();
+    match cmd {
+        IpcCommand::Send { timeout_secs, .. } => {
+            assert_eq!(timeout_secs, Some(12));
         }
         _ => panic!("expected Send"),
     }
