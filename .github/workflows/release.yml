@@ -95,6 +95,12 @@ jobs:
           SHA256="$(curl -fsSL "$TARBALL_URL" | sha256sum | awk '{print $1}')"
           echo "Computed sha256: ${SHA256}"
 
+          # Derive git identity from the PAT
+          GIT_USER="$(gh api user --jq .login)"
+          GIT_ID="$(gh api user --jq .id)"
+          git config --global user.name "${GIT_USER}"
+          git config --global user.email "${GIT_ID}+${GIT_USER}@users.noreply.github.com"
+
           # Clone the tap repo and create a branch
           gh repo clone "$TAP_REPO" homebrew-axon
           cd homebrew-axon
