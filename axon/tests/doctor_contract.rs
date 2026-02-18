@@ -43,6 +43,16 @@ fn run_doctor(root: &Path, args: &[&str]) -> Output {
     run_command(&mut cmd)
 }
 
+fn run_doctor_json(root: &Path, args: &[&str]) -> Output {
+    let mut cmd = Command::new(axon_bin());
+    cmd.arg("--state-root")
+        .arg(root.to_str().expect("utf8 path"))
+        .arg("doctor")
+        .arg("--json");
+    cmd.args(args);
+    run_command(&mut cmd)
+}
+
 fn parse_report(output: &Output) -> Value {
     serde_json::from_slice(&output.stdout).expect("doctor stdout should be valid JSON")
 }
@@ -61,7 +71,7 @@ fn doctor_check_mode_reports_missing_identity_without_creating_files() {
     let root = tempdir().expect("tempdir");
     fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).expect("set perms");
 
-    let output = run_doctor(root.path(), &[]);
+    let output = run_doctor_json(root.path(), &[]);
     assert_eq!(output.status.code(), Some(2));
 
     let report = parse_report(&output);
@@ -89,7 +99,7 @@ fn doctor_fix_mode_generates_identity() {
     let root = tempdir().expect("tempdir");
     fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).expect("set perms");
 
-    let output = run_doctor(root.path(), &["--fix"]);
+    let output = run_doctor_json(root.path(), &["--fix"]);
     assert!(output.status.success());
 
     let report = parse_report(&output);
@@ -112,7 +122,7 @@ fn doctor_fix_requires_rekey_for_unrecoverable_identity() {
     fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).expect("set perms");
     fs::write(root.path().join("identity.key"), "not base64 at all").expect("write invalid key");
 
-    let output = run_doctor(root.path(), &["--fix"]);
+    let output = run_doctor_json(root.path(), &["--fix"]);
     assert_eq!(output.status.code(), Some(2));
 
     let report = parse_report(&output);
@@ -138,7 +148,7 @@ fn doctor_fix_rekey_backs_up_and_regenerates_identity() {
     fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).expect("set perms");
     fs::write(root.path().join("identity.key"), "not base64 at all").expect("write invalid key");
 
-    let output = run_doctor(root.path(), &["--fix", "--rekey"]);
+    let output = run_doctor_json(root.path(), &["--fix", "--rekey"]);
     assert!(output.status.success());
 
     let report = parse_report(&output);
@@ -175,4 +185,15 @@ fn doctor_subcommand_is_visible_in_help() {
 
     let help = String::from_utf8_lossy(&output.stdout);
     assert!(help.contains("  doctor"));
+}
+
+#[test]
+fn doctor_default_output_is_human_readable() {
+    let root = tempdir().expect("tempdir");
+    fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).expect("set perms");
+
+    let output = run_doctor(root.path(), &[]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Doctor:"));
+    assert!(!stdout.trim_start().starts_with('{'));
 }

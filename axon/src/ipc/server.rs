@@ -49,10 +49,6 @@ struct ClientHandle {
     cancel: CancellationToken,
 }
 
-// ---------------------------------------------------------------------------
-// IPC server config
-// ---------------------------------------------------------------------------
-
 pub struct IpcServerConfig {
     pub agent_id: String,
     pub public_key: String,
@@ -74,10 +70,6 @@ impl Default for IpcServerConfig {
         }
     }
 }
-
-// ---------------------------------------------------------------------------
-// IPC server
-// ---------------------------------------------------------------------------
 
 /// Unix domain socket IPC server that bridges local clients to the AXON daemon.
 /// Handles connection accept, per-client read/write loops, and command dispatch.
@@ -192,19 +184,23 @@ impl IpcServer {
             envelope: envelope.clone(),
         };
         let line: Arc<str> = Arc::from(serde_json::to_string(&event)?);
-        let mut clients = self.clients.lock().await;
-        let mut disconnected = Vec::new();
-        for (client_id, client) in clients.iter() {
-            if client.tx.try_send(line.clone()).is_err() {
-                disconnected.push(*client_id);
-            }
-        }
-        for client_id in disconnected {
-            if let Some(client) = clients.remove(&client_id) {
-                client.cancel.cancel();
-            }
-        }
-        Ok(())
+        self.broadcast_line(line).await
+    }
+
+    pub async fn broadcast_pair_request(
+        &self,
+        agent_id: &str,
+        pubkey: &str,
+        addr: Option<&str>,
+    ) -> Result<()> {
+        let event = DaemonReply::PairRequestEvent {
+            event: "pair_request",
+            agent_id: agent_id.to_string(),
+            pubkey: pubkey.to_string(),
+            addr: addr.map(str::to_string),
+        };
+        let line: Arc<str> = Arc::from(serde_json::to_string(&event)?);
+        self.broadcast_line(line).await
     }
 
     pub async fn handle_command(&self, event: CommandEvent) -> Result<DaemonReply> {
@@ -253,6 +249,22 @@ impl IpcServer {
                     self.socket_path.display()
                 )
             })?;
+        }
+        Ok(())
+    }
+
+    async fn broadcast_line(&self, line: Arc<str>) -> Result<()> {
+        let mut clients = self.clients.lock().await;
+        let mut disconnected = Vec::new();
+        for (client_id, client) in clients.iter() {
+            if client.tx.try_send(line.clone()).is_err() {
+                disconnected.push(*client_id);
+            }
+        }
+        for client_id in disconnected {
+            if let Some(client) = clients.remove(&client_id) {
+                client.cancel.cancel();
+            }
         }
         Ok(())
     }
@@ -337,10 +349,6 @@ impl IpcServer {
         });
     }
 }
-
-// ---------------------------------------------------------------------------
-// Per-client connection handler
-// ---------------------------------------------------------------------------
 
 async fn handle_client(
     socket: UnixStream,

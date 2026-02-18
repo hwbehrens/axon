@@ -6,9 +6,11 @@ use rustls::SignatureScheme;
 use rustls::client::danger::ServerCertVerifier;
 use rustls::server::danger::ClientCertVerifier;
 use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::RwLock as StdRwLock;
+use std::sync::{Mutex, RwLock as StdRwLock};
 use tempfile::tempdir;
+use tokio::sync::broadcast;
 
 #[test]
 fn cert_pubkey_extraction_matches_identity() {
@@ -28,15 +30,21 @@ fn cert_pubkey_extraction_matches_identity() {
 }
 
 fn make_test_verifier() -> PeerCertVerifier {
+    let (pair_request_tx, _) = broadcast::channel(8);
     PeerCertVerifier {
         expected_pubkeys: PeerTable::new().pubkey_map(),
+        pair_request_tx,
+        pair_request_seen: Arc::new(Mutex::new(HashMap::new())),
     }
 }
 
 fn make_test_client_verifier() -> PeerClientCertVerifier {
+    let (pair_request_tx, _) = broadcast::channel(8);
     PeerClientCertVerifier {
         expected_pubkeys: PeerTable::new().pubkey_map(),
         roots: vec![],
+        pair_request_tx,
+        pair_request_seen: Arc::new(Mutex::new(HashMap::new())),
     }
 }
 
@@ -126,6 +134,8 @@ fn server_verifier_accepts_known_peer() {
 
     let verifier = PeerCertVerifier {
         expected_pubkeys: pubkey_map,
+        pair_request_tx: broadcast::channel(8).0,
+        pair_request_seen: Arc::new(Mutex::new(HashMap::new())),
     };
     let cert_der = CertificateDer::from(cert.cert_der);
     let agent_id_string = identity.agent_id().to_string();
@@ -161,6 +171,8 @@ fn server_verifier_accepts_uppercase_expected_agent_id() {
 
     let verifier = PeerCertVerifier {
         expected_pubkeys: pubkey_map,
+        pair_request_tx: broadcast::channel(8).0,
+        pair_request_seen: Arc::new(Mutex::new(HashMap::new())),
     };
     let cert_der = CertificateDer::from(cert.cert_der);
     let server_name = ServerName::try_from(uppercase_id.as_str()).unwrap();
@@ -195,6 +207,8 @@ fn server_verifier_rejects_pubkey_mismatch() {
 
     let verifier = PeerCertVerifier {
         expected_pubkeys: pubkey_map,
+        pair_request_tx: broadcast::channel(8).0,
+        pair_request_seen: Arc::new(Mutex::new(HashMap::new())),
     };
     let cert_der = CertificateDer::from(cert.cert_der);
     let agent_id_string = identity.agent_id().to_string();
@@ -246,6 +260,8 @@ fn client_verifier_accepts_uppercase_peer_table_key() {
     let verifier = PeerClientCertVerifier {
         expected_pubkeys: pubkey_map,
         roots: vec![],
+        pair_request_tx: broadcast::channel(8).0,
+        pair_request_seen: Arc::new(Mutex::new(HashMap::new())),
     };
     let cert_der = CertificateDer::from(cert.cert_der);
 
@@ -264,4 +280,77 @@ fn derive_agent_id_deterministic() {
     assert_eq!(id1, id2);
     assert_eq!(id1.len(), 40);
     assert!(id1.starts_with("ed25519."));
+}
+
+#[test]
+fn unknown_peer_pair_request_is_rate_limited() {
+    ensure_crypto_provider();
+    let dir = tempdir().expect("tempdir");
+    let paths = AxonPaths::from_root(PathBuf::from(dir.path()));
+    let identity = Identity::load_or_generate(&paths).expect("identity");
+    let cert = identity.make_quic_certificate().expect("cert");
+    let cert_der = CertificateDer::from(cert.cert_der);
+    let agent_id_string = identity.agent_id().to_string();
+    let server_name = ServerName::try_from(agent_id_string.as_str()).unwrap();
+
+    let (pair_request_tx, mut pair_request_rx) = broadcast::channel(8);
+    let verifier = PeerCertVerifier {
+        expected_pubkeys: PeerTable::new().pubkey_map(),
+        pair_request_tx,
+        pair_request_seen: Arc::new(Mutex::new(HashMap::new())),
+    };
+
+    let _ = verifier.verify_server_cert(
+        &cert_der,
+        &[],
+        &server_name,
+        &[],
+        rustls::pki_types::UnixTime::now(),
+    );
+    let _ = verifier.verify_server_cert(
+        &cert_der,
+        &[],
+        &server_name,
+        &[],
+        rustls::pki_types::UnixTime::now(),
+    );
+
+    let first = pair_request_rx.try_recv().expect("first pair_request");
+    assert_eq!(first.agent_id, agent_id_string);
+    assert!(pair_request_rx.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn unknown_peer_pair_request_includes_remote_addr_from_handshake_context() {
+    ensure_crypto_provider();
+    let dir = tempdir().expect("tempdir");
+    let paths = AxonPaths::from_root(PathBuf::from(dir.path()));
+    let identity = Identity::load_or_generate(&paths).expect("identity");
+    let cert = identity.make_quic_certificate().expect("cert");
+    let cert_der = CertificateDer::from(cert.cert_der);
+    let agent_id_string = identity.agent_id().to_string();
+    let server_name = ServerName::try_from(agent_id_string.as_str()).unwrap();
+
+    let (pair_request_tx, mut pair_request_rx) = broadcast::channel(8);
+    let verifier = PeerCertVerifier {
+        expected_pubkeys: PeerTable::new().pubkey_map(),
+        pair_request_tx,
+        pair_request_seen: Arc::new(Mutex::new(HashMap::new())),
+    };
+
+    let remote_addr: SocketAddr = "127.0.0.1:7444".parse().unwrap();
+    let _ = with_handshake_remote_addr(remote_addr, async {
+        verifier.verify_server_cert(
+            &cert_der,
+            &[],
+            &server_name,
+            &[],
+            rustls::pki_types::UnixTime::now(),
+        )
+    })
+    .await;
+
+    let first = pair_request_rx.try_recv().expect("first pair_request");
+    assert_eq!(first.agent_id, agent_id_string);
+    assert_eq!(first.addr.as_deref(), Some("127.0.0.1:7444"));
 }

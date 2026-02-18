@@ -10,7 +10,7 @@ use crate::ipc::{
 use crate::message::{AgentId, Envelope};
 use crate::peer_table::{ConnectionStatus, PeerSource, PeerTable};
 use crate::peer_token::derive_agent_id_from_pubkey_base64;
-use crate::transport::QuicTransport;
+use crate::transport::{QuicTransport, REQUEST_TIMEOUT};
 
 #[derive(Default)]
 pub(crate) struct Counters {
@@ -23,6 +23,7 @@ pub(crate) enum DaemonIpcError {
     PeerNotFound,
     SelfSend,
     PeerUnreachable,
+    Timeout,
     InvalidCommand(String),
 }
 
@@ -32,6 +33,7 @@ impl std::fmt::Display for DaemonIpcError {
             DaemonIpcError::PeerNotFound => write!(f, "peer_not_found"),
             DaemonIpcError::SelfSend => write!(f, "self_send"),
             DaemonIpcError::PeerUnreachable => write!(f, "peer_unreachable"),
+            DaemonIpcError::Timeout => write!(f, "timeout"),
             DaemonIpcError::InvalidCommand(msg) => write!(f, "invalid_command: {msg}"),
         }
     }
@@ -77,9 +79,10 @@ pub(crate) async fn handle_command(cmd: CommandEvent, ctx: &DaemonContext<'_>) -
             to,
             kind,
             payload,
+            timeout_secs,
             ref_id,
             req_id,
-        } => match handle_send(ctx, to, kind, payload, ref_id).await {
+        } => match handle_send(ctx, to, kind, payload, timeout_secs, ref_id).await {
             Ok((msg_id, response)) => {
                 let broadcast_envelope = response.clone();
                 let reply = DaemonReply::SendOk {
@@ -101,6 +104,7 @@ pub(crate) async fn handle_command(cmd: CommandEvent, ctx: &DaemonContext<'_>) -
                         DaemonIpcError::PeerNotFound => IpcErrorCode::PeerNotFound,
                         DaemonIpcError::SelfSend => IpcErrorCode::SelfSend,
                         DaemonIpcError::PeerUnreachable => IpcErrorCode::PeerUnreachable,
+                        DaemonIpcError::Timeout => IpcErrorCode::Timeout,
                         DaemonIpcError::InvalidCommand(_) => IpcErrorCode::InvalidCommand,
                     }
                 } else {
@@ -229,6 +233,7 @@ async fn handle_send(
     to: String,
     kind: IpcSendKind,
     payload: serde_json::Value,
+    timeout_secs: Option<u64>,
     ref_id: Option<uuid::Uuid>,
 ) -> Result<(uuid::Uuid, Option<crate::message::Envelope>)> {
     if to == ctx.local_agent_id.as_str() {
@@ -256,13 +261,35 @@ async fn handle_send(
 
     // Timeout the send (including connection attempt) so IPC clients don't
     // block indefinitely when the peer is unreachable over UDP/QUIC.
-    const SEND_TIMEOUT: Duration = Duration::from_secs(10);
-    let send_result = tokio::time::timeout(SEND_TIMEOUT, ctx.transport.send(&peer, envelope)).await;
+    let send_timeout = match kind {
+        IpcSendKind::Request => {
+            let secs = timeout_secs.unwrap_or(REQUEST_TIMEOUT.as_secs());
+            if secs == 0 {
+                anyhow::bail!(DaemonIpcError::InvalidCommand(
+                    "timeout_secs must be >= 1".to_string()
+                ));
+            }
+            Duration::from_secs(secs)
+        }
+        IpcSendKind::Message => {
+            if timeout_secs.is_some() {
+                anyhow::bail!(DaemonIpcError::InvalidCommand(
+                    "timeout_secs is only valid for request kind".to_string()
+                ));
+            }
+            Duration::from_secs(10)
+        }
+    };
+    let send_result = tokio::time::timeout(send_timeout, ctx.transport.send(&peer, envelope)).await;
 
     match send_result {
         Err(_elapsed) => {
             ctx.peer_table.set_disconnected(&to).await;
-            anyhow::bail!(DaemonIpcError::PeerUnreachable)
+            if matches!(kind, IpcSendKind::Request) {
+                anyhow::bail!(DaemonIpcError::Timeout)
+            } else {
+                anyhow::bail!(DaemonIpcError::PeerUnreachable)
+            }
         }
         Ok(inner) => match inner {
             Ok(response) => {

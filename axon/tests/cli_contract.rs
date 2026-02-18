@@ -5,7 +5,6 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::thread::JoinHandle;
 
-use axon::peer_token;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde_json::{Value, json};
 use tempfile::tempdir;
@@ -90,20 +89,17 @@ fn require_socket_server_with_replies(
 }
 
 #[test]
-fn command_reply_ignores_unsolicited_inbound_event_lines() {
+fn command_reply_ignores_unsolicited_event_lines() {
     let bin = axon_bin();
     let root = tempdir().expect("tempdir");
     let Some(server) = require_socket_server_with_replies(
         root.path(),
         vec![
             json!({
-                "event": "inbound",
-                "from": VALID_AGENT_ID,
-                "envelope": {
-                    "id": "550e8400-e29b-41d4-a716-446655440000",
-                    "kind": "message",
-                    "payload": {"data": {"hello": "world"}}
-                }
+                "event": "pair_request",
+                "agent_id": VALID_AGENT_ID,
+                "pubkey": "Zm9v",
+                "addr": "127.0.0.1:7100"
             }),
             json!({
                 "ok": true,
@@ -124,9 +120,8 @@ fn command_reply_ignores_unsolicited_inbound_event_lines() {
     ]));
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("\"ok\": true"));
-    assert!(stdout.contains("\"uptime_secs\": 7"));
-    assert!(!stdout.contains("\"event\": \"inbound\""));
+    assert!(stdout.contains("Uptime: 7s"));
+    assert!(!stdout.contains("pair_request"));
 
     let command = server.join().expect("server thread");
     assert_eq!(command["cmd"], "status");
@@ -160,23 +155,33 @@ fn verbose_flag_is_listed_in_help() {
 #[test]
 fn invalid_agent_id_rejected_at_cli_boundary() {
     let bin = axon_bin();
-    let output = run_command(Command::new(&bin).args(["send", "banana", "hello"]));
+    let output = run_command(Command::new(&bin).args(["request", "banana", "hello"]));
     assert_eq!(output.status.code(), Some(2));
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("invalid agent_id"));
 }
 
 #[test]
-fn notify_malformed_json_like_payload_fails_fast() {
+fn send_subcommand_is_rejected() {
     let bin = axon_bin();
-    let output = run_command(Command::new(&bin).args(["notify", VALID_AGENT_ID, "{\"x\":"]));
-    assert_eq!(output.status.code(), Some(1));
+    let output = run_command(Command::new(&bin).args(["send", VALID_AGENT_ID, "hello"]));
+    assert_eq!(output.status.code(), Some(2));
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("appears JSON-like but is invalid"));
+    assert!(stderr.contains("unrecognized subcommand"));
 }
 
 #[test]
-fn notify_text_override_sends_literal_string_payload() {
+fn notify_json_mode_rejects_invalid_payload() {
+    let bin = axon_bin();
+    let output =
+        run_command(Command::new(&bin).args(["notify", "--json", VALID_AGENT_ID, "{\"x\":"]));
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("invalid JSON for --json payload"));
+}
+
+#[test]
+fn notify_default_sends_literal_string_payload() {
     let bin = axon_bin();
     let root = tempdir().expect("tempdir");
     let Some(server) = require_socket_server(root.path(), json!({"ok": true, "msg_id": "x"}))
@@ -188,7 +193,6 @@ fn notify_text_override_sends_literal_string_payload() {
         "--state-root",
         root.path().to_str().expect("utf8 path"),
         "notify",
-        "--text",
         VALID_AGENT_ID,
         "{\"x\":",
     ]));
@@ -201,7 +205,7 @@ fn notify_text_override_sends_literal_string_payload() {
 }
 
 #[test]
-fn uppercase_agent_id_is_canonicalized_before_send() {
+fn uppercase_agent_id_is_canonicalized_before_request() {
     let bin = axon_bin();
     let root = tempdir().expect("tempdir");
     let Some(server) = require_socket_server(root.path(), json!({"ok": true, "msg_id": "x"}))
@@ -212,7 +216,7 @@ fn uppercase_agent_id_is_canonicalized_before_send() {
     let output = run_command(Command::new(&bin).args([
         "--state-root",
         root.path().to_str().expect("utf8 path"),
-        "send",
+        "request",
         VALID_AGENT_ID_UPPER,
         "hello",
     ]));
@@ -273,7 +277,7 @@ fn axon_root_env_routes_client_command_without_flag() {
 }
 
 #[test]
-fn send_peer_not_found_returns_exit_code_two() {
+fn request_peer_not_found_returns_exit_code_two() {
     let bin = axon_bin();
     let root = tempdir().expect("tempdir");
     let Some(server) = require_socket_server(
@@ -286,7 +290,7 @@ fn send_peer_not_found_returns_exit_code_two() {
     let output = run_command(Command::new(&bin).args([
         "--state-root",
         root.path().to_str().expect("utf8 path"),
-        "send",
+        "request",
         VALID_AGENT_ID,
         "hello",
     ]));
@@ -296,6 +300,62 @@ fn send_peer_not_found_returns_exit_code_two() {
     let command = server.join().expect("server thread");
     assert_eq!(command["cmd"], "send");
     assert_eq!(command["to"], VALID_AGENT_ID);
+}
+
+#[test]
+fn request_remote_error_envelope_returns_exit_code_two() {
+    let bin = axon_bin();
+    let root = tempdir().expect("tempdir");
+    let Some(server) = require_socket_server(
+        root.path(),
+        json!({
+            "ok": true,
+            "msg_id": "550e8400-e29b-41d4-a716-446655440000",
+            "response": {"kind": "error", "payload": {"code": "oops"}}
+        }),
+    ) else {
+        return;
+    };
+
+    let output = run_command(Command::new(&bin).args([
+        "--state-root",
+        root.path().to_str().expect("utf8 path"),
+        "request",
+        VALID_AGENT_ID,
+        "hello",
+    ]));
+    assert_eq!(output.status.code(), Some(2));
+    let command = server.join().expect("server thread");
+    assert_eq!(command["cmd"], "send");
+}
+
+#[test]
+fn request_timeout_daemon_error_returns_exit_code_three() {
+    let bin = axon_bin();
+    let root = tempdir().expect("tempdir");
+    let Some(server) = require_socket_server(
+        root.path(),
+        json!({
+            "ok": false,
+            "error": "timeout",
+            "message": "request timed out waiting for peer response"
+        }),
+    ) else {
+        return;
+    };
+
+    let output = run_command(Command::new(&bin).args([
+        "--state-root",
+        root.path().to_str().expect("utf8 path"),
+        "request",
+        "--timeout",
+        "7",
+        VALID_AGENT_ID,
+        "hello",
+    ]));
+    assert_eq!(output.status.code(), Some(3));
+    let command = server.join().expect("server thread");
+    assert_eq!(command["timeout_secs"], 7);
 }
 
 #[test]
@@ -381,8 +441,13 @@ fn identity_default_outputs_peer_uri_and_json_flag_expands_fields() {
 
     let uri_out = run_command(Command::new(&bin).args(["--state-root", root_str, "identity"]));
     assert!(uri_out.status.success());
-    let uri = String::from_utf8_lossy(&uri_out.stdout);
-    assert!(uri.trim().starts_with("axon://"));
+    let identity_text = String::from_utf8_lossy(&uri_out.stdout);
+    assert!(identity_text.contains("Your enrollment token"));
+    assert!(
+        identity_text
+            .lines()
+            .any(|line| line.starts_with("axon://"))
+    );
 
     let json_out =
         run_command(Command::new(&bin).args(["--state-root", root_str, "identity", "--json"]));
@@ -421,7 +486,8 @@ fn legacy_raw_identity_key_is_auto_migrated() {
     assert!(output.status.success());
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.trim().starts_with("axon://"));
+    assert!(stdout.contains("Your enrollment token"));
+    assert!(stdout.lines().any(|line| line.starts_with("axon://")));
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains(
@@ -433,67 +499,4 @@ fn legacy_raw_identity_key_is_auto_migrated() {
         .decode(migrated.trim())
         .expect("migrated identity.key should be base64");
     assert_eq!(decoded.len(), 32);
-}
-
-#[test]
-fn connect_writes_config_and_sends_add_peer_ipc() {
-    let bin = axon_bin();
-    let root = tempdir().expect("tempdir");
-    let root_str = root.path().to_str().expect("utf8 path");
-
-    let pubkey = STANDARD.encode([9u8; 32]);
-    let token = peer_token::encode(&pubkey, "127.0.0.1:7710").expect("token");
-    let expected_agent = peer_token::derive_agent_id_from_pubkey_base64(&pubkey)
-        .expect("derive")
-        .to_string();
-
-    let Some(server) =
-        require_socket_server(root.path(), json!({"ok": true, "agent_id": expected_agent}))
-    else {
-        return;
-    };
-
-    let output =
-        run_command(Command::new(&bin).args(["--state-root", root_str, "connect", &token]));
-    assert!(output.status.success());
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("Added peer"));
-
-    let command = server.join().expect("server thread");
-    assert_eq!(command["cmd"], "add_peer");
-    assert_eq!(command["addr"], "127.0.0.1:7710");
-    assert_eq!(command["pubkey"], pubkey);
-
-    let saved = fs::read_to_string(root.path().join("config.yaml")).expect("config saved");
-    assert!(saved.contains("127.0.0.1:7710"));
-}
-
-#[test]
-fn connect_returns_error_when_hotload_fails_after_config_write() {
-    let bin = axon_bin();
-    let root = tempdir().expect("tempdir");
-    let root_str = root.path().to_str().expect("utf8 path");
-
-    let pubkey = STANDARD.encode([11u8; 32]);
-    let token = peer_token::encode(&pubkey, "127.0.0.1:7720").expect("token");
-
-    let Some(server) = require_socket_server(
-        root.path(),
-        json!({"ok": false, "error": "invalid_command", "message": "bad peer"}),
-    ) else {
-        return;
-    };
-
-    let output =
-        run_command(Command::new(&bin).args(["--state-root", root_str, "connect", &token]));
-    assert_eq!(output.status.code(), Some(1));
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("peer saved to"));
-    assert!(stderr.contains("hot-load failed"));
-
-    let saved = fs::read_to_string(root.path().join("config.yaml")).expect("config saved");
-    assert!(saved.contains("127.0.0.1:7720"));
-
-    let command = server.join().expect("server thread");
-    assert_eq!(command["cmd"], "add_peer");
 }

@@ -103,6 +103,15 @@ async fn invalid_yaml_returns_error() {
     assert!(Config::load(&path).await.is_err());
 }
 
+#[test]
+fn persisted_config_omits_none_fields_when_serializing() {
+    let persisted = PersistedConfig::default();
+    let yaml = serde_yaml::to_string(&persisted).expect("serialize");
+    assert!(!yaml.contains("name: null"));
+    assert!(!yaml.contains("port: null"));
+    assert!(!yaml.contains("advertise_addr: null"));
+}
+
 #[tokio::test]
 async fn config_ignores_unknown_fields() {
     let dir = tempdir().expect("temp dir");

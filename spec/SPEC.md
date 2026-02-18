@@ -153,14 +153,14 @@ Line-delimited JSON over Unix socket. Each line is one complete JSON object. Sin
 
 ### Commands
 ```json
-{"cmd": "send", "to": "<agent_id>", "kind": "request", "payload": { ... }}
+{"cmd": "send", "to": "<agent_id>", "kind": "request", "timeout_secs": 30, "payload": { ... }}
 {"cmd": "peers"}
 {"cmd": "status"}
 {"cmd": "whoami"}
 {"cmd": "add_peer", "pubkey": "<base64>", "addr": "host:port"}
 ```
 
-- **`send`** — Send a message to a remote peer. Requires `to`, `kind` (`request` or `message`), and `payload`.
+- **`send`** — Send a message to a remote peer over IPC. Requires `to`, `kind` (`request` or `message`), and `payload`. Optional `timeout_secs` applies to `kind=request`.
 - **`peers`** — List discovered and connected peers.
 - **`status`** — Daemon health: uptime, connections, message counts.
 - **`whoami`** — Daemon identity and metadata (`ok`, `agent_id`, `public_key`, optional `name`, `version`, `uptime_secs`).
@@ -184,22 +184,27 @@ axon [--state-root <dir>] daemon [--port 7100] [--disable-mdns]
     --state-root sets the AXON state root (socket/identity/config), enabling multi-agent-per-host layouts.
     Aliases: --state, --root. Env fallback: AXON_ROOT. Default: ~/.axon.
 
-axon [--state-root <dir>] send <agent_id> <message>
+axon [--state-root <dir>] request [--timeout <seconds>] <agent_id> <message>
     Send a request to a peer.
+    For structured request payload objects, use IPC `send` directly.
+    Exit code 2 when the remote returns an envelope with `kind=error`.
+    Exit code 3 on request timeout.
 
-axon [--state-root <dir>] notify [--text] <agent_id> <message>
+axon [--state-root <dir>] notify [--json] <agent_id> <message>
     Send a fire-and-forget message to a peer.
-    If payload looks JSON-like ({, [, "), malformed JSON fails fast.
-    --text forces literal string payload behavior.
+    Default payload mode is literal text.
+    `--json` parses the message as JSON and fails if invalid.
 
-axon [--state-root <dir>] peers
+axon [--state-root <dir>] peers [--json]
     List discovered and connected peers with RTT.
+    Human-readable table by default.
 
-axon [--state-root <dir>] status
+axon [--state-root <dir>] status [--json]
     Daemon health: uptime, connections, message counts.
+    Human-readable key/value output by default.
 
 axon [--state-root <dir>] identity
-    Print this agent's share URI (`axon://...`) by default.
+    Print this agent's share URI (`axon://...`) with a human-readable label by default.
     Use `--json` for full details (`agent_id`, `public_key`, `addr`, `port`, `uri`).
     Use `--addr host:port` to override the emitted URI address.
     This command is local/offline; it reads/writes identity files in the selected state root.
@@ -207,12 +212,21 @@ axon [--state-root <dir>] identity
 axon [--state-root <dir>] connect <axon://token>
     Enroll a peer from token into config.yaml and hot-load it into a running daemon via IPC.
 
-axon [--state-root <dir>] whoami
+axon [--state-root <dir>] whoami [--json]
     Query daemon identity and metadata over IPC.
+    Human-readable labeled output by default.
 
-axon [--state-root <dir>] doctor [--fix] [--rekey]
+axon [--state-root <dir>] doctor [--json] [--fix] [--rekey]
     Diagnose local AXON state (identity, config, IPC socket).
     Defaults to check mode. `--fix` applies safe repairs, and `--rekey` regenerates identity material when paired with `--fix`.
+    Human-readable checklist output by default.
+
+axon [--state-root <dir>] config <KEY> [VALUE]
+axon [--state-root <dir>] config --list [--json]
+axon [--state-root <dir>] config --unset <KEY>
+axon [--state-root <dir>] config --edit
+    Read/write scalar config keys: `name`, `port`, `advertise_addr`.
+    Follows git-style config conventions (get/set/list/unset/edit).
 
 axon [--state-root <dir>] examples
     Print example usage.
@@ -223,11 +237,13 @@ axon -V
 ```
 
 CLI execution contracts:
-- `send`/`notify`/`peers`/`status`/`whoami` use IPC and print daemon JSON responses.
-- `identity` and `doctor` are local and do not use IPC.
+- `request`/`notify`/`peers`/`status`/`whoami` use IPC.
+- `peers`/`status`/`whoami` default to human-readable output; `--json` prints daemon JSON.
+- `identity` and `doctor` are local and do not use IPC (`doctor --json` available).
 - Exit code `0`: success.
 - Exit code `1`: local/runtime failure after argument parsing (I/O, socket connect, decode).
-- Exit code `2`: CLI parse/usage failure (Clap) or daemon/application-level failure (`{"ok":false}` reply).
+- Exit code `2`: CLI parse/usage failure (Clap), daemon/application-level failure (`{"ok":false}` reply), or `request` remote envelope with `kind=error`.
+- Exit code `3`: `request` timeout (`{"ok":false,"error":"timeout"}`).
 
 ## 7. File Layout
 
@@ -329,7 +345,7 @@ anyhow = "1"
 4. Clean reconnect after daemon restart.
 5. Daemon uses <5MB RSS memory.
 6. Static peer config works for Tailscale/VPN without code changes.
-7. `axon send` CLI delivers a message end-to-end.
+7. `axon request` CLI delivers a message end-to-end.
 8. Graceful shutdown: no data loss, clean QUIC close.
 
 ## Future Considerations

@@ -112,25 +112,37 @@ axon daemon --disable-mdns
 
 ```sh
 # Send a request to another agent (bidirectional, waits for response)
-axon send <agent_id> "What is the capital of France?"
+axon request <agent_id> "What is the capital of France?"
 
-# Fire-and-forget notification (unidirectional, JSON payload)
-axon notify <agent_id> '{"state":"ready"}'
+# Override request timeout (seconds)
+axon request --timeout 10 <agent_id> "What is the capital of France?"
+
+# Fire-and-forget notification (unidirectional, text payload by default)
+axon notify <agent_id> "ready"
+
+# Structured JSON payload for notify
+axon notify --json <agent_id> '{"state":"ready"}'
 
 # Enroll a peer from an axon:// token
 axon connect axon://<pubkey_base64url>@<host>:<port>
 
-# Force literal text payload (even if it looks like JSON)
-axon notify --text <agent_id> '{"state":"ready"'
-
 # List peers
 axon peers
+
+# Machine-readable peers output
+axon peers --json
 
 # Daemon status
 axon status
 
+# Machine-readable status output
+axon status --json
+
 # Daemon identity (IPC)
 axon whoami
+
+# Machine-readable whoami output
+axon whoami --json
 
 # Local identity URI (state root files, no daemon required)
 axon identity
@@ -150,6 +162,12 @@ axon doctor --fix
 # Allow identity regeneration if key material is unrecoverable
 axon doctor --fix --rekey
 
+# Manage scalar config keys
+# (`axon config` follows git-config-style get/set/list/unset/edit conventions)
+axon config --list
+axon config name alice
+axon config --unset name
+
 # See all commands
 axon --help
 ```
@@ -162,15 +180,20 @@ axon --help
 - Exit codes:
   - `0`: success
   - `1`: local/runtime failure after argument parsing (I/O, daemon socket connect/decode, etc.)
-  - `2`: CLI parse/usage failure (Clap) or daemon/application-level failure reply (`"ok": false`)
+  - `2`: CLI parse/usage failure (Clap), daemon/application-level failure reply (`"ok": false`), or `request` remote envelope with `kind=error`
+  - `3`: `request` timeout (`{"ok": false, "error": "timeout"}`)
 - IPC inbound event delivery:
   - connected clients receive inbound broadcast events
   - per-client delivery uses bounded queues; lagging clients are disconnected instead of silently dropped
 - Global verbosity override:
   - `--verbose` / `-v` sets default logging to `debug` (otherwise default is `info`)
   - if `RUST_LOG` is explicitly set, it takes precedence over `--verbose`
+- Request payload shape:
+  - `axon request` always sends payload as `{"message":"<string>"}` (including when the string itself is JSON text)
+  - for fully structured request payload objects, use IPC `send` directly as documented in `spec/IPC.md`
 - Doctor command behavior:
-  - `axon doctor` runs local health checks and returns a JSON report (`checks`, `fixes_applied`, `ok`)
+  - `axon doctor` runs local health checks and prints a human-readable checklist
+  - `axon doctor --json` prints the structured report (`checks`, `fixes_applied`, `ok`)
   - `axon doctor --fix` applies safe local repairs; `--rekey` (requires `--fix`) allows identity reset when key data is unrecoverable
   - returns exit code `2` when unresolved check failures remain (`ok: false`)
 
