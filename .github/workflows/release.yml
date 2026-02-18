@@ -98,6 +98,8 @@ jobs:
           # Clone the tap repo and create a branch
           gh repo clone "$TAP_REPO" homebrew-axon
           cd homebrew-axon
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git checkout -b "$BRANCH"
 
           # Update url and sha256 in the formula
