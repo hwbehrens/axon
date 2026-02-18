@@ -10,43 +10,19 @@ fn agent_b() -> String {
 }
 
 #[test]
-fn default_error_response_returns_error_kind() {
+fn default_error_response_contract() {
     let req = Envelope::new(agent_a(), agent_b(), MessageKind::Request, json!({}));
     let resp = default_error_response(&req, &agent_b());
     assert_eq!(resp.kind, MessageKind::Error);
-}
-
-#[test]
-fn default_error_response_sets_ref_id() {
-    let req = Envelope::new(agent_a(), agent_b(), MessageKind::Request, json!({}));
-    let resp = default_error_response(&req, &agent_b());
     assert_eq!(resp.ref_id, Some(req.id));
-}
-
-#[test]
-fn default_error_response_payload_has_code_and_message() {
-    let req = Envelope::new(agent_a(), agent_b(), MessageKind::Request, json!({}));
-    let resp = default_error_response(&req, &agent_b());
+    assert_eq!(resp.from.as_deref(), Some(agent_b().as_str()));
+    assert_eq!(resp.to.as_deref(), Some(agent_a().as_str()));
     let payload = resp.payload_value().unwrap();
     assert_eq!(
         payload.get("code").and_then(|v| v.as_str()),
         Some("unhandled")
     );
     assert!(payload.get("message").and_then(|v| v.as_str()).is_some());
-}
-
-#[test]
-fn default_error_response_from_is_local_agent() {
-    let req = Envelope::new(agent_a(), agent_b(), MessageKind::Request, json!({}));
-    let resp = default_error_response(&req, &agent_b());
-    assert_eq!(resp.from.as_deref(), Some(agent_b().as_str()));
-}
-
-#[test]
-fn default_error_response_to_is_request_sender() {
-    let req = Envelope::new(agent_a(), agent_b(), MessageKind::Request, json!({}));
-    let resp = default_error_response(&req, &agent_b());
-    assert_eq!(resp.to.as_deref(), Some(agent_a().as_str()));
 }
 
 // =========================================================================

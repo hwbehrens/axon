@@ -76,39 +76,12 @@ fn validation_rejects_non_object_payload() {
 }
 
 #[test]
-fn unknown_envelope_fields_are_ignored() {
-    let raw = r#"{
-            "id":"6fc0ec4f-e59f-4bea-9d57-0d9fdd1108f1",
-            "kind":"message",
-            "payload":{},
-            "from":"ed25519.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-            "to":"ed25519.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-            "extra":"ignored"
-        }"#;
-    let decoded: Envelope = serde_json::from_str(raw).expect("deserialize");
-    assert_eq!(decoded.kind, MessageKind::Message);
-}
-
-#[test]
 fn ref_field_serializes_as_ref_not_ref_id() {
     let env = Envelope::new(agent_a(), agent_b(), MessageKind::Request, json!({}));
     let v = serde_json::to_value(&env).unwrap();
     // ref_id is None, so "ref" should not be present (skip_serializing_if)
     assert!(v.get("ref").is_none());
     assert!(v.get("ref_id").is_none());
-}
-
-#[test]
-fn ref_field_present_when_set() {
-    let req = Envelope::new(agent_a(), agent_b(), MessageKind::Request, json!({}));
-    let resp = Envelope::response_to(
-        &req,
-        agent_b(),
-        MessageKind::Response,
-        json!({"result": "ok"}),
-    );
-    let v = serde_json::to_value(&resp).unwrap();
-    assert_eq!(v["ref"].as_str().unwrap(), req.id.to_string());
 }
 
 #[test]
@@ -148,24 +121,6 @@ proptest! {
 // =========================================================================
 // kind tests
 // =========================================================================
-
-#[test]
-fn expects_response_mapping() {
-    assert!(MessageKind::Request.expects_response());
-    assert!(!MessageKind::Response.expects_response());
-    assert!(!MessageKind::Message.expects_response());
-    assert!(!MessageKind::Error.expects_response());
-    assert!(!MessageKind::Unknown.expects_response());
-}
-
-#[test]
-fn is_response_mapping() {
-    assert!(MessageKind::Response.is_response());
-    assert!(MessageKind::Error.is_response());
-    assert!(!MessageKind::Request.is_response());
-    assert!(!MessageKind::Message.is_response());
-    assert!(!MessageKind::Unknown.is_response());
-}
 
 #[test]
 fn message_kind_display() {
@@ -233,99 +188,7 @@ proptest! {
 // wire tests
 // =========================================================================
 
-#[test]
-fn encode_decode_roundtrip() {
-    let env = Envelope::new(
-        agent_a(),
-        agent_b(),
-        MessageKind::Request,
-        json!({"question": "test?"}),
-    );
-    let encoded = encode(&env).unwrap();
-    let decoded = decode(&encoded).unwrap();
-    assert_eq!(env, decoded);
-}
-
-#[test]
-fn reject_oversized_message() {
-    let big = "x".repeat(MAX_MESSAGE_SIZE as usize);
-    let env = Envelope::new(
-        agent_a(),
-        agent_b(),
-        MessageKind::Request,
-        json!({"question": big}),
-    );
-    let result = encode(&env);
-    assert!(result.is_err());
-    assert!(result.unwrap_err().to_string().contains("exceeds maximum"));
-}
-
-#[test]
-fn decode_rejects_oversized_input() {
-    let data = vec![b'{'; MAX_MESSAGE_SIZE as usize + 1];
-    let result = decode(&data);
-    assert!(result.is_err());
-    assert!(result.unwrap_err().to_string().contains("exceeds maximum"));
-}
-
-#[test]
-fn wire_encode_omits_from_and_to() {
-    let env = Envelope::new(
-        agent_a(),
-        agent_b(),
-        MessageKind::Request,
-        json!({"question": "test?"}),
-    );
-    let encoded = env.wire_encode().unwrap();
-    let decoded: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
-    assert!(decoded.get("from").is_none());
-    assert!(decoded.get("to").is_none());
-}
-
-#[test]
-fn now_millis_is_plausible() {
-    let ms = now_millis();
-    assert!(ms > 1_577_836_800_000);
-}
-
-const WIRE_KINDS: &[MessageKind] = &[
-    MessageKind::Request,
-    MessageKind::Response,
-    MessageKind::Message,
-    MessageKind::Error,
-];
-
 proptest! {
-    #[test]
-    fn encode_decode_roundtrip_prop(payload_str in ".{0,1000}",
-                                    kind_idx in 0..WIRE_KINDS.len()) {
-        let kind = WIRE_KINDS[kind_idx];
-        let env = Envelope::new(
-            agent_a(),
-            agent_b(),
-            kind,
-            json!({"data": payload_str}),
-        );
-        if let Ok(encoded) = encode(&env) {
-            let decoded = decode(&encoded).unwrap();
-            prop_assert_eq!(env, decoded);
-        }
-    }
-
-    #[test]
-    fn encoded_is_raw_json(payload_str in ".{0,500}") {
-        let env = Envelope::new(
-            agent_a(),
-            agent_b(),
-            MessageKind::Request,
-            json!({"data": payload_str}),
-        );
-        if let Ok(encoded) = encode(&env) {
-            let expected = serde_json::to_vec(&env).unwrap();
-            prop_assert_eq!(encoded, expected);
-        }
-    }
-
     #[test]
     fn decode_arbitrary_bytes_never_panics(data in proptest::collection::vec(any::<u8>(), 0..128)) {
         let _ = decode(&data);

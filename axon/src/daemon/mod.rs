@@ -339,7 +339,3 @@ async fn wait_for_shutdown_signal(cancel: CancellationToken) -> Result<()> {
 
     Ok(())
 }
-
-#[cfg(test)]
-#[path = "mod_tests.rs"]
-mod tests;

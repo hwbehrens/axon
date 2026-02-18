@@ -6,9 +6,7 @@
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use axon::config::{
-    AxonPaths, Config, KnownPeer, StaticPeerConfig, load_known_peers, save_known_peers,
-};
+use axon::config::{AxonPaths, StaticPeerConfig};
 use axon::discovery::{PeerEvent, run_static_discovery};
 use axon::identity::Identity;
 use axon::ipc::{DaemonReply, IpcCommand, IpcServer, IpcServerConfig};

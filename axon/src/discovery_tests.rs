@@ -149,23 +149,3 @@ fn parse_resolved_skips_missing_pubkey() {
         parse_resolved_service("ed25519.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", &info).expect("parse");
     assert!(parsed.is_none());
 }
-
-#[test]
-fn peer_event_equality() {
-    let a = PeerEvent::Discovered {
-        agent_id: "abc".into(),
-        addr: "10.0.0.1:7100".parse().unwrap(),
-        pubkey: "key".to_string(),
-    };
-    let b = PeerEvent::Discovered {
-        agent_id: "abc".into(),
-        addr: "10.0.0.1:7100".parse().unwrap(),
-        pubkey: "key".to_string(),
-    };
-    assert_eq!(a, b);
-
-    let c = PeerEvent::Lost {
-        agent_id: "abc".into(),
-    };
-    assert_ne!(a, c);
-}

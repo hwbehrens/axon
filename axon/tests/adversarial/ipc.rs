@@ -97,9 +97,9 @@ async fn concurrent_ipc_flood() {
 // §3 IPC malformed input resilience
 // =========================================================================
 
-/// Server survives malformed IPC inputs and continues serving valid commands.
-/// Note: non-UTF8 bytes cause tokio's `lines()` to return an I/O error,
-/// which closes that connection. We test those on separate connections.
+/// Server survives UTF-8-safe malformed IPC inputs (empty, unknown command,
+/// partial JSON, null bytes). Overlong-line and non-UTF8 cases are covered
+/// by dedicated tests in `ipc_framing.rs`.
 #[tokio::test]
 async fn ipc_malformed_input_resilience() {
     let result = tokio::time::timeout(Duration::from_secs(10), async {
@@ -156,72 +156,6 @@ async fn ipc_malformed_input_resilience() {
                     "malformed input should get error reply, got: {line}"
                 );
             }
-        }
-
-        // --- Overlong line on a separate connection (closes connection) ---
-        // Bounded read: overlong lines close the connection since there's no
-        // reliable way to find the next command boundary in the stream.
-        {
-            let stream = UnixStream::connect(&socket_path).await.unwrap();
-            let (read_half, mut write_half) = stream.into_split();
-            let mut reader = BufReader::new(read_half);
-
-            let long_line = format!("{}\n", "a".repeat(100_000));
-            // Server may close before we finish writing — ignore BrokenPipe
-            let _ = write_half.write_all(long_line.as_bytes()).await;
-
-            // Should get an error reply then the connection closes (EOF)
-            let mut line = String::new();
-            let n = reader.read_line(&mut line).await.unwrap();
-            if n > 0 {
-                assert!(
-                    line.contains("\"ok\":false"),
-                    "long malformed input should get error reply, got: {line}"
-                );
-            }
-            // Connection is closed — subsequent reads return EOF or ConnectionReset
-            let mut eof_line = String::new();
-            let eof_result = reader.read_line(&mut eof_line).await;
-            match eof_result {
-                Ok(0) => {}                                                     // clean EOF
-                Err(e) if e.kind() == std::io::ErrorKind::ConnectionReset => {} // RST on Linux
-                Ok(n) => panic!("expected EOF after overlong line, got {n} bytes: {eof_line}"),
-                Err(e) => panic!("unexpected error after overlong line: {e}"),
-            }
-        }
-
-        // --- Non-UTF8 binary garbage on a separate connection ---
-        // This closes the connection (tokio lines() rejects invalid UTF-8),
-        // but must not crash the server.
-        {
-            let mut stream = UnixStream::connect(&socket_path).await.unwrap();
-            stream.write_all(b"\x80\x81\x82\xff\xfe\n").await.unwrap();
-            // Connection will be closed by the server; just wait for EOF.
-            let mut buf = vec![0u8; 1024];
-            let _ = tokio::time::timeout(
-                Duration::from_millis(500),
-                tokio::io::AsyncReadExt::read(&mut stream, &mut buf),
-            )
-            .await;
-        }
-
-        // --- Verify server is still alive after binary garbage killed a connection ---
-        {
-            let stream = UnixStream::connect(&socket_path).await.unwrap();
-            let (read_half, mut write_half) = stream.into_split();
-            let mut reader = BufReader::new(read_half);
-
-            write_half
-                .write_all(b"{\"cmd\":\"status\"}\n")
-                .await
-                .unwrap();
-            let mut line = String::new();
-            reader.read_line(&mut line).await.unwrap();
-            let v: Value = serde_json::from_str(line.trim()).unwrap();
-            assert_eq!(
-                v["ok"], true,
-                "server must still work after binary garbage on another connection"
-            );
         }
 
         drop(server);
