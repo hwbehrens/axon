@@ -15,7 +15,7 @@ use super::auth;
 use super::protocol::{CommandEvent, DaemonReply, IpcCommand, IpcErrorCode, WhoamiInfo};
 use crate::message::Envelope;
 
-const MAX_IPC_LINE_LENGTH: usize = 64 * 1024; // 64 KB, aligned with MAX_MESSAGE_SIZE
+use super::protocol::MAX_IPC_LINE_LENGTH;
 
 static INVALID_COMMAND_LINE: LazyLock<Arc<str>> = LazyLock::new(|| {
     let error = super::protocol::IpcErrorCode::InvalidCommand;

@@ -1,4 +1,4 @@
-use super::{ConfigArgs, ConfigKey, apply_set, parse_action, render_list_text};
+use super::{ConfigArgs, ConfigKey, apply_set, key_display_name, parse_action, render_list_text};
 use axon::config::PersistedConfig;
 
 #[test]
@@ -35,6 +35,29 @@ fn apply_set_rejects_bad_values() {
     assert!(apply_set(&mut config, ConfigKey::Name, "   ").is_err());
     assert!(apply_set(&mut config, ConfigKey::Port, "not-a-number").is_err());
     assert!(apply_set(&mut config, ConfigKey::AdvertiseAddr, "missing-port").is_err());
+}
+
+#[test]
+fn apply_set_rejects_port_zero() {
+    let mut config = PersistedConfig::default();
+    let err = apply_set(&mut config, ConfigKey::Port, "0").expect_err("port 0 should fail");
+    assert!(err.to_string().contains("port 0"));
+}
+
+#[test]
+fn apply_set_accepts_valid_port_boundaries() {
+    let mut config = PersistedConfig::default();
+    apply_set(&mut config, ConfigKey::Port, "1").expect("port 1");
+    assert_eq!(config.port, Some(1));
+    apply_set(&mut config, ConfigKey::Port, "65535").expect("port 65535");
+    assert_eq!(config.port, Some(65535));
+}
+
+#[test]
+fn key_display_name_maps_all_keys() {
+    assert_eq!(key_display_name(ConfigKey::Name), "name");
+    assert_eq!(key_display_name(ConfigKey::Port), "port");
+    assert_eq!(key_display_name(ConfigKey::AdvertiseAddr), "advertise-addr");
 }
 
 #[test]

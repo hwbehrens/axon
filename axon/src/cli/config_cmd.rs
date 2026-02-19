@@ -83,6 +83,7 @@ pub async fn run(paths: &AxonPaths, args: ConfigArgs) -> Result<ExitCode> {
                 println!("{value}");
                 Ok(ExitCode::SUCCESS)
             } else {
+                eprintln!("{}: not set", key_display_name(key));
                 Ok(ExitCode::from(1))
             }
         }
@@ -134,6 +135,14 @@ fn parse_action(args: &ConfigArgs) -> Result<ConfigAction> {
     Ok(ConfigAction::Get(key))
 }
 
+fn key_display_name(key: ConfigKey) -> &'static str {
+    match key {
+        ConfigKey::Name => "name",
+        ConfigKey::Port => "port",
+        ConfigKey::AdvertiseAddr => "advertise-addr",
+    }
+}
+
 fn get_value(config: &PersistedConfig, key: ConfigKey) -> Option<String> {
     match key {
         ConfigKey::Name => config.name.clone(),
@@ -155,6 +164,11 @@ fn apply_set(config: &mut PersistedConfig, key: ConfigKey, value: &str) -> Resul
             let port = value
                 .parse::<u16>()
                 .with_context(|| format!("invalid port '{value}'"))?;
+            if port == 0 {
+                anyhow::bail!(
+                    "port 0 is not valid; QUIC requires a non-zero port for peer connections"
+                );
+            }
             config.port = Some(port);
         }
         ConfigKey::AdvertiseAddr => {

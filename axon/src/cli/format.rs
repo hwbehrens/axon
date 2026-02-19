@@ -4,7 +4,7 @@ use serde_json::Value;
 pub fn render_peers_human(response: &Value) -> Option<String> {
     let peers = response.get("peers")?.as_array()?;
     if peers.is_empty() {
-        return Some("No peers found.".to_string());
+        return Some("No peers.".to_string());
     }
 
     let mut rows: Vec<[String; 5]> = Vec::with_capacity(peers.len());

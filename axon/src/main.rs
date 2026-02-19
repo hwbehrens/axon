@@ -68,15 +68,17 @@ enum Commands {
             value_parser = clap::value_parser!(u64).range(1..)
         )]
         timeout: u64,
+        /// Text payload (sent as {"message":"<TEXT>"} on the wire).
         message: String,
     },
     /// Send a fire-and-forget message to another agent.
     Notify {
         #[arg(value_parser = parse_agent_id_arg)]
         agent_id: String,
-        /// Parse payload as JSON (default sends literal text).
+        /// Parse payload as JSON (default sends literal text). Payload is sent as {"data": <value>}.
         #[arg(long)]
         json: bool,
+        /// Payload data (sent as {"data":"<TEXT>"}, or {"data":<JSON>} with --json).
         data: String,
     },
     /// List discovered and connected peers.

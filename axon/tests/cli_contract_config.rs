@@ -93,6 +93,11 @@ fn config_get_set_list_and_unset_roundtrip() {
             .trim()
             .is_empty()
     );
+    let get_initial_stderr = String::from_utf8_lossy(&get_initial.stderr);
+    assert!(
+        get_initial_stderr.contains("name: not set"),
+        "stderr should indicate unset key, got: {get_initial_stderr}"
+    );
 
     let set_name =
         run_command(Command::new(&bin).args(["--state-root", root_str, "config", "name", "Alice"]));
@@ -139,6 +144,22 @@ fn config_set_invalid_port_fails() {
     assert_eq!(output.status.code(), Some(1));
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("invalid port"));
+}
+
+#[test]
+fn config_set_port_zero_fails() {
+    let bin = axon_bin();
+    let root = tempdir().expect("tempdir");
+    let root_str = root.path().to_str().expect("utf8 path");
+
+    let output =
+        run_command(Command::new(&bin).args(["--state-root", root_str, "config", "port", "0"]));
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("port 0"),
+        "stderr should mention port 0, got: {stderr}"
+    );
 }
 
 #[test]

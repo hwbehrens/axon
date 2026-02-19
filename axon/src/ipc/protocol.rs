@@ -4,6 +4,9 @@ use uuid::Uuid;
 
 use crate::message::{Envelope, MessageKind};
 
+/// Maximum length of a single IPC command line (64 KB).
+pub const MAX_IPC_LINE_LENGTH: usize = 64 * 1024;
+
 // ---------------------------------------------------------------------------
 // IPC protocol types
 // ---------------------------------------------------------------------------
