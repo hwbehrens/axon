@@ -42,6 +42,16 @@ pub fn render_json(value: &Value) -> Result<String> {
 }
 
 pub async fn send_ipc(paths: &AxonPaths, command: Value) -> Result<Value> {
+    let line = serde_json::to_string(&command).context("failed to serialize IPC command")?;
+    if line.len() > axon::ipc::MAX_IPC_LINE_LENGTH {
+        anyhow::bail!(
+            "IPC command size ({} bytes) exceeds the 64KB limit",
+            line.len()
+        );
+    }
+
+    tracing::debug!(socket = %paths.socket.display(), "connecting to daemon IPC socket");
+
     let mut stream = UnixStream::connect(&paths.socket).await.with_context(|| {
         format!(
             "failed to connect to daemon socket: {}. Is the daemon running?",
@@ -49,7 +59,8 @@ pub async fn send_ipc(paths: &AxonPaths, command: Value) -> Result<Value> {
         )
     })?;
 
-    let line = serde_json::to_string(&command).context("failed to serialize IPC command")?;
+    tracing::debug!(cmd_bytes = line.len(), "sending IPC command");
+
     stream
         .write_all(line.as_bytes())
         .await
@@ -85,8 +96,10 @@ pub async fn send_ipc(paths: &AxonPaths, command: Value) -> Result<Value> {
 
         let decoded: Value = serde_json::from_str(line).context("failed to decode IPC response")?;
         if is_unsolicited_event(&decoded) {
+            tracing::debug!("skipping unsolicited IPC event");
             continue;
         }
+        tracing::debug!("received IPC command response");
         return Ok(decoded);
     }
 }

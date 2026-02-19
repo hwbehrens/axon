@@ -202,6 +202,97 @@ fn doctor_fix_rekey_backs_up_and_regenerates_identity() {
 }
 
 #[test]
+fn doctor_check_reports_corrupt_config_as_fixable() {
+    let root = tempdir().expect("tempdir");
+    fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).expect("set perms");
+
+    // Write valid identity so that check passes, isolating the config check.
+    let identity = axon::identity::Identity::load_or_generate(&axon::config::AxonPaths::from_root(
+        root.path().to_path_buf(),
+    ))
+    .expect("generate identity");
+    drop(identity);
+
+    // Write corrupt config.
+    fs::write(root.path().join("config.yaml"), b"\x80\x81 invalid yaml").expect("write corrupt");
+
+    let output = run_doctor_json(root.path(), &[]);
+    assert_eq!(output.status.code(), Some(2));
+
+    let report = parse_report(&output);
+    let config = check_by_name(&report, "config");
+    assert_eq!(config["ok"], false);
+    assert_eq!(config["fixable"], true);
+    assert!(
+        config["message"]
+            .as_str()
+            .expect("config message")
+            .contains("doctor --fix"),
+        "should suggest --fix"
+    );
+}
+
+#[test]
+fn doctor_fix_resets_corrupt_config_with_backup() {
+    let root = tempdir().expect("tempdir");
+    fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).expect("set perms");
+
+    // Write valid identity so that check passes, isolating the config check.
+    let identity = axon::identity::Identity::load_or_generate(&axon::config::AxonPaths::from_root(
+        root.path().to_path_buf(),
+    ))
+    .expect("generate identity");
+    drop(identity);
+
+    let corrupt_content = b"\x80\x81 invalid binary";
+    fs::write(root.path().join("config.yaml"), corrupt_content).expect("write corrupt");
+
+    let output = run_doctor_json(root.path(), &["--fix"]);
+    assert!(output.status.success());
+
+    let report = parse_report(&output);
+    assert_eq!(report["ok"], true);
+
+    // Config check should pass after fix.
+    let config = check_by_name(&report, "config");
+    assert_eq!(config["ok"], true);
+
+    // Fixes should include config_reset.
+    let fixes = report["fixes_applied"]
+        .as_array()
+        .expect("fixes_applied array");
+    assert!(
+        fixes
+            .iter()
+            .any(|f| f["name"].as_str() == Some("config_reset")),
+        "should report config_reset fix"
+    );
+
+    // Backup file should exist with original corrupt content.
+    let mut backup_found = false;
+    for entry in fs::read_dir(root.path()).expect("read dir") {
+        let path = entry.expect("dir entry").path();
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if name.starts_with("config.yaml.bak.") {
+            let backup_content = fs::read(&path).expect("read backup");
+            assert_eq!(backup_content, corrupt_content);
+            backup_found = true;
+            break;
+        }
+    }
+    assert!(backup_found, "expected config.yaml backup file");
+
+    // New config.yaml should be valid and parseable.
+    let new_content = fs::read_to_string(root.path().join("config.yaml")).expect("read new config");
+    assert!(
+        !new_content.is_empty(),
+        "reset config.yaml should not be empty"
+    );
+}
+
+#[test]
 fn doctor_subcommand_is_visible_in_help() {
     let output = run_command(Command::new(axon_bin()).arg("--help"));
     assert!(output.status.success());

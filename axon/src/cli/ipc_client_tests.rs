@@ -1,8 +1,9 @@
+use std::path::PathBuf;
 use std::process::ExitCode;
 
 use serde_json::json;
 
-use super::{ResponseMode, daemon_reply_exit_code, is_unsolicited_event};
+use super::{ResponseMode, daemon_reply_exit_code, is_unsolicited_event, send_ipc};
 
 #[test]
 fn daemon_error_maps_to_exit_two() {
@@ -33,6 +34,25 @@ fn request_with_embedded_error_envelope_maps_to_exit_two() {
         ResponseMode::Request,
     );
     assert_eq!(code, ExitCode::from(2));
+}
+
+#[tokio::test]
+async fn send_ipc_rejects_oversized_command() {
+    let paths = axon::config::AxonPaths {
+        root: PathBuf::from("/tmp/axon-test-nonexistent"),
+        socket: PathBuf::from("/tmp/axon-test-nonexistent/axon.sock"),
+        config: PathBuf::from("/tmp/axon-test-nonexistent/config.yaml"),
+        known_peers: PathBuf::from("/tmp/axon-test-nonexistent/known_peers.json"),
+        identity_key: PathBuf::from("/tmp/axon-test-nonexistent/identity.key"),
+        identity_pub: PathBuf::from("/tmp/axon-test-nonexistent/identity.pub"),
+    };
+
+    let big_payload = "x".repeat(70_000);
+    let command = json!({"cmd": "send", "to": "ed25519.00000000000000000000000000000000", "kind": "message", "payload": big_payload});
+    let err = send_ipc(&paths, command)
+        .await
+        .expect_err("should reject oversized command");
+    assert!(err.to_string().contains("exceeds"), "error: {err}");
 }
 
 #[test]

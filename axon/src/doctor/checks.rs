@@ -6,7 +6,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow};
 
-use axon::config::{AxonPaths, Config, load_known_peers, save_known_peers};
+use axon::config::{
+    AxonPaths, Config, PersistedConfig, load_known_peers, save_known_peers, save_persisted_config,
+};
 
 use super::{DoctorArgs, DoctorReport};
 
@@ -303,7 +305,11 @@ pub(super) async fn check_known_peers(
     Ok(())
 }
 
-pub(super) async fn check_config(paths: &AxonPaths, report: &mut DoctorReport) -> Result<()> {
+pub(super) async fn check_config(
+    paths: &AxonPaths,
+    args: &DoctorArgs,
+    report: &mut DoctorReport,
+) -> Result<()> {
     if !paths.config.exists() {
         report.add_check("config", true, false, "config.yaml not present".to_string());
         return Ok(());
@@ -319,12 +325,32 @@ pub(super) async fn check_config(paths: &AxonPaths, report: &mut DoctorReport) -
             );
         }
         Err(err) => {
-            report.add_check(
-                "config",
-                false,
-                false,
-                format!("config.yaml parse/load error: {err}"),
-            );
+            if args.fix {
+                let backup = backup_file_with_timestamp(&paths.config)?;
+                save_persisted_config(&paths.config, &PersistedConfig::default()).await?;
+                report.add_fix(
+                    "config_reset",
+                    format!(
+                        "backed up corrupt config.yaml to {} and reset to defaults (peer enrollments lost — re-run `axon connect` to restore)",
+                        backup.display()
+                    ),
+                );
+                report.add_check(
+                    "config",
+                    true,
+                    true,
+                    "corrupt config.yaml reset to defaults".to_string(),
+                );
+            } else {
+                report.add_check(
+                    "config",
+                    false,
+                    true,
+                    format!(
+                        "config.yaml parse/load error: {err}; run `axon doctor --fix` to back up and reset"
+                    ),
+                );
+            }
         }
     }
 
