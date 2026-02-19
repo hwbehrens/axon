@@ -186,8 +186,13 @@ axon --help
   - connected clients receive inbound broadcast events
   - per-client delivery uses bounded queues; lagging clients are disconnected instead of silently dropped
 - Global verbosity override:
-  - `--verbose` / `-v` sets default logging to `debug` (otherwise default is `info`)
-  - if `RUST_LOG` is explicitly set, it takes precedence over `--verbose`
+  - `--quiet` / `-q` suppresses per-message logs (warn level only)
+  - *(no flag)* — default: `info` level (logs each inbound message summary)
+  - `-v` — `debug` level (includes truncated payload previews)
+  - `-vv` — `trace` level (full untruncated payloads)
+  - `--quiet` and `-v` are mutually exclusive
+  - if `RUST_LOG` is explicitly set, it takes precedence over all flags
+  - **for high-throughput LLM relay**, use `-q` to avoid per-message log overhead
 - Request payload shape:
   - `axon request` always sends payload as `{"message":"<string>"}` (including when the string itself is JSON text)
   - for fully structured request payload objects, use IPC `send` directly as documented in `spec/IPC.md`
@@ -195,6 +200,7 @@ axon --help
   - `axon doctor` runs local health checks and prints a human-readable checklist
   - `axon doctor --json` prints the structured report (`checks`, `fixes_applied`, `ok`)
   - `axon doctor --fix` applies safe local repairs; `--rekey` (requires `--fix`) allows identity reset when key data is unrecoverable (including non-base64/legacy raw `identity.key` contents)
+  - `axon doctor` also detects duplicate peer addresses in `known_peers.json`; `--fix` prunes stale entries (keeping static or most-recently-seen peers) after creating a timestamped backup
   - returns exit code `2` when unresolved check failures remain (`ok: false`)
 
 ### Example interaction
@@ -253,7 +259,7 @@ These are compile-time constants and cannot be changed via configuration.
 |----------|-------|----------|-------------|
 | `MAX_MESSAGE_SIZE` | `65536` (64 KB) | `message/envelope.rs` | Maximum encoded envelope size. Messages exceeding this are rejected. |
 | `REQUEST_TIMEOUT` | `30s` | `transport/mod.rs` | Timeout for bidirectional request/response exchanges. |
-| `STALE_TIMEOUT` | `60s` | `peer_table.rs` | Discovered (non-static, non-cached) peers with no activity for this duration are removed. |
+| `STALE_TIMEOUT` | `60s` | `peer_table/mod.rs` | Discovered (non-static, non-cached) peers with no activity for this duration are removed. |
 | `MAX_IPC_LINE_LENGTH` | `64 KB` | `ipc/protocol.rs` | Maximum length of a single IPC command line. Overlong lines are rejected with `command_too_large`. |
 | `MAX_CONNECTIONS` | `128` | `daemon/mod.rs` | Maximum simultaneous QUIC peer connections. |
 | `KEEPALIVE` | `15s` | `daemon/mod.rs` | QUIC keepalive interval. |

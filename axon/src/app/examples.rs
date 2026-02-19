@@ -37,6 +37,12 @@ $ axon daemon --port 7100
   (The daemon binds QUIC on 0.0.0.0:7100, creates ~/.axon/axon.sock for IPC,
    and begins connecting to any peers listed in ~/.axon/config.yaml.)
 
+Verbosity levels (choose based on workload):
+  $ axon -q  daemon   # warn only — best for high-throughput LLM relay
+  $ axon    daemon    # info (default) — logs each inbound message summary
+  $ axon -v  daemon   # debug — includes truncated payload previews (256 bytes)
+  $ axon -vv daemon   # trace — full untruncated payloads
+
 ──────────────────────────────────────────────
 Step 1: List known peers
 ──────────────────────────────────────────────

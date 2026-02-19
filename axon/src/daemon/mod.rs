@@ -26,7 +26,7 @@ const RECONNECT_MAX_BACKOFF: Duration = Duration::from_secs(30);
 use anyhow::{Context, Result};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, trace, warn};
 
 use crate::config::{AxonPaths, Config, load_known_peers, save_known_peers};
 use crate::discovery::{run_mdns_discovery, run_static_discovery};
@@ -139,6 +139,37 @@ pub async fn run_daemon(opts: DaemonOptions) -> Result<()> {
                     match msg {
                         Ok(envelope) => {
                             counters_for_inbound.received.fetch_add(1, Ordering::Relaxed);
+                            let from_id = envelope.from.as_deref().unwrap_or("unknown");
+                            let payload_bytes = envelope.payload.get().len();
+                            info!(
+                                msg_id = %envelope.id,
+                                from = from_id,
+                                kind = %envelope.kind,
+                                payload_bytes,
+                                "message received"
+                            );
+                            {
+                                let raw = envelope.payload.get();
+                                let truncated = if raw.len() > 256 {
+                                    format!("{}…", &raw[..256])
+                                } else {
+                                    raw.to_string()
+                                };
+                                debug!(
+                                    msg_id = %envelope.id,
+                                    from = from_id,
+                                    kind = %envelope.kind,
+                                    payload = %truncated,
+                                    "message received (payload preview)"
+                                );
+                                trace!(
+                                    msg_id = %envelope.id,
+                                    from = from_id,
+                                    kind = %envelope.kind,
+                                    payload = raw,
+                                    "message received (full payload)"
+                                );
+                            }
                             if let Some(ref from) = envelope.from {
                                 peer_table_for_inbound
                                     .set_connected(from.as_str(), None)

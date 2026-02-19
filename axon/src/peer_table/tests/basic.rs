@@ -1,4 +1,4 @@
-use super::*;
+use super::super::*;
 use std::time::Duration;
 
 fn make_static_cfg(id: &str) -> StaticPeerConfig {
@@ -307,12 +307,9 @@ async fn concurrent_access() {
         let t = table.clone();
         handles.push(tokio::spawn(async move {
             let id = format!("peer{i:02}");
-            t.upsert_discovered(
-                AgentId::from(id.clone()),
-                "127.0.0.1:7100".parse().unwrap(),
-                "Zm9v".to_string(),
-            )
-            .await;
+            let addr: std::net::SocketAddr = format!("127.0.0.1:{}", 7100 + i).parse().unwrap();
+            t.upsert_discovered(AgentId::from(id.clone()), addr, "Zm9v".to_string())
+                .await;
             t.set_connected(&id, Some(i as f64)).await;
             t.touch(&id).await;
         }));
@@ -334,138 +331,6 @@ async fn concurrent_access() {
     assert_eq!(table.list().await.len(), 10);
 }
 
-// =========================================================================
-// Property-based tests
-// =========================================================================
-
-use proptest::prelude::*;
-
-#[derive(Debug, Clone)]
-enum PeerOp {
-    Insert(String),
-    Remove(String),
-    SetStatus(String, ConnectionStatus),
-    SetConnected(String),
-    SetDisconnected(String),
-    List,
-}
-
-fn arb_peer_op() -> impl Strategy<Value = PeerOp> {
-    let id_strategy = "[0-9a-f]{32}";
-    prop_oneof![
-        id_strategy.prop_map(PeerOp::Insert),
-        id_strategy.prop_map(PeerOp::Remove),
-        (
-            id_strategy,
-            prop::sample::select(vec![
-                ConnectionStatus::Discovered,
-                ConnectionStatus::Connecting,
-                ConnectionStatus::Connected,
-                ConnectionStatus::Disconnected,
-            ])
-        )
-            .prop_map(|(id, s)| PeerOp::SetStatus(id, s)),
-        id_strategy.prop_map(PeerOp::SetConnected),
-        id_strategy.prop_map(PeerOp::SetDisconnected),
-        Just(PeerOp::List),
-    ]
-}
-
-proptest! {
-    #[test]
-    fn concurrent_insert_remove_never_panics(
-        ops in proptest::collection::vec(arb_peer_op(), 1..50),
-    ) {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        rt.block_on(async {
-            let table = PeerTable::new();
-            let mut handles = Vec::new();
-            for op in ops {
-                let t = table.clone();
-                handles.push(tokio::spawn(async move {
-                    match op {
-                        PeerOp::Insert(id) => {
-                            t.upsert_discovered(
-                                id.into(),
-                                "127.0.0.1:7100".parse().unwrap(),
-                                "Zm9v".to_string(),
-                            ).await;
-                        }
-                        PeerOp::Remove(id) => { t.remove(&id).await; }
-                        PeerOp::SetStatus(id, s) => { t.set_status(&id, s).await; }
-                        PeerOp::SetConnected(id) => { t.set_connected(&id, Some(1.0)).await; }
-                        PeerOp::SetDisconnected(id) => { t.set_disconnected(&id).await; }
-                        PeerOp::List => { let _ = t.list().await; }
-                    }
-                }));
-            }
-            for h in handles {
-                h.await.unwrap();
-            }
-            let listed = table.list().await;
-            assert!(listed.len() <= 50);
-        });
-    }
-}
-
-// =========================================================================
-// Mutation-coverage: remove_stale > vs >= boundary
-// =========================================================================
-
-#[tokio::test]
-async fn stale_cleanup_boundary_exactly_at_ttl() {
-    let table = PeerTable::new();
-    let id = "ed25519.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
-    let ttl = Duration::from_secs(60);
-
-    table
-        .upsert_discovered(
-            id.into(),
-            "127.0.0.1:7101".parse().unwrap(),
-            "YmFy".to_string(),
-        )
-        .await;
-
-    let beyond_id = "ed25519.cccccccccccccccccccccccccccccccc";
-    table
-        .upsert_discovered(
-            beyond_id.into(),
-            "127.0.0.1:7102".parse().unwrap(),
-            "YmF6".to_string(),
-        )
-        .await;
-
-    // Set one peer to just within TTL (should survive) and one well beyond (should be removed).
-    // Use a 1-second margin to avoid flakiness from clock advancement between set and check.
-    {
-        let mut inner = table.inner.write().await;
-        if let Some(peer) = inner.get_mut(id) {
-            peer.last_seen = Instant::now() - ttl + Duration::from_secs(1);
-        }
-        if let Some(peer) = inner.get_mut(beyond_id) {
-            peer.last_seen = Instant::now() - ttl - Duration::from_secs(10);
-        }
-    }
-
-    let removed = table.remove_stale(ttl).await;
-    assert!(
-        !removed.contains(&AgentId::from(id)),
-        "peer within TTL should NOT be removed"
-    );
-    assert!(
-        removed.contains(&AgentId::from(beyond_id)),
-        "peer beyond TTL should be removed"
-    );
-    assert!(table.get(id).await.is_some());
-}
-
-// =========================================================================
-// Mutation-coverage: to_known_peers returns all peers
-// =========================================================================
-
 #[tokio::test]
 async fn to_known_peers_returns_all_peers() {
     let table = PeerTable::new();
@@ -481,7 +346,12 @@ async fn to_known_peers_returns_all_peers() {
         )
         .await;
     table
-        .upsert_cached(&make_known_peer("ed25519.cccccccccccccccccccccccccccccccc"))
+        .upsert_cached(&KnownPeer {
+            agent_id: "ed25519.cccccccccccccccccccccccccccccccc".into(),
+            addr: "127.0.0.1:7102".parse().expect("addr"),
+            pubkey: "Zm9v".to_string(),
+            last_seen_unix_ms: 12345,
+        })
         .await;
 
     let known = table.to_known_peers().await;

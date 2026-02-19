@@ -179,11 +179,13 @@ Unix socket permissions (`0600`, user-only) as baseline. Peer UID credential che
 ## 6. CLI
 
 ```
-axon [--state-root <dir>] daemon [--port 7100] [--disable-mdns]
+axon [-q | -v | -vv] [--state-root <dir>] daemon [--port 7100] [--disable-mdns]
     Start the daemon. Runs in foreground (use systemd/launchd for background).
     --disable-mdns uses static peers only.
     --state-root sets the AXON state root (socket/identity/config), enabling multi-agent-per-host layouts.
     Aliases: --state, --root. Env fallback: AXON_ROOT. Default: ~/.axon.
+    Verbosity: -q (warn), default (info), -v (debug), -vv (trace).
+    RUST_LOG takes precedence over verbosity flags when set.
 
 axon [--state-root <dir>] request [--timeout <seconds>] <agent_id> <message>
     Send a request to a peer.
@@ -218,8 +220,10 @@ axon [--state-root <dir>] whoami [--json]
     Human-readable labeled output by default.
 
 axon [--state-root <dir>] doctor [--json] [--fix] [--rekey]
-    Diagnose local AXON state (identity, config, IPC socket).
-    Defaults to check mode. `--fix` applies safe repairs, and `--rekey` regenerates identity material when paired with `--fix`.
+    Diagnose local AXON state (identity, config, IPC socket, peer-cache hygiene).
+    Detects duplicate peer addresses in known_peers.json.
+    Defaults to check mode. `--fix` applies safe repairs (with timestamped backups),
+    and `--rekey` regenerates identity material when paired with `--fix`.
     Human-readable checklist output by default.
 
 axon [--state-root <dir>] config <KEY> [VALUE]

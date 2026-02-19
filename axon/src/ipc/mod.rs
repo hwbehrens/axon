@@ -1,4 +1,5 @@
 mod auth;
+mod client_handler;
 mod protocol;
 mod server;
 

@@ -25,17 +25,35 @@ rubrics/                   Evaluation rubrics (quality, documentation, alignment
 axon/                      Rust implementation (Cargo crate)
   Cargo.toml               Dependencies and package metadata (Rust 2024 edition)
   Makefile                 Canonical build/test/verify entrypoints
-  src/                     Implementation
-    main.rs                CLI entrypoint (subcommands: daemon, request, notify, peers, status, identity, connect, whoami, doctor, config, examples)
+  src/
+    main.rs                CLI entrypoint (thin delegator to app::run)
     lib.rs                 Crate root
+    app/                   Binary-only code (CLI, doctor, examples)
+      mod.rs               App module declarations
+      run.rs               CLI struct, Commands enum, run() logic, helpers
+      run_tests.rs         Tests for CLI parsing and helpers
+      examples.rs          Annotated example interactions
+      cli/                 CLI helpers (IPC client, formatting, config commands)
+        mod.rs, config_cmd.rs, format.rs, identity_output.rs, ipc_client.rs, notify_payload.rs (+ test files)
+      doctor/              Doctor diagnostics and checks
+        mod.rs             DoctorArgs, DoctorReport, run()
+        identity_check.rs
+        checks/            Split check modules (state_root, daemon_artifacts, known_peers, config)
+    config/                YAML config parsing (name, port, peers)
+      mod.rs, tests.rs
     daemon/                Daemon orchestration, lifecycle, reconnect
-    discovery.rs           mDNS + static peer discovery (plain async functions)
-    identity.rs            Ed25519 identity + agent_id derivation
-    config.rs              YAML config parsing (name, port, peers)
+    discovery/             mDNS + static peer discovery
+      mod.rs, tests.rs
+    identity/              Ed25519 identity + agent_id derivation
+      mod.rs, tests.rs
     ipc/                   Unix socket IPC protocol + server
+      mod.rs, auth.rs, protocol.rs, server.rs, client_handler.rs, server_tests.rs
     message/               MessageKind (4 variants), Envelope, encode/decode
+    peer_table/            Peer storage, pinning, shared PubkeyMap
+      mod.rs, tests/ (basic.rs, eviction.rs, proptest.rs)
+    peer_token/            Peer token encoding/decoding
+      mod.rs, tests.rs
     transport/             QUIC/TLS, connections, framing
-    peer_table.rs          Peer storage, pinning, shared PubkeyMap
   tests/                   Integration, spec compliance, adversarial, e2e tests
   benches/                 Criterion benchmarks
   fuzz/                    cargo-fuzz harness + fuzz_targets/
@@ -52,7 +70,7 @@ Client (OpenClaw/CLI) ←→ [Unix Socket IPC] ←→ AXON Daemon ←→ [QUIC/U
 - **Discovery**: mDNS (`_axon._udp.local.`) broadcasts agent ID and public key. Static peers via config file for Tailscale/VPN. Plain async functions.
 - **Transport**: QUIC via `quinn`. TLS 1.3 with forward secrecy. Unidirectional streams for fire-and-forget messages, bidirectional streams for request/response.
 - **IPC**: Unix domain socket at `~/.axon/axon.sock`. Line-delimited JSON. 5 commands: `send`, `peers`, `status`, `whoami`, `add_peer`. Inbound messages are broadcast to connected clients; lagging clients are disconnected when bounded IPC queues overflow.
-- **Doctor CLI**: `axon doctor` runs local diagnostics and optional repairs for state-root health, identity material, and config hygiene.
+- **Doctor CLI**: `axon doctor` runs local diagnostics and optional repairs for state-root health, identity material, config hygiene, and peer-cache hygiene (including duplicate-address detection).
 - **Messages**: JSON envelopes with UUID, kind, payload, and optional ref. 4 kinds: `request`, `response`, `message`, `error`.
 
 ## Module Map (summary)
@@ -60,15 +78,16 @@ Client (OpenClaw/CLI) ←→ [Unix Socket IPC] ←→ AXON Daemon ←→ [QUIC/U
 Use this to navigate quickly; for the full "change → file(s)" table, see `CONTRIBUTING.md`.
 
 - **Daemon lifecycle / reconnection**: `axon/src/daemon/`
-- **Discovery (mDNS + static peers, plain functions)**: `axon/src/discovery.rs`
+- **Discovery (mDNS + static peers)**: `axon/src/discovery/`
 - **Transport (QUIC/TLS/connections/framing)**: `axon/src/transport/`
 - **Message kinds + envelopes + encode/decode**: `axon/src/message/`
 - **IPC protocol + server**: `axon/src/ipc/`
-- **Identity + agent_id derivation**: `axon/src/identity.rs`
-- **Config parsing**: `axon/src/config.rs`
-- **Peer table + pinning**: `axon/src/peer_table.rs`
-- **CLI**: `axon/src/main.rs`
-- **Doctor diagnostics**: `axon/src/doctor.rs`, `axon/src/doctor/checks.rs`, `axon/src/doctor/identity_check.rs`
+- **IPC client handler**: `axon/src/ipc/client_handler.rs`
+- **Identity + agent_id derivation**: `axon/src/identity/`
+- **Config parsing**: `axon/src/config/`
+- **Peer table + pinning**: `axon/src/peer_table/`
+- **CLI**: `axon/src/app/` (CLI definitions in `app/run.rs`, helpers in `app/cli/`)
+- **Doctor diagnostics**: `axon/src/app/doctor/`
 
 ## Key Invariants (summary)
 
@@ -77,6 +96,7 @@ These are load-bearing. Do not change behavior without updating spec + tests. Fu
 - **Configuration reference**: when adding or changing a configurable setting (in `Config` / `config.yaml`) or an internal constant (timeout, limit, interval, etc.), update the Configuration Reference tables in `README.md`.
 - **Agent ID = SHA-256(pubkey)**: peer identity must match TLS certificate/public key; reject mismatches.
 - **Peer pinning**: unknown peers must not be accepted at TLS/transport; peers must be in the PeerTable's shared PubkeyMap before connection.
+- **Address uniqueness**: at most one non-static peer per network address; stale entries are evicted when a new identity appears at the same address.
 
 ## Building & Verification
 
@@ -119,6 +139,7 @@ Detailed requirements and recipes live in `CONTRIBUTING.md`. Key conventions:
 - **Fuzz targets** live in `axon/fuzz/fuzz_targets/`. Add one for any new deserialization entrypoint.
 - **Mutation testing** via `cargo-mutants` validates test suite quality.
 - **File size limit**: all Rust source files (`.rs`) must stay under 500 lines. Split into submodules when approaching.
+- **Module structure conventions**: all top-level modules are directory modules (`<name>/mod.rs`), binary-only code lives under `app/`, tests live inside their module directory. Full rules in `CONTRIBUTING.md` § "Module structure conventions".
 
 ## Specs to Read First
 

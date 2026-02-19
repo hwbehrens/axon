@@ -27,17 +27,17 @@ Know where to make changes before you start editing:
 | IPC command/reply schema | `axon/src/ipc/protocol.rs` |
 | IPC server behavior / broadcast | `axon/src/ipc/server.rs` |
 | IPC peer credential auth | `axon/src/ipc/auth.rs` |
-| Peer table / pinning / PubkeyMap | `axon/src/peer_table.rs` |
-| mDNS / static discovery | `axon/src/discovery.rs` |
+| Peer table / pinning / PubkeyMap | `axon/src/peer_table/` |
+| mDNS / static discovery | `axon/src/discovery/` |
 | Daemon event loop / startup / shutdown | `axon/src/daemon/mod.rs` |
 | Command dispatch | `axon/src/daemon/command_handler.rs` |
 | Discovery event handling | `axon/src/daemon/peer_events.rs` |
 | Reconnection logic | `axon/src/daemon/reconnect.rs` |
-| CLI commands | `axon/src/main.rs` |
-| Doctor diagnostics | `axon/src/main.rs`, `axon/src/doctor.rs`, `axon/src/doctor/checks.rs`, `axon/src/doctor/identity_check.rs` |
-| CLI example output | `axon/src/cli_examples.rs` |
-| Ed25519 identity / agent ID | `axon/src/identity.rs` |
-| Config file parsing | `axon/src/config.rs` |
+| CLI commands | `axon/src/app/run.rs` |
+| Doctor diagnostics | `axon/src/app/doctor/` |
+| CLI example output | `axon/src/app/examples.rs` |
+| Ed25519 identity / agent ID | `axon/src/identity/` |
+| Config file parsing | `axon/src/config/` |
 
 ## Invariants
 
@@ -45,6 +45,7 @@ Do not break these. They are load-bearing:
 
 - **Agent ID = SHA-256(pubkey)** — the `from` field must match the public key in the peer's TLS certificate. Reject on mismatch.
 - **Peer pinning** — unknown peers must not be accepted at TLS/transport; peers must be in the peer table before connection.
+- **Address uniqueness** — at most one non-static peer per network address; when a new identity appears at an existing address, the stale entry is evicted from the PeerTable. Discovered/cached peers are blocked from inserting when a static peer already occupies the address.
 - **PeerTable owns the pubkey map** — TLS verifiers read from PeerTable's shared PubkeyMap. No manual sync needed.
 
 ## Verification
@@ -71,6 +72,58 @@ make verify
 ### File size
 
 All source files must stay **under 500 lines**. If a file approaches this limit, split it into a subdirectory module. This ensures any file can be parsed in a single read.
+
+### Module structure conventions
+
+The codebase follows a strict directory layout. All new modules must conform to these rules.
+
+#### Library vs binary boundary
+
+- **Library code** (reusable daemon/protocol API) lives directly under `axon/src/` and is declared in `lib.rs`. Examples: `config/`, `daemon/`, `transport/`.
+- **Binary-only code** (CLI frontend, doctor diagnostics, example output) lives under `axon/src/app/` and is only reachable from `main.rs`. Never import `app::` from library modules.
+
+#### Directory modules, not flat files
+
+Every top-level module under `src/` is a **directory module** (`<name>/mod.rs`), not a flat file (`<name>.rs`). This keeps the `src/` root clean and provides a natural home for tests and future submodules.
+
+When adding a new library module:
+1. Create `src/<name>/mod.rs` with the implementation.
+2. Add `pub mod <name>;` to `lib.rs`.
+
+When adding a new binary-only module:
+1. Create `src/app/<name>.rs` (or `src/app/<name>/mod.rs` if it needs submodules).
+2. Add it to `src/app/mod.rs`.
+
+#### Leaf submodules inside a directory may remain single files
+
+Files like `daemon/reconnect.rs` or `transport/tls.rs` are fine as single files inside their parent directory. If a leaf submodule grows and needs splitting, promote it to its own subdirectory (`tls/mod.rs` + children) without affecting sibling modules.
+
+#### Test placement
+
+Tests live **inside their module's directory**, not at the `src/` root.
+
+- **Single test file**: place it as `tests.rs` (or `<name>_tests.rs` for leaf submodules) inside the module directory. Wire it from the implementation file:
+  ```rust
+  #[cfg(test)]
+  #[path = "tests.rs"]
+  mod tests;
+  ```
+- **Multiple test files**: place them under a `tests/` subdirectory with an aggregator `tests/mod.rs`. Wire from the implementation:
+  ```rust
+  #[cfg(test)]
+  #[path = "tests/mod.rs"]
+  mod tests;
+  ```
+  Example: `peer_table/tests/{mod.rs, basic.rs, eviction.rs, proptest.rs}`.
+#### Naming conventions
+
+- Module directories use **snake_case**: `peer_table/`, `peer_token/`.
+- Files inside a directory do **not** repeat the module name: use `tests/basic.rs`, not `tests/peer_table_basic.rs`.
+- Test files for leaf submodules use the `<name>_tests.rs` suffix: `reconnect.rs` → `reconnect_tests.rs`.
+
+#### When to split a file
+
+Split proactively when a file exceeds **~400 lines** or when a logically distinct responsibility can be cleanly separated (e.g., `ipc/server.rs` → `ipc/server.rs` + `ipc/client_handler.rs`). Don't wait until the 500-line limit forces an awkward split.
 
 ### Code style
 
@@ -101,7 +154,7 @@ Every change must include tests. The test structure:
 
 ### Required review gates for user-visible changes
 
-- If you touch CLI parsing/output/routing in `axon/src/main.rs`, add or update at least one black-box CLI contract test in `axon/tests/cli_contract.rs`.
+- If you touch CLI parsing/output/routing in `axon/src/app/run.rs`, add or update at least one black-box CLI contract test in `axon/tests/cli_contract.rs`.
 - If you change persisted files or on-disk formats (`identity.key`, `identity.pub`, `known_peers.json`, `config.yaml` semantics), document reset/re-init guidance in the same PR (README/spec/release notes as appropriate).
 - If you change behavior shown in CLI help, examples, or spec text, update all affected artifacts in the same PR (`--help`, `README.md`, `spec/`).
 - If you change CLI command inventory/help semantics, update docs-conformance coverage (`axon/tests/spec_compliance/cli_help.rs`) as needed.
