@@ -307,12 +307,9 @@ async fn concurrent_access() {
         let t = table.clone();
         handles.push(tokio::spawn(async move {
             let id = format!("peer{i:02}");
-            t.upsert_discovered(
-                AgentId::from(id.clone()),
-                "127.0.0.1:7100".parse().unwrap(),
-                "Zm9v".to_string(),
-            )
-            .await;
+            let addr: std::net::SocketAddr = format!("127.0.0.1:{}", 7100 + i).parse().unwrap();
+            t.upsert_discovered(AgentId::from(id.clone()), addr, "Zm9v".to_string())
+                .await;
             t.set_connected(&id, Some(i as f64)).await;
             t.touch(&id).await;
         }));
@@ -332,6 +329,102 @@ async fn concurrent_access() {
     }
 
     assert_eq!(table.list().await.len(), 10);
+}
+
+// =========================================================================
+// Stale-peer eviction on address reuse
+// =========================================================================
+
+#[tokio::test]
+async fn upsert_discovered_evicts_stale_cached_at_same_addr() {
+    let table = PeerTable::new();
+    let addr: std::net::SocketAddr = "10.0.0.1:7100".parse().unwrap();
+
+    // Insert a cached peer at addr
+    table
+        .upsert_cached(&KnownPeer {
+            agent_id: "old_peer".into(),
+            addr,
+            pubkey: "b2xk".to_string(),
+            last_seen_unix_ms: 1000,
+        })
+        .await;
+    assert!(table.get("old_peer").await.is_some());
+
+    // Discover a new peer at the same addr
+    table
+        .upsert_discovered("new_peer".into(), addr, "bmV3".to_string())
+        .await;
+
+    assert!(
+        table.get("old_peer").await.is_none(),
+        "stale peer should be evicted"
+    );
+    assert!(
+        table.get("new_peer").await.is_some(),
+        "new peer should exist"
+    );
+
+    // Pubkey map should only have new peer
+    let map = table.pubkey_map();
+    let map = map.read().unwrap();
+    assert!(!map.contains_key("old_peer"));
+    assert!(map.contains_key("new_peer"));
+}
+
+#[tokio::test]
+async fn upsert_discovered_does_not_evict_static_at_same_addr() {
+    let table = PeerTable::new();
+    let addr: std::net::SocketAddr = "10.0.0.1:7100".parse().unwrap();
+
+    table
+        .upsert_static(&StaticPeerConfig {
+            agent_id: "static_peer".into(),
+            addr,
+            pubkey: "c3RhdGlj".to_string(),
+        })
+        .await;
+
+    table
+        .upsert_discovered("new_peer".into(), addr, "bmV3".to_string())
+        .await;
+
+    assert!(
+        table.get("static_peer").await.is_some(),
+        "static peer must not be evicted"
+    );
+    assert!(
+        table.get("new_peer").await.is_none(),
+        "discovered peer should be blocked by static at same addr"
+    );
+}
+
+#[tokio::test]
+async fn upsert_cached_evicts_stale_discovered_at_same_addr() {
+    let table = PeerTable::new();
+    let addr: std::net::SocketAddr = "10.0.0.1:7100".parse().unwrap();
+
+    table
+        .upsert_discovered("old_peer".into(), addr, "b2xk".to_string())
+        .await;
+
+    table
+        .upsert_cached(&KnownPeer {
+            agent_id: "new_peer".into(),
+            addr,
+            pubkey: "bmV3".to_string(),
+            last_seen_unix_ms: 2000,
+        })
+        .await;
+
+    assert!(
+        table.get("old_peer").await.is_none(),
+        "stale peer should be evicted"
+    );
+    assert!(
+        table.get("new_peer").await.is_some(),
+        "new peer should exist"
+    );
 }
 
 // =========================================================================
@@ -481,7 +574,12 @@ async fn to_known_peers_returns_all_peers() {
         )
         .await;
     table
-        .upsert_cached(&make_known_peer("ed25519.cccccccccccccccccccccccccccccccc"))
+        .upsert_cached(&KnownPeer {
+            agent_id: "ed25519.cccccccccccccccccccccccccccccccc".into(),
+            addr: "127.0.0.1:7102".parse().expect("addr"),
+            pubkey: "Zm9v".to_string(),
+            last_seen_unix_ms: 12345,
+        })
         .await;
 
     let known = table.to_known_peers().await;
@@ -490,4 +588,159 @@ async fn to_known_peers_returns_all_peers() {
     assert!(ids.contains("ed25519.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));
     assert!(ids.contains("ed25519.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"));
     assert!(ids.contains("ed25519.cccccccccccccccccccccccccccccccc"));
+}
+
+// =========================================================================
+// R1 + O1: evict-all and static-addr-conflict tests
+// =========================================================================
+
+#[tokio::test]
+async fn evict_stale_at_addr_evicts_all_matching_peers() {
+    let table = PeerTable::new();
+    let addr: std::net::SocketAddr = "10.0.0.1:7100".parse().unwrap();
+
+    // Insert 3 discovered peers at the same address by writing directly
+    // (upsert_discovered would evict prior peers at the same addr)
+    {
+        let mut inner = table.inner.write().await;
+        for id in &["peer_a", "peer_b", "peer_c"] {
+            inner.insert(
+                AgentId::from(*id),
+                PeerRecord {
+                    agent_id: AgentId::from(*id),
+                    addr,
+                    pubkey: format!("{id}_key"),
+                    source: PeerSource::Discovered,
+                    status: ConnectionStatus::Discovered,
+                    rtt_ms: None,
+                    last_seen: Instant::now(),
+                },
+            );
+        }
+    }
+    {
+        let pmap = table.pubkey_map();
+        let mut map = pmap.write().unwrap();
+        for id in &["peer_a", "peer_b", "peer_c"] {
+            map.insert(id.to_string(), format!("{id}_key"));
+        }
+    }
+    assert_eq!(table.list().await.len(), 3);
+
+    // Discover a 4th peer at the same address — should evict all 3
+    table
+        .upsert_discovered("peer_new".into(), addr, "new_key".to_string())
+        .await;
+
+    assert_eq!(table.list().await.len(), 1);
+    assert!(table.get("peer_new").await.is_some());
+    for id in &["peer_a", "peer_b", "peer_c"] {
+        assert!(table.get(id).await.is_none(), "{id} should be evicted");
+    }
+
+    let map = table.pubkey_map();
+    let map = map.read().unwrap();
+    assert_eq!(map.len(), 1);
+    assert!(map.contains_key("peer_new"));
+}
+
+#[tokio::test]
+async fn upsert_discovered_blocked_by_static_at_same_addr() {
+    let table = PeerTable::new();
+    let addr: std::net::SocketAddr = "10.0.0.1:7100".parse().unwrap();
+
+    table
+        .upsert_static(&StaticPeerConfig {
+            agent_id: "static_peer".into(),
+            addr,
+            pubkey: "c3RhdGlj".to_string(),
+        })
+        .await;
+
+    // Try to discover a different peer at the same address — should be blocked
+    table
+        .upsert_discovered("discovered_peer".into(), addr, "bmV3".to_string())
+        .await;
+
+    assert!(
+        table.get("static_peer").await.is_some(),
+        "static peer must remain"
+    );
+    assert!(
+        table.get("discovered_peer").await.is_none(),
+        "discovered peer should be blocked by static at same addr"
+    );
+
+    let map = table.pubkey_map();
+    let map = map.read().unwrap();
+    assert!(!map.contains_key("discovered_peer"));
+}
+
+#[tokio::test]
+async fn upsert_cached_blocked_by_static_at_same_addr() {
+    let table = PeerTable::new();
+    let addr: std::net::SocketAddr = "10.0.0.1:7100".parse().unwrap();
+
+    table
+        .upsert_static(&StaticPeerConfig {
+            agent_id: "static_peer".into(),
+            addr,
+            pubkey: "c3RhdGlj".to_string(),
+        })
+        .await;
+
+    table
+        .upsert_cached(&KnownPeer {
+            agent_id: "cached_peer".into(),
+            addr,
+            pubkey: "bmV3".to_string(),
+            last_seen_unix_ms: 5000,
+        })
+        .await;
+
+    assert!(
+        table.get("static_peer").await.is_some(),
+        "static peer must remain"
+    );
+    assert!(
+        table.get("cached_peer").await.is_none(),
+        "cached peer should be blocked by static at same addr"
+    );
+}
+
+#[tokio::test]
+async fn upsert_static_evicts_all_at_same_addr() {
+    let table = PeerTable::new();
+    let addr: std::net::SocketAddr = "10.0.0.1:7100".parse().unwrap();
+
+    table
+        .upsert_discovered("disc_a".into(), addr, "key_a".to_string())
+        .await;
+    table
+        .upsert_cached(&KnownPeer {
+            agent_id: "cached_b".into(),
+            addr,
+            pubkey: "key_b".to_string(),
+            last_seen_unix_ms: 1000,
+        })
+        .await;
+
+    // Static peer at same addr — should evict both
+    table
+        .upsert_static(&StaticPeerConfig {
+            agent_id: "static_new".into(),
+            addr,
+            pubkey: "static_key".to_string(),
+        })
+        .await;
+
+    assert_eq!(table.list().await.len(), 1);
+    assert!(table.get("static_new").await.is_some());
+    assert!(table.get("disc_a").await.is_none());
+    assert!(table.get("cached_b").await.is_none());
+
+    let map = table.pubkey_map();
+    let map = map.read().unwrap();
+    assert_eq!(map.len(), 1);
+    assert!(map.contains_key("static_new"));
 }

@@ -195,6 +195,7 @@ axon --help
   - `axon doctor` runs local health checks and prints a human-readable checklist
   - `axon doctor --json` prints the structured report (`checks`, `fixes_applied`, `ok`)
   - `axon doctor --fix` applies safe local repairs; `--rekey` (requires `--fix`) allows identity reset when key data is unrecoverable (including non-base64/legacy raw `identity.key` contents)
+  - `axon doctor` also detects duplicate peer addresses in `known_peers.json`; `--fix` prunes stale entries (keeping static or most-recently-seen peers) after creating a timestamped backup
   - returns exit code `2` when unresolved check failures remain (`ok: false`)
 
 ### Example interaction

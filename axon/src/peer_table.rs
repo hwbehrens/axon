@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
-use tracing::warn;
+use tracing::{debug, info, warn};
 
 use crate::config::{KnownPeer, StaticPeerConfig};
 use crate::message::AgentId;
@@ -120,9 +120,38 @@ impl PeerTable {
         }
     }
 
+    /// Evict all non-static peers at `addr` that have a different `agent_id`.
+    /// Returns the evicted agent IDs.
+    fn evict_stale_at_addr(
+        table: &mut HashMap<AgentId, PeerRecord>,
+        new_agent_id: &AgentId,
+        addr: SocketAddr,
+    ) -> Vec<AgentId> {
+        let stale_ids: Vec<AgentId> = table
+            .values()
+            .filter(|p| {
+                p.addr == addr && p.agent_id != *new_agent_id && p.source != PeerSource::Static
+            })
+            .map(|p| p.agent_id.clone())
+            .collect();
+        for id in &stale_ids {
+            table.remove(id.as_str());
+        }
+        stale_ids
+    }
+
     pub async fn upsert_discovered(&self, agent_id: AgentId, addr: SocketAddr, pubkey: String) {
         let agent_id = canonical_agent_id(agent_id.as_str());
         let mut table = self.inner.write().await;
+        // O1: block insertion when a static peer already occupies the address
+        let static_conflict = table
+            .values()
+            .any(|p| p.addr == addr && p.agent_id != agent_id && p.source == PeerSource::Static);
+        if static_conflict {
+            debug!(agent_id = agent_id.as_str(), %addr, "skipping discovered peer; static peer already occupies address");
+            return;
+        }
+        let evicted = Self::evict_stale_at_addr(&mut table, &agent_id, addr);
         table
             .entry(agent_id.clone())
             .and_modify(|existing| {
@@ -143,24 +172,54 @@ impl PeerTable {
                 last_seen: Instant::now(),
             });
         let mut map = self.pubkeys_write_guard("upsert_discovered");
+        for id in &evicted {
+            map.remove(id.as_str());
+            info!(evicted = id.as_str(), new = agent_id.as_str(), %addr, "evicted stale peer at same address");
+        }
         map.insert(agent_id.to_string(), pubkey);
     }
 
     pub async fn upsert_static(&self, cfg: &StaticPeerConfig) {
         let agent_id = canonical_agent_id(cfg.agent_id.as_str());
         let mut table = self.inner.write().await;
+        // O1: static peers are authoritative; evict any peer at the same address
+        let evicted: Vec<AgentId> = table
+            .values()
+            .filter(|p| p.addr == cfg.addr && p.agent_id != agent_id)
+            .map(|p| p.agent_id.clone())
+            .collect();
+        for id in &evicted {
+            table.remove(id.as_str());
+        }
         table.insert(agent_id.clone(), PeerRecord::from_static(cfg));
         let mut map = self.pubkeys_write_guard("upsert_static");
+        for id in &evicted {
+            map.remove(id.as_str());
+            info!(evicted = id.as_str(), new = agent_id.as_str(), addr = %cfg.addr, "evicted peer at same address (static peer override)");
+        }
         map.insert(agent_id.to_string(), cfg.pubkey.clone());
     }
 
     pub async fn upsert_cached(&self, peer: &KnownPeer) {
         let agent_id = canonical_agent_id(peer.agent_id.as_str());
         let mut table = self.inner.write().await;
+        // O1: block insertion when a static peer already occupies the address
+        let static_conflict = table.values().any(|p| {
+            p.addr == peer.addr && p.agent_id != agent_id && p.source == PeerSource::Static
+        });
+        if static_conflict {
+            debug!(agent_id = agent_id.as_str(), addr = %peer.addr, "skipping cached peer; static peer already occupies address");
+            return;
+        }
+        let evicted = Self::evict_stale_at_addr(&mut table, &agent_id, peer.addr);
         let inserted = table
             .entry(agent_id.clone())
             .or_insert_with(|| PeerRecord::from_cached(peer));
         let mut map = self.pubkeys_write_guard("upsert_cached");
+        for id in &evicted {
+            map.remove(id.as_str());
+            info!(evicted = id.as_str(), new = agent_id.as_str(), addr = %peer.addr, "evicted stale peer at same address");
+        }
         map.entry(agent_id.to_string())
             .or_insert_with(|| inserted.pubkey.clone());
     }

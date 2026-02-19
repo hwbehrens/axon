@@ -34,7 +34,7 @@ Know where to make changes before you start editing:
 | Discovery event handling | `axon/src/daemon/peer_events.rs` |
 | Reconnection logic | `axon/src/daemon/reconnect.rs` |
 | CLI commands | `axon/src/main.rs` |
-| Doctor diagnostics | `axon/src/main.rs`, `axon/src/doctor.rs`, `axon/src/doctor/checks.rs`, `axon/src/doctor/identity_check.rs` |
+| Doctor diagnostics | `axon/src/main.rs`, `axon/src/doctor.rs`, `axon/src/doctor/checks/`, `axon/src/doctor/identity_check.rs` |
 | CLI example output | `axon/src/cli_examples.rs` |
 | Ed25519 identity / agent ID | `axon/src/identity.rs` |
 | Config file parsing | `axon/src/config.rs` |
@@ -45,6 +45,7 @@ Do not break these. They are load-bearing:
 
 - **Agent ID = SHA-256(pubkey)** — the `from` field must match the public key in the peer's TLS certificate. Reject on mismatch.
 - **Peer pinning** — unknown peers must not be accepted at TLS/transport; peers must be in the peer table before connection.
+- **Address uniqueness** — at most one non-static peer per network address; when a new identity appears at an existing address, the stale entry is evicted from the PeerTable. Discovered/cached peers are blocked from inserting when a static peer already occupies the address.
 - **PeerTable owns the pubkey map** — TLS verifiers read from PeerTable's shared PubkeyMap. No manual sync needed.
 
 ## Verification

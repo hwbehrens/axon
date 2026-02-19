@@ -52,7 +52,7 @@ Client (OpenClaw/CLI) ←→ [Unix Socket IPC] ←→ AXON Daemon ←→ [QUIC/U
 - **Discovery**: mDNS (`_axon._udp.local.`) broadcasts agent ID and public key. Static peers via config file for Tailscale/VPN. Plain async functions.
 - **Transport**: QUIC via `quinn`. TLS 1.3 with forward secrecy. Unidirectional streams for fire-and-forget messages, bidirectional streams for request/response.
 - **IPC**: Unix domain socket at `~/.axon/axon.sock`. Line-delimited JSON. 5 commands: `send`, `peers`, `status`, `whoami`, `add_peer`. Inbound messages are broadcast to connected clients; lagging clients are disconnected when bounded IPC queues overflow.
-- **Doctor CLI**: `axon doctor` runs local diagnostics and optional repairs for state-root health, identity material, and config hygiene.
+- **Doctor CLI**: `axon doctor` runs local diagnostics and optional repairs for state-root health, identity material, config hygiene, and peer-cache hygiene (including duplicate-address detection).
 - **Messages**: JSON envelopes with UUID, kind, payload, and optional ref. 4 kinds: `request`, `response`, `message`, `error`.
 
 ## Module Map (summary)
@@ -68,7 +68,7 @@ Use this to navigate quickly; for the full "change → file(s)" table, see `CONT
 - **Config parsing**: `axon/src/config.rs`
 - **Peer table + pinning**: `axon/src/peer_table.rs`
 - **CLI**: `axon/src/main.rs`
-- **Doctor diagnostics**: `axon/src/doctor.rs`, `axon/src/doctor/checks.rs`, `axon/src/doctor/identity_check.rs`
+- **Doctor diagnostics**: `axon/src/doctor.rs`, `axon/src/doctor/checks/`, `axon/src/doctor/identity_check.rs`
 
 ## Key Invariants (summary)
 
@@ -77,6 +77,7 @@ These are load-bearing. Do not change behavior without updating spec + tests. Fu
 - **Configuration reference**: when adding or changing a configurable setting (in `Config` / `config.yaml`) or an internal constant (timeout, limit, interval, etc.), update the Configuration Reference tables in `README.md`.
 - **Agent ID = SHA-256(pubkey)**: peer identity must match TLS certificate/public key; reject mismatches.
 - **Peer pinning**: unknown peers must not be accepted at TLS/transport; peers must be in the PeerTable's shared PubkeyMap before connection.
+- **Address uniqueness**: at most one non-static peer per network address; stale entries are evicted when a new identity appears at the same address.
 
 ## Building & Verification
 
