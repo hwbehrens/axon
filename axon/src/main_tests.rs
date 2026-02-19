@@ -9,18 +9,36 @@ fn parse_agent_id_arg_normalizes_case() {
 }
 
 #[test]
-fn cli_verbose_flag_parses_short_and_long() {
+fn cli_verbose_flag_counts() {
+    let one = Cli::try_parse_from(["axon", "-v", "status"]).expect("parse -v");
+    assert_eq!(one.verbose, 1);
+
+    let two = Cli::try_parse_from(["axon", "-vv", "status"]).expect("parse -vv");
+    assert_eq!(two.verbose, 2);
+
     let long = Cli::try_parse_from(["axon", "--verbose", "status"]).expect("parse --verbose");
-    assert!(long.verbose);
-    assert!(matches!(long.command, Commands::Status { .. }));
+    assert_eq!(long.verbose, 1);
 
-    let short = Cli::try_parse_from(["axon", "-v", "status"]).expect("parse -v");
-    assert!(short.verbose);
-    assert!(matches!(short.command, Commands::Status { .. }));
+    let default = Cli::try_parse_from(["axon", "status"]).expect("parse without flags");
+    assert_eq!(default.verbose, 0);
+    assert!(!default.quiet);
+}
 
-    let default = Cli::try_parse_from(["axon", "status"]).expect("parse without verbose");
-    assert!(!default.verbose);
-    assert!(matches!(default.command, Commands::Status { .. }));
+#[test]
+fn cli_quiet_flag_parses_short_and_long() {
+    let long = Cli::try_parse_from(["axon", "--quiet", "status"]).expect("parse --quiet");
+    assert!(long.quiet);
+    assert_eq!(long.verbose, 0);
+
+    let short = Cli::try_parse_from(["axon", "-q", "status"]).expect("parse -q");
+    assert!(short.quiet);
+}
+
+#[test]
+fn cli_quiet_and_verbose_conflict() {
+    let err = Cli::try_parse_from(["axon", "--quiet", "-v", "status"])
+        .expect_err("--quiet and -v should conflict");
+    assert_eq!(err.kind(), ErrorKind::ArgumentConflict);
 }
 
 #[test]

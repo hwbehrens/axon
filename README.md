@@ -186,8 +186,13 @@ axon --help
   - connected clients receive inbound broadcast events
   - per-client delivery uses bounded queues; lagging clients are disconnected instead of silently dropped
 - Global verbosity override:
-  - `--verbose` / `-v` sets default logging to `debug` (otherwise default is `info`)
-  - if `RUST_LOG` is explicitly set, it takes precedence over `--verbose`
+  - `--quiet` / `-q` suppresses per-message logs (warn level only)
+  - *(no flag)* — default: `info` level (logs each inbound message summary)
+  - `-v` — `debug` level (includes truncated payload previews)
+  - `-vv` — `trace` level (full untruncated payloads)
+  - `--quiet` and `-v` are mutually exclusive
+  - if `RUST_LOG` is explicitly set, it takes precedence over all flags
+  - **for high-throughput LLM relay**, use `-q` to avoid per-message log overhead
 - Request payload shape:
   - `axon request` always sends payload as `{"message":"<string>"}` (including when the string itself is JSON text)
   - for fully structured request payload objects, use IPC `send` directly as documented in `spec/IPC.md`

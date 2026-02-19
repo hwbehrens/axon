@@ -38,9 +38,13 @@ struct Cli {
     )]
     state_root: Option<PathBuf>,
 
-    /// Enable debug-level logging when RUST_LOG is unset.
-    #[arg(long, short = 'v', global = true)]
-    verbose: bool,
+    /// Increase log verbosity (-v = debug, -vv = trace). Conflicts with --quiet.
+    #[arg(long, short = 'v', global = true, action = clap::ArgAction::Count, conflicts_with = "quiet")]
+    verbose: u8,
+
+    /// Suppress per-message logs (warn-level only). Conflicts with -v.
+    #[arg(long, short = 'q', global = true, conflicts_with = "verbose")]
+    quiet: bool,
 
     #[command(subcommand)]
     command: Commands,
@@ -129,7 +133,7 @@ enum Commands {
 #[tokio::main]
 async fn main() -> ExitCode {
     let cli = Cli::parse();
-    init_tracing(cli.verbose);
+    init_tracing(cli.verbose, cli.quiet);
     match run(cli).await {
         Ok(code) => code,
         Err(err) => {
@@ -143,6 +147,7 @@ async fn run(cli: Cli) -> Result<ExitCode> {
     let Cli {
         state_root,
         verbose: _,
+        quiet: _,
         command,
     } = cli;
     let resolve_paths = || AxonPaths::discover_with_override(state_root.as_deref());
@@ -403,8 +408,16 @@ fn generate_docs(out_dir: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
-fn init_tracing(verbose: bool) {
-    let default = if verbose { "debug" } else { "info" };
+fn init_tracing(verbose: u8, quiet: bool) {
+    let default = if quiet {
+        "warn"
+    } else {
+        match verbose {
+            0 => "info",
+            1 => "debug",
+            _ => "trace",
+        }
+    };
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default));
     let _ = tracing_subscriber::fmt().with_env_filter(filter).try_init();
 }

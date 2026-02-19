@@ -141,7 +141,7 @@ fn version_flags_print_version_and_exit_zero() {
 }
 
 #[test]
-fn verbose_flag_is_listed_in_help() {
+fn verbosity_flags_are_listed_in_help() {
     let bin = axon_bin();
     let output = run_command(Command::new(&bin).arg("--help"));
     assert!(output.status.success());
@@ -149,6 +149,8 @@ fn verbose_flag_is_listed_in_help() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("--verbose"));
     assert!(stdout.contains("-v"));
+    assert!(stdout.contains("--quiet"));
+    assert!(stdout.contains("-q"));
 }
 
 #[test]
