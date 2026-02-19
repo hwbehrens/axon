@@ -110,6 +110,8 @@ jobs:
           # Update url and sha256 in the formula
           sed -i "s|url \"https://github.com/hwbehrens/axon/archive/refs/tags/.*\.tar\.gz\"|url \"${TARBALL_URL}\"|" Formula/axon.rb
           sed -i "s|sha256 \"[a-f0-9]\{64\}\"|sha256 \"${SHA256}\"|" Formula/axon.rb
+          # A new upstream tag should not carry forward formula revision bumps.
+          sed -i '/^  revision [0-9][0-9]*$/d' Formula/axon.rb
 
           # Commit and push
           git add Formula/axon.rb
