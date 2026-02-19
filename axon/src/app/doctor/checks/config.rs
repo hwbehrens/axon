@@ -2,11 +2,11 @@ use anyhow::Result;
 
 use axon::config::{AxonPaths, Config, PersistedConfig, save_persisted_config};
 
-use crate::doctor::{DoctorArgs, DoctorReport};
+use crate::app::doctor::{DoctorArgs, DoctorReport};
 
 use super::backup_file_with_timestamp;
 
-pub(in crate::doctor) async fn check_config(
+pub(in crate::app::doctor) async fn check_config(
     paths: &AxonPaths,
     args: &DoctorArgs,
     report: &mut DoctorReport,

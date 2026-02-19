@@ -5,9 +5,9 @@ use anyhow::{Context, Result};
 
 use axon::config::AxonPaths;
 
-use crate::doctor::{DoctorArgs, DoctorReport};
+use crate::app::doctor::{DoctorArgs, DoctorReport};
 
-pub(in crate::doctor) fn check_state_root(
+pub(in crate::app::doctor) fn check_state_root(
     paths: &AxonPaths,
     args: &DoctorArgs,
     report: &mut DoctorReport,

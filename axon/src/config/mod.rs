@@ -354,5 +354,5 @@ pub async fn save_known_peers(path: &Path, peers: &[KnownPeer]) -> Result<()> {
 }
 
 #[cfg(test)]
-#[path = "config_tests.rs"]
+#[path = "tests.rs"]
 mod tests;

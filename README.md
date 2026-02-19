@@ -259,7 +259,7 @@ These are compile-time constants and cannot be changed via configuration.
 |----------|-------|----------|-------------|
 | `MAX_MESSAGE_SIZE` | `65536` (64 KB) | `message/envelope.rs` | Maximum encoded envelope size. Messages exceeding this are rejected. |
 | `REQUEST_TIMEOUT` | `30s` | `transport/mod.rs` | Timeout for bidirectional request/response exchanges. |
-| `STALE_TIMEOUT` | `60s` | `peer_table.rs` | Discovered (non-static, non-cached) peers with no activity for this duration are removed. |
+| `STALE_TIMEOUT` | `60s` | `peer_table/mod.rs` | Discovered (non-static, non-cached) peers with no activity for this duration are removed. |
 | `MAX_IPC_LINE_LENGTH` | `64 KB` | `ipc/protocol.rs` | Maximum length of a single IPC command line. Overlong lines are rejected with `command_too_large`. |
 | `MAX_CONNECTIONS` | `128` | `daemon/mod.rs` | Maximum simultaneous QUIC peer connections. |
 | `KEEPALIVE` | `15s` | `daemon/mod.rs` | QUIC keepalive interval. |

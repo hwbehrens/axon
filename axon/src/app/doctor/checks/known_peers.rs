@@ -4,11 +4,11 @@ use anyhow::Result;
 
 use axon::config::{AxonPaths, Config, load_known_peers, save_known_peers};
 
-use crate::doctor::{DoctorArgs, DoctorReport};
+use crate::app::doctor::{DoctorArgs, DoctorReport};
 
 use super::backup_file_with_timestamp;
 
-pub(in crate::doctor) async fn check_known_peers(
+pub(in crate::app::doctor) async fn check_known_peers(
     paths: &AxonPaths,
     args: &DoctorArgs,
     report: &mut DoctorReport,
@@ -65,7 +65,7 @@ pub(in crate::doctor) async fn check_known_peers(
     Ok(())
 }
 
-pub(in crate::doctor) async fn check_duplicate_peer_addrs(
+pub(in crate::app::doctor) async fn check_duplicate_peer_addrs(
     paths: &AxonPaths,
     args: &DoctorArgs,
     report: &mut DoctorReport,

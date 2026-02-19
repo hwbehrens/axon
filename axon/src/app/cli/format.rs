@@ -1,4 +1,4 @@
-use crate::doctor::DoctorReport;
+use crate::app::doctor::DoctorReport;
 use serde_json::Value;
 
 pub fn render_peers_human(response: &Value) -> Option<String> {

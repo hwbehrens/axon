@@ -334,5 +334,5 @@ impl PeerTable {
 }
 
 #[cfg(test)]
-#[path = "peer_table_tests.rs"]
+#[path = "tests/mod.rs"]
 mod tests;

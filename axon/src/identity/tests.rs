@@ -4,15 +4,13 @@ use std::path::PathBuf;
 use tempfile::tempdir;
 
 #[test]
-fn derive_agent_id_is_32_hex_chars() {
+fn derive_agent_id_is_40_chars_with_prefix() {
     let mut seed = [7u8; 32];
     let key = SigningKey::from_bytes(&seed);
     let id = derive_agent_id(&key.verifying_key());
     assert_eq!(id.len(), 40);
     assert!(id.starts_with("ed25519."));
-    let hex = &id["ed25519.".len()..];
-    assert_eq!(hex.len(), 32);
-    assert!(hex.chars().all(|c| c.is_ascii_hexdigit()));
+    assert!(id[8..].chars().all(|c| c.is_ascii_hexdigit()));
 
     seed[0] = 8;
     let other = SigningKey::from_bytes(&seed);
@@ -87,5 +85,20 @@ fn invalid_key_length_is_rejected() {
     let result = Identity::load_or_generate(&paths);
     assert!(result.is_err());
     let msg = result.unwrap_err().to_string();
-    assert!(msg.contains("32 bytes"));
+    assert!(msg.contains("expected 32 decoded bytes"));
+}
+
+#[test]
+fn legacy_raw_key_is_rejected() {
+    let dir = tempdir().expect("tempdir");
+    let paths = AxonPaths::from_root(PathBuf::from(dir.path()));
+    paths.ensure_root_exists().expect("ensure root");
+
+    let raw_seed = [7u8; 32];
+    fs::write(&paths.identity_key, raw_seed).expect("write raw key");
+
+    let result = Identity::load_or_generate(&paths);
+    assert!(result.is_err());
+    let msg = result.unwrap_err().to_string();
+    assert!(msg.contains("invalid identity.key"));
 }

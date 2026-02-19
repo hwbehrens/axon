@@ -184,5 +184,5 @@ fn preferred_ip(info: &ServiceInfo) -> Option<IpAddr> {
 }
 
 #[cfg(test)]
-#[path = "discovery_tests.rs"]
+#[path = "tests.rs"]
 mod tests;
