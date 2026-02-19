@@ -29,6 +29,8 @@ axon/                      Rust implementation (Cargo crate)
     main.rs                CLI entrypoint (subcommands: daemon, request, notify, peers, status, identity, connect, whoami, doctor, config, examples)
     lib.rs                 Crate root
     daemon/                Daemon orchestration, lifecycle, reconnect
+    doctor/                Doctor diagnostics and checks
+      checks/              Split check modules (state_root, daemon_artifacts, known_peers, config)
     discovery.rs           mDNS + static peer discovery (plain async functions)
     identity.rs            Ed25519 identity + agent_id derivation
     config.rs              YAML config parsing (name, port, peers)
