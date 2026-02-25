@@ -90,6 +90,7 @@ fn cli_override_takes_precedence() {
         port: Some(8000),
         advertise_addr: None,
         peers: Vec::new(),
+        persisted_peers: Vec::new(),
     };
     assert_eq!(cfg.effective_port(Some(9999)), 9999);
     assert_eq!(cfg.effective_port(None), 8000);
@@ -222,6 +223,7 @@ proptest! {
             port: config_port,
             advertise_addr: None,
             peers: Vec::new(),
+            persisted_peers: Vec::new(),
         };
         prop_assert_eq!(cfg.effective_port(Some(cli_port)), cli_port);
     }
@@ -233,6 +235,7 @@ proptest! {
             port: config_port,
             advertise_addr: None,
             peers: Vec::new(),
+            persisted_peers: Vec::new(),
         };
         let expected = config_port.unwrap_or(7100);
         prop_assert_eq!(cfg.effective_port(None), expected);

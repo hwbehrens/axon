@@ -394,7 +394,7 @@ fn generate_docs(out_dir: &std::path::Path) -> Result<()> {
 }
 
 pub(crate) fn init_tracing(verbose: u8, quiet: bool) {
-    let default = if quiet {
+    let level = if quiet {
         "warn"
     } else {
         match verbose {
@@ -403,6 +403,7 @@ pub(crate) fn init_tracing(verbose: u8, quiet: bool) {
             _ => "trace",
         }
     };
+    let default = format!("{level},mdns_sd=warn");
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default));
     let _ = tracing_subscriber::fmt().with_env_filter(filter).try_init();
 }

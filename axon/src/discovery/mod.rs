@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use mdns_sd::{ServiceDaemon, ServiceEvent, ServiceInfo};
@@ -7,7 +8,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
-use crate::config::StaticPeerConfig;
+use crate::config::PersistedStaticPeerConfig;
 use crate::message::AgentId;
 
 pub const SERVICE_TYPE: &str = "_axon._udp.local.";
@@ -28,22 +29,86 @@ pub enum PeerEvent {
 // Static Discovery
 // ---------------------------------------------------------------------------
 
+const STATIC_RERESOLUTION_INTERVAL: Duration = Duration::from_secs(60);
+
 pub async fn run_static_discovery(
-    peers: Vec<StaticPeerConfig>,
+    peers: Vec<PersistedStaticPeerConfig>,
     tx: mpsc::Sender<PeerEvent>,
     cancel: CancellationToken,
 ) -> Result<()> {
-    for peer in &peers {
-        tx.send(PeerEvent::Discovered {
-            agent_id: peer.agent_id.clone(),
-            addr: peer.addr,
-            pubkey: peer.pubkey.clone(),
-        })
-        .await
-        .map_err(|_| anyhow::anyhow!("peer event channel closed"))?;
+    if peers.is_empty() {
+        cancel.cancelled().await;
+        return Ok(());
     }
-    // Stay alive until cancellation
-    cancel.cancelled().await;
+
+    let mut last_addrs: HashMap<AgentId, SocketAddr> = HashMap::new();
+
+    // Initial resolution and emission
+    for peer in &peers {
+        match peer.addr.resolve_for_config_load().await {
+            Ok(addr) => {
+                last_addrs.insert(peer.agent_id.clone(), addr);
+                tx.send(PeerEvent::Discovered {
+                    agent_id: peer.agent_id.clone(),
+                    addr,
+                    pubkey: peer.pubkey.clone(),
+                })
+                .await
+                .map_err(|_| anyhow::anyhow!("peer event channel closed"))?;
+            }
+            Err(err) => {
+                warn!(
+                    agent_id = %peer.agent_id,
+                    addr = %peer.addr,
+                    error = %err,
+                    "failed to resolve static peer address"
+                );
+            }
+        }
+    }
+
+    // Periodic re-resolution loop
+    let mut interval = tokio::time::interval(STATIC_RERESOLUTION_INTERVAL);
+    interval.tick().await; // consume the first immediate tick
+
+    loop {
+        tokio::select! {
+            _ = cancel.cancelled() => break,
+            _ = interval.tick() => {
+                for peer in &peers {
+                    match peer.addr.resolve_for_config_load().await {
+                        Ok(addr) => {
+                            if last_addrs.get(&peer.agent_id) != Some(&addr) {
+                                debug!(
+                                    agent_id = %peer.agent_id,
+                                    old_addr = ?last_addrs.get(&peer.agent_id),
+                                    new_addr = %addr,
+                                    "static peer address changed"
+                                );
+                                last_addrs.insert(peer.agent_id.clone(), addr);
+                                if tx.send(PeerEvent::Discovered {
+                                    agent_id: peer.agent_id.clone(),
+                                    addr,
+                                    pubkey: peer.pubkey.clone(),
+                                }).await.is_err() {
+                                    return Ok(());
+                                }
+                            }
+                        }
+                        Err(err) => {
+                            warn!(
+                                agent_id = %peer.agent_id,
+                                addr = %peer.addr,
+                                error = %err,
+                                "hostname re-resolution failed, retaining last-known address"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     Ok(())
 }
 

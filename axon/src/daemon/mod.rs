@@ -225,7 +225,7 @@ pub async fn run_daemon(opts: DaemonOptions) -> Result<()> {
     let (peer_event_tx, mut peer_event_rx) = mpsc::channel(256);
     {
         let tx = peer_event_tx.clone();
-        let peers = config.peers.clone();
+        let peers = config.persisted_peers.clone();
         let cancel_clone = cancel.clone();
         tokio::spawn(async move {
             if let Err(err) = run_static_discovery(peers, tx, cancel_clone).await {

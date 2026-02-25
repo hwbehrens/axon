@@ -94,6 +94,8 @@ pub struct Config {
     pub advertise_addr: Option<String>,
     #[serde(default)]
     pub peers: Vec<StaticPeerConfig>,
+    #[serde(skip)]
+    pub persisted_peers: Vec<PersistedStaticPeerConfig>,
 }
 
 impl Config {
@@ -229,13 +231,14 @@ pub struct PersistedConfig {
 
 impl PersistedConfig {
     async fn resolve(self, path: &Path) -> Config {
-        let mut peers = Vec::with_capacity(self.peers.len());
-        for peer in self.peers {
+        let persisted_peers = self.peers;
+        let mut peers = Vec::with_capacity(persisted_peers.len());
+        for peer in &persisted_peers {
             match peer.addr.resolve_for_config_load().await {
                 Ok(addr) => peers.push(StaticPeerConfig {
-                    agent_id: peer.agent_id,
+                    agent_id: peer.agent_id.clone(),
                     addr,
-                    pubkey: peer.pubkey,
+                    pubkey: peer.pubkey.clone(),
                 }),
                 Err(err) => {
                     warn!(
@@ -254,6 +257,7 @@ impl PersistedConfig {
             port: self.port,
             advertise_addr: self.advertise_addr,
             peers,
+            persisted_peers,
         }
     }
 }
