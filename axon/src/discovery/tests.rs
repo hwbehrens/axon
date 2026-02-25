@@ -1,16 +1,17 @@
 use super::*;
+use crate::config::PeerAddr;
 
 #[tokio::test]
 async fn static_discovery_emits_all_peers() {
     let peers = vec![
-        StaticPeerConfig {
+        PersistedStaticPeerConfig {
             agent_id: "ed25519.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
-            addr: "127.0.0.1:7100".parse().expect("addr"),
+            addr: PeerAddr::Socket("127.0.0.1:7100".parse().expect("addr")),
             pubkey: "Zm9v".to_string(),
         },
-        StaticPeerConfig {
+        PersistedStaticPeerConfig {
             agent_id: "ed25519.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
-            addr: "127.0.0.1:7101".parse().expect("addr"),
+            addr: PeerAddr::Socket("127.0.0.1:7101".parse().expect("addr")),
             pubkey: "YmFy".to_string(),
         },
     ];
@@ -41,9 +42,9 @@ async fn static_discovery_emits_all_peers() {
 
 #[tokio::test]
 async fn static_discovery_stays_alive() {
-    let peers = vec![StaticPeerConfig {
+    let peers = vec![PersistedStaticPeerConfig {
         agent_id: "ed25519.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
-        addr: "127.0.0.1:7100".parse().expect("addr"),
+        addr: PeerAddr::Socket("127.0.0.1:7100".parse().expect("addr")),
         pubkey: "Zm9v".to_string(),
     }];
 
