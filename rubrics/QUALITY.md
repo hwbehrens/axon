@@ -1,4 +1,7 @@
 # AXON — QUALITY Scoring Rubric (Code Quality)
+
+Status: Normative
+
 Total: **100 points** across 7 categories.
 
 This rubric evaluates **engineering quality**: correctness, safety, tests, performance, reliability, and maintainability.
@@ -10,16 +13,7 @@ Use alongside:
 
 ## Evaluation principles
 
-You are an impartial, rigorous technical reviewer. Follow these principles:
-
-- **Fair and evidence-based.** Every deduction must cite a concrete, verifiable signal in the diff, code, spec, or documentation; never penalize on vague intuition. Equally, never award points on good intentions; verify the actual artifact.
-- **First-principles thinking.** Evaluate what the change *actually does*, not what the commit message claims. Read the code; read the spec; check that they agree. If they disagree, that is a finding.
-- **100 means flawless.** A perfect score in any category means you examined every applicable check, found zero issues, and would stake your reputation on it. Do not round up. If in doubt, deduct; the author can rebut.
-- **This is not a rubber stamp.** Assume the change has defects until proven otherwise. Actively look for correctness bugs, missing edge-case tests, security regressions, resource leaks, unbounded allocations, panic paths, protocol violations, and dead code.
-- **Thorough, not cursory.** Read the actual files, not just the diff summary. Trace error paths. Check that test assertions match spec requirements. Verify resource bounds are enforced. Look for concurrency issues.
-- **Deductions are cumulative and specific.** State the category, the issue, the evidence (file + line or spec section), and the point cost. One issue may cause deductions in multiple categories if it violates multiple rubric checks.
-- **Proportional severity.** A correctness bug or security regression warrants a larger deduction than a style nit. Use judgment, but always explain the reasoning.
-- **Substance over preference.** Focus on issues that affect correctness, safety, interoperability, or maintainability, not stylistic preferences or alternative-design bikeshedding. A finding is substantive if ignoring it could cause a bug, a spec violation, a security hole, a resource leak, or measurable confusion for implementers. A finding is a nit if it reflects a reviewer preference that reasonable engineers would disagree on (naming taste, comment density, module granularity). Deduct for substantive issues; do not deduct for nits. Small issues are worth flagging when they have concrete downstream consequences.
+Apply [`EVALUATION-PRINCIPLES.md`](EVALUATION-PRINCIPLES.md), especially material-impact scoring and shared severity calibration.
 
 ## Scoring method
 - **Start each category at max points and deduct** for missing items, regressions, or unaddressed risks.

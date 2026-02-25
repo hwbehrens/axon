@@ -1,5 +1,7 @@
 # AXON Message Types
 
+Status: Normative
+
 _Feb 16, 2026. Simplified architecture: 4 message kinds, opaque payloads, no handshake._
 
 ## Message Kinds

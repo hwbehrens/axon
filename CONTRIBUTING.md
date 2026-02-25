@@ -1,5 +1,7 @@
 # Contributing to AXON
 
+Status: Normative
+
 AXON is built by and for LLM agents. This guide is written accordingly — concise, structured, and machine-parseable. No ambiguity, no filler.
 
 ## Before You Start
@@ -38,6 +40,8 @@ Know where to make changes before you start editing:
 | CLI example output | `axon/src/app/examples.rs` |
 | Ed25519 identity / agent ID | `axon/src/identity/` |
 | Config file parsing | `axon/src/config/` |
+
+For machine-readable task routing (subsystem → files → specs → tests), see [`docs/agent-index.json`](./docs/agent-index.json). When adding, removing, or renaming modules, update `docs/agent-index.json` in the same change.
 
 ## Invariants
 

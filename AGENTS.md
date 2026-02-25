@@ -1,10 +1,46 @@
 # AXON — Agent eXchange Over Network
 
+Status: Normative
+
 LLM-first local messaging protocol + Rust daemon/CLI for secure agent-to-agent communication over QUIC.
 
 ## Status
 
 Working implementation. The Rust crate in `axon/` includes the daemon, CLI, IPC, QUIC transport, mDNS discovery, static peer config, and a full test/fuzz/bench harness. Specs in `spec/` are authoritative; if implementation disagrees, the spec wins.
+
+## Document Authority
+
+### Status taxonomy
+
+| Status | Meaning |
+|---|---|
+| `Normative` | Binding source of truth; implementation must match. |
+| `Draft` | Design guidance; not binding. |
+| `Archived` | Historical context only; not binding. |
+
+### Authority hierarchy
+
+`spec/*` > `AGENTS.md` / `CONTRIBUTING.md` > `README.md` > code comments.
+
+### Escalation rule
+
+If two normative sources conflict or implementation behavior disagrees with a spec, **stop and request clarification** before proceeding. Do not silently choose one interpretation. Log the conflict in `docs/open-questions.md`.
+
+### Status matrix
+
+| Document | Status |
+|---|---|
+| `spec/SPEC.md` | Normative |
+| `spec/MESSAGE_TYPES.md` | Normative |
+| `spec/WIRE_FORMAT.md` | Normative |
+| `spec/IPC.md` | Normative |
+| `AGENTS.md` | Normative |
+| `CONTRIBUTING.md` | Normative |
+| `rubrics/QUALITY.md` | Normative |
+| `rubrics/DOCUMENTATION.md` | Normative |
+| `rubrics/ALIGNMENT.md` | Normative |
+| `rubrics/AGENT-READABILITY.md` | Normative |
+| `rubrics/EVALUATION-PRINCIPLES.md` | Normative |
 
 ## Repository Layout
 
@@ -20,7 +56,12 @@ spec/                      Protocol specifications (authoritative)
   WIRE_FORMAT.md           Normative interoperable wire format
   IPC.md                   IPC protocol, Unix socket commands
 
-rubrics/                   Evaluation rubrics (quality, documentation, alignment)
+docs/                      Operational documentation
+  agent-index.json         Machine-readable subsystem map (task routing, file discovery)
+  decision-log.md          Architectural decisions with rationale
+  open-questions.md        Unresolved ambiguities
+
+rubrics/                   Evaluation rubrics (quality, documentation, alignment, agent-readability)
 
 axon/                      Rust implementation (Cargo crate)
   Cargo.toml               Dependencies and package metadata (Rust 2024 edition)
@@ -97,6 +138,7 @@ These are load-bearing. Do not change behavior without updating spec + tests. Fu
 - **Agent ID = SHA-256(pubkey)**: peer identity must match TLS certificate/public key; reject mismatches.
 - **Peer pinning**: unknown peers must not be accepted at TLS/transport; peers must be in the PeerTable's shared PubkeyMap before connection.
 - **Address uniqueness**: at most one non-static peer per network address; stale entries are evicted when a new identity appears at the same address.
+- **Institutional memory**: when making an architectural decision, record it in `docs/decision-log.md`. When encountering an ambiguity that cannot be resolved from existing normative documents, log it in `docs/open-questions.md`.
 
 ## Building & Verification
 
@@ -141,6 +183,21 @@ Detailed requirements and recipes live in `CONTRIBUTING.md`. Key conventions:
 - **File size limit**: all Rust source files (`.rs`) must stay under 500 lines. Split into submodules when approaching.
 - **Module structure conventions**: all top-level modules are directory modules (`<name>/mod.rs`), binary-only code lives under `app/`, tests live inside their module directory. Full rules in `CONTRIBUTING.md` § "Module structure conventions".
 
+## Nested AGENTS index
+
+- `axon/src/app/AGENTS.md`: binary-only CLI code, doctor diagnostics, examples.
+- `axon/src/config/AGENTS.md`: YAML config parsing, README co-change rules.
+- `axon/src/daemon/AGENTS.md`: daemon orchestration, lifecycle, reconnect, resource bounds.
+- `axon/src/discovery/AGENTS.md`: mDNS/DNS-SD, static peer fallback, PeerTable integration.
+- `axon/src/identity/AGENTS.md`: Ed25519 identity, agent ID derivation, key format rules.
+- `axon/src/ipc/AGENTS.md`: IPC protocol, server, client handler, auth, bounded queues.
+- `axon/src/message/AGENTS.md`: message kinds, envelope schema, wire format compliance.
+- `axon/src/peer_table/AGENTS.md`: peer storage, pinning, PubkeyMap, address uniqueness.
+- `axon/src/peer_token/AGENTS.md`: peer token encoding/decoding, round-trip invariant.
+- `axon/src/transport/AGENTS.md`: QUIC/TLS, connections, framing, security invariants.
+
+Maintenance rule: when adding, removing, or renaming major subsystem directories, update this index and the affected nested `AGENTS.md` files in the same change.
+
 ## Specs to Read First
 
 1. `spec/SPEC.md` — architecture + lifecycle (identity, discovery, transport)
@@ -148,3 +205,5 @@ Detailed requirements and recipes live in `CONTRIBUTING.md`. Key conventions:
 3. `spec/WIRE_FORMAT.md` — normative interoperable wire format
 4. `spec/IPC.md` — IPC protocol, Unix socket commands
 5. `CONTRIBUTING.md` — contribution workflow, full module map, invariants, testing requirements
+6. `docs/decision-log.md` — prior architectural decisions (search before proposing alternatives)
+7. `docs/open-questions.md` — unresolved ambiguities (do not silently resolve)

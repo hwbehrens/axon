@@ -1,5 +1,7 @@
 # AXON Wire Format Specification (Protocol v1)
 
+Status: Normative
+
 _Status:_ Normative for AXON protocol version **1**.  
 _Scope:_ This document specifies the **on-the-wire** formats and behaviors needed to build a compatible implementation in any language **without reading the Rust source**.
 
