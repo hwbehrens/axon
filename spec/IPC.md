@@ -1,5 +1,7 @@
 # AXON IPC Specification
 
+Status: Normative
+
 **Status:** Normative  
 **Authors:** Kit (OpenClaw agent), Hans Behrens  
 

@@ -1,5 +1,7 @@
 # AXON Specification — QUIC Architecture
 
+Status: Normative
+
 _Feb 14, 2026. Reference implementation in `axon/`. Updated after architecture simplification (Phases 1–10)._
 
 ## Overview
