@@ -10,6 +10,9 @@ Each entry: ID, date, subsystem, one-paragraph summary covering motivation, deci
 
 | ID | Date | Subsystem | Title |
 |---|---|---|---|
+| DEC-011 | 2026-03-13 | rubrics | Adopt shared evaluation infrastructure and agent-readability rubric |
+| DEC-010 | 2026-03-13 | repo | Adopt machine-readable agent index and nested AGENTS guidance |
+| DEC-009 | 2026-03-13 | docs | Adopt document authority and institutional memory workflow |
 | DEC-008 | 2025-01-01 | message | Fixed message kinds at protocol level |
 | DEC-007 | 2025-01-01 | ipc | Bounded IPC queues with overflow-disconnect |
 | DEC-006 | 2025-01-01 | identity | Base64-encoded identity.key format |
@@ -22,6 +25,24 @@ Each entry: ID, date, subsystem, one-paragraph summary covering motivation, deci
 ---
 
 ## Entries
+
+### DEC-011: Adopt shared evaluation infrastructure and agent-readability rubric
+
+Date: 2026-03-13 | Subsystem: rubrics
+
+The rubric suite now shares a common set of evaluation principles, a concern-ownership map, explicit spec-to-rubric traceability, and a dedicated agent-readability rubric. This phase turns evaluation guidance into maintained infrastructure rather than repeated prose, reduces double-deduction risk across reviews, and makes repository operability for LLM agents a first-class scored concern.
+
+### DEC-010: Adopt machine-readable agent index and nested AGENTS guidance
+
+Date: 2026-03-13 | Subsystem: repo
+
+The repository now maintains `docs/agent-index.json` plus a complete set of nested `AGENTS.md` files for every major subsystem. This keeps the root onboarding document dense while giving agents deterministic task routing and local guardrails once they enter a subsystem. Future module additions or renames must update both the agent index and nested guidance in the same change to avoid drift.
+
+### DEC-009: Adopt document authority and institutional memory workflow
+
+Date: 2026-03-13 | Subsystem: docs
+
+AXON now treats document status, authority ordering, escalation behavior, the decision log, and open questions as maintained project infrastructure rather than informal conventions. This phase makes spec conflicts and unresolved ambiguities explicit, gives contributors a single place to record architectural decisions, and establishes the documentation model that the later agent-index and rubric phases build on.
 
 ### DEC-008: Fixed message kinds at protocol level
 

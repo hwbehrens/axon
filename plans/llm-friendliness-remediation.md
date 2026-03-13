@@ -1,6 +1,15 @@
 # LLM-Friendliness Remediation Plan
 
-Status: Draft
+Status: Archived
+
+## Closeout
+
+Closed on 2026-03-13.
+
+- Phase 1 was implemented and recorded as `DEC-009` in `docs/decision-log.md`.
+- Phase 2 was implemented and recorded as `DEC-010` in `docs/decision-log.md`.
+- Phase 3 was implemented and recorded as `DEC-011` in `docs/decision-log.md`.
+- The primary implementation landed in commit `0effabf`; this archived plan remains as historical context only.
 
 ## Background
 
