@@ -298,5 +298,5 @@ impl QuicTransport {
 }
 
 #[cfg(test)]
-#[path = "quic_transport_tests.rs"]
+#[path = "quic_transport_tests/mod.rs"]
 mod tests;
