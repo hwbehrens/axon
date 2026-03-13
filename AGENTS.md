@@ -36,11 +36,15 @@ If two normative sources conflict or implementation behavior disagrees with a sp
 | `spec/IPC.md` | Normative |
 | `AGENTS.md` | Normative |
 | `CONTRIBUTING.md` | Normative |
+| `docs/decision-log.md` | Normative |
+| `docs/open-questions.md` | Draft |
 | `rubrics/QUALITY.md` | Normative |
 | `rubrics/DOCUMENTATION.md` | Normative |
 | `rubrics/ALIGNMENT.md` | Normative |
+| `rubrics/README.md` | Normative |
 | `rubrics/AGENT-READABILITY.md` | Normative |
 | `rubrics/EVALUATION-PRINCIPLES.md` | Normative |
+| `plans/llm-friendliness-remediation.md` | Archived |
 
 ## Repository Layout
 
