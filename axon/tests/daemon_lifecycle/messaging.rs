@@ -340,11 +340,11 @@ async fn notify_delivered_through_daemon_e2e() {
     let _ = timeout(Duration::from_secs(5), handle_b).await;
 }
 
-/// Known peers file is populated with peer info after two daemons connect.
-/// Verifies that the periodic save and shutdown save both work.
+/// Static peers are not mirrored into known_peers.json after connection.
+/// Verifies that shutdown persistence keeps config.yaml authoritative.
 #[tokio::test]
 
-async fn known_peers_persisted_after_connection() {
+async fn static_peers_are_not_persisted_to_known_peers_cache() {
     let dir_a = tempdir().unwrap();
     let dir_b = tempdir().unwrap();
 
@@ -385,16 +385,12 @@ async fn known_peers_persisted_after_connection() {
     let _ = timeout(Duration::from_secs(10), handle_a).await;
     let _ = timeout(Duration::from_secs(10), handle_b).await;
 
-    // known_peers.json on A should contain B.
+    // known_peers.json on A should stay empty because B is configured statically.
     let data = std::fs::read_to_string(&paths_a.known_peers)
         .expect("known_peers.json should exist after shutdown");
     let peers: Vec<Value> = serde_json::from_str(&data).unwrap();
     assert!(
-        !peers.is_empty(),
-        "known_peers.json should contain at least one peer"
+        peers.is_empty(),
+        "static peers should not be cached in known_peers.json"
     );
-    let has_b = peers
-        .iter()
-        .any(|p| p["agent_id"].as_str() == Some(id_b.agent_id()));
-    assert!(has_b, "known_peers.json should contain daemon B's agent_id");
 }

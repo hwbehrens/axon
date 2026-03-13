@@ -155,6 +155,30 @@ async fn ipc_invalid_command_returns_error() {
     assert!(line.contains("invalid_command"));
 }
 
+/// Invalid but parseable IPC commands echo req_id in error responses.
+#[tokio::test]
+async fn ipc_invalid_command_echoes_req_id() {
+    let dir = tempdir().unwrap();
+    let socket_path = dir.path().join("axon.sock");
+    let (_server, _cmd_rx) = IpcServer::bind(socket_path.clone(), 64, IpcServerConfig::default())
+        .await
+        .unwrap();
+
+    let mut client = UnixStream::connect(&socket_path).await.unwrap();
+    client
+        .write_all(br#"{"cmd":"nonexistent","req_id":"abc-123"}"#)
+        .await
+        .unwrap();
+    client.write_all(b"\n").await.unwrap();
+
+    let mut line = String::new();
+    let mut reader = BufReader::new(client);
+    reader.read_line(&mut line).await.unwrap();
+    let decoded: Value = serde_json::from_str(line.trim()).unwrap();
+    assert_eq!(decoded["error"], json!("invalid_command"));
+    assert_eq!(decoded["req_id"], json!("abc-123"));
+}
+
 /// IPC send command with ref field deserializes correctly.
 #[test]
 fn ipc_send_with_ref_deserializes() {

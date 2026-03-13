@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
-use crate::config::{KnownPeer, StaticPeerConfig};
+use crate::config::{KnownPeer, KnownPeerSource, StaticPeerConfig};
 use crate::message::AgentId;
 
 /// Sync-safe pubkey map shared with TLS verifiers.
@@ -200,6 +200,32 @@ impl PeerTable {
         map.insert(agent_id.to_string(), cfg.pubkey.clone());
     }
 
+    pub async fn refresh_static_addr(
+        &self,
+        agent_id: &str,
+        addr: SocketAddr,
+        pubkey: &str,
+    ) -> bool {
+        let agent_id = canonical_agent_id(agent_id);
+        let mut table = self.inner.write().await;
+        let Some(existing) = table.get_mut(agent_id.as_str()) else {
+            return false;
+        };
+        if existing.source != PeerSource::Static
+            || existing.pubkey != pubkey
+            || existing.addr == addr
+        {
+            existing.last_seen = Instant::now();
+            return false;
+        }
+
+        existing.addr = addr;
+        existing.status = ConnectionStatus::Discovered;
+        existing.rtt_ms = None;
+        existing.last_seen = Instant::now();
+        true
+    }
+
     pub async fn upsert_cached(&self, peer: &KnownPeer) {
         let agent_id = canonical_agent_id(peer.agent_id.as_str());
         let mut table = self.inner.write().await;
@@ -323,11 +349,17 @@ impl PeerTable {
         let table = self.inner.read().await;
         table
             .values()
+            .filter(|peer| peer.source != PeerSource::Static)
             .map(|peer| KnownPeer {
                 agent_id: peer.agent_id.clone(),
                 addr: peer.addr,
                 pubkey: peer.pubkey.clone(),
                 last_seen_unix_ms: crate::message::now_millis(),
+                source: match peer.source {
+                    PeerSource::Static => KnownPeerSource::Static,
+                    PeerSource::Discovered => KnownPeerSource::Discovered,
+                    PeerSource::Cached => KnownPeerSource::Cached,
+                },
             })
             .collect()
     }

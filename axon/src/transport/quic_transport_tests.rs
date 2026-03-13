@@ -3,6 +3,7 @@ use crate::config::AxonPaths;
 use crate::identity::Identity;
 use crate::message::MessageKind;
 use crate::peer_table::PeerTable;
+use crate::transport::default_error_response;
 use serde_json::json;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -14,6 +15,23 @@ use tokio::time::{Instant, sleep};
 use tokio_util::sync::CancellationToken;
 
 async fn make_transport_pair() -> (
+    Identity,
+    Identity,
+    QuicTransport,
+    QuicTransport,
+    PeerTable,
+    PeerTable,
+    tempfile::TempDir,
+    tempfile::TempDir,
+) {
+    make_transport_pair_with_options(128, 128, None).await
+}
+
+async fn make_transport_pair_with_options(
+    max_connections_a: usize,
+    max_connections_b: usize,
+    response_handler_b: Option<ResponseHandlerFn>,
+) -> (
     Identity,
     Identity,
     QuicTransport,
@@ -49,20 +67,28 @@ async fn make_transport_pair() -> (
             id_a.public_key_base64().to_string(),
         )
         .await;
-
-    let transport_b = QuicTransport::bind(
+    let transport_b = QuicTransport::bind_cancellable(
         "127.0.0.1:0".parse().unwrap(),
         &id_b,
-        128,
+        CancellationToken::new(),
+        max_connections_b,
+        Duration::from_secs(15),
+        Duration::from_secs(60),
+        response_handler_b,
+        Duration::from_secs(10),
         table_b.pubkey_map(),
     )
     .await
     .expect("bind b");
-
-    let transport_a = QuicTransport::bind(
+    let transport_a = QuicTransport::bind_cancellable(
         "127.0.0.1:0".parse().unwrap(),
         &id_a,
-        128,
+        CancellationToken::new(),
+        max_connections_a,
+        Duration::from_secs(15),
+        Duration::from_secs(60),
+        None,
+        Duration::from_secs(10),
         table_a.pubkey_map(),
     )
     .await
@@ -128,7 +154,6 @@ async fn endpoint_binds_and_reports_addr() {
 async fn two_peers_connect() {
     let (_id_a, id_b, transport_a, transport_b, _, _, _dir_a, _dir_b) = make_transport_pair().await;
     let addr_b = transport_b.local_addr().expect("local_addr b");
-
     let peer_b = PeerRecord {
         agent_id: id_b.agent_id().into(),
         addr: addr_b,
@@ -192,7 +217,6 @@ async fn simultaneous_dial_both_sides_can_message() {
     let (id_a, id_b, transport_a, transport_b, _, _, _dir_a, _dir_b) = make_transport_pair().await;
     let addr_a = transport_a.local_addr().expect("local_addr a");
     let addr_b = transport_b.local_addr().expect("local_addr b");
-
     let peer_b = PeerRecord {
         agent_id: id_b.agent_id().into(),
         addr: addr_b,
@@ -325,6 +349,7 @@ async fn superseded_connection_shutdown_preserves_newer_entry() {
         cancel1.clone(),
         None,
         Duration::from_secs(10),
+        None,
     ));
     wait_for_registered_connection(&shared_connections, id_b.agent_id(), conn1.stable_id()).await;
 
@@ -336,6 +361,7 @@ async fn superseded_connection_shutdown_preserves_newer_entry() {
         cancel2.clone(),
         None,
         Duration::from_secs(10),
+        None,
     ));
     wait_for_registered_connection(&shared_connections, id_b.agent_id(), conn2.stable_id()).await;
 
@@ -392,4 +418,86 @@ async fn send_request_bidirectional_default_error() {
     let response = result.expect("expected response");
     assert_eq!(response.kind, MessageKind::Error);
     assert_eq!(response.ref_id, Some(request.id));
+}
+
+#[tokio::test]
+async fn send_request_rejects_invalid_bidirectional_reply() {
+    let handler: ResponseHandlerFn = Arc::new(|request| {
+        Box::pin(async move {
+            Some(Envelope::new(
+                request.to.as_deref().unwrap().to_string(),
+                request.from.as_deref().unwrap().to_string(),
+                MessageKind::Message,
+                json!({"unexpected": true}),
+            ))
+        })
+    });
+    let (id_a, id_b, transport_a, transport_b, _, _, _dir_a, _dir_b) =
+        make_transport_pair_with_options(128, 128, Some(handler)).await;
+    let addr_b = transport_b.local_addr().expect("local_addr b");
+
+    let peer_b = PeerRecord {
+        agent_id: id_b.agent_id().into(),
+        addr: addr_b,
+        pubkey: id_b.public_key_base64().to_string(),
+        source: crate::peer_table::PeerSource::Static,
+        status: crate::peer_table::ConnectionStatus::Discovered,
+        rtt_ms: None,
+        last_seen: std::time::Instant::now(),
+    };
+
+    let request = Envelope::new(
+        id_a.agent_id().to_string(),
+        id_b.agent_id().to_string(),
+        MessageKind::Request,
+        json!({"question": "test?"}),
+    );
+
+    let err = transport_a
+        .send(&peer_b, request)
+        .await
+        .expect_err("invalid bidirectional reply should be rejected");
+    assert!(
+        err.to_string()
+            .contains("bidirectional reply must use response|error kind")
+    );
+}
+
+#[tokio::test]
+async fn send_with_timeout_honors_custom_request_timeout() {
+    let handler: ResponseHandlerFn = Arc::new(|request| {
+        Box::pin(async move {
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            Some(default_error_response(
+                &request,
+                request.to.as_deref().unwrap(),
+            ))
+        })
+    });
+    let (id_a, id_b, transport_a, transport_b, _, _, _dir_a, _dir_b) =
+        make_transport_pair_with_options(128, 128, Some(handler)).await;
+    let addr_b = transport_b.local_addr().expect("local_addr b");
+
+    let peer_b = PeerRecord {
+        agent_id: id_b.agent_id().into(),
+        addr: addr_b,
+        pubkey: id_b.public_key_base64().to_string(),
+        source: crate::peer_table::PeerSource::Static,
+        status: crate::peer_table::ConnectionStatus::Discovered,
+        rtt_ms: None,
+        last_seen: std::time::Instant::now(),
+    };
+
+    let request = Envelope::new(
+        id_a.agent_id().to_string(),
+        id_b.agent_id().to_string(),
+        MessageKind::Request,
+        json!({"question": "test?"}),
+    );
+
+    let err = transport_a
+        .send_with_timeout(&peer_b, request, Duration::from_millis(50))
+        .await
+        .expect_err("custom request timeout should be enforced");
+    assert!(err.to_string().contains("request timed out after 50ms"));
 }

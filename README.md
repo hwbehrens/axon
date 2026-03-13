@@ -196,6 +196,9 @@ axon --help
 - Request payload shape:
   - `axon request` always sends payload as `{"message":"<string>"}` (including when the string itself is JSON text)
   - for fully structured request payload objects, use IPC `send` directly as documented in `spec/IPC.md`
+- Identity output:
+  - `axon identity` is local/offline; it does not use IPC or external route probes
+  - address selection order: `--addr`, then `advertise_addr`, then local hostname from `HOSTNAME`/`COMPUTERNAME`, then `localhost`
 - Doctor command behavior:
   - `axon doctor` runs local health checks and prints a human-readable checklist
   - `axon doctor --json` prints the structured report (`checks`, `fixes_applied`, `ok`)
@@ -250,6 +253,10 @@ peers:
 ```
 
 Hostname peers are resolved at startup/config load time (IPv4 preferred). Unresolvable peers are skipped with warning logs.
+
+### Dynamic peer cache
+
+`known_peers.json` is an auto-managed cache for non-static peers only. Static peers remain authoritative in `config.yaml` and are not mirrored into the cache. If AXON encounters an older cache file without source metadata, it ignores that file and rebuilds the cache from fresh discovery/runtime state.
 
 ### Internal constants
 

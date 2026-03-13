@@ -137,6 +137,7 @@ async fn known_peers_roundtrip() {
         addr: "127.0.0.1:7100".parse().expect("addr"),
         pubkey: "Zm9v".to_string(),
         last_seen_unix_ms: 123,
+        source: KnownPeerSource::Discovered,
     }];
 
     save_known_peers(&path, &peers).await.expect("save");
@@ -150,6 +151,20 @@ async fn known_peers_empty_when_missing() {
     let loaded = load_known_peers(&dir.path().join("missing.json"))
         .await
         .expect("load");
+    assert!(loaded.is_empty());
+}
+
+#[tokio::test]
+async fn legacy_known_peers_cache_is_ignored() {
+    let dir = tempdir().expect("temp dir");
+    let path = dir.path().join("known.json");
+    std::fs::write(
+        &path,
+        r#"[{"agent_id":"ed25519.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","addr":"127.0.0.1:7100","pubkey":"Zm9v","last_seen_unix_ms":123}]"#,
+    )
+    .expect("write legacy known peers");
+
+    let loaded = load_known_peers(&path).await.expect("load");
     assert!(loaded.is_empty());
 }
 
@@ -279,6 +294,7 @@ async fn save_known_peers_creates_parent_dir() {
         addr: "127.0.0.1:7100".parse().expect("addr"),
         pubkey: "Zm9v".to_string(),
         last_seen_unix_ms: 456,
+        source: KnownPeerSource::Cached,
     }];
 
     save_known_peers(&path, &peers)

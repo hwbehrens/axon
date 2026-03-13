@@ -325,6 +325,24 @@ pub struct KnownPeer {
     pub addr: SocketAddr,
     pub pubkey: String,
     pub last_seen_unix_ms: u64,
+    pub source: KnownPeerSource,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum KnownPeerSource {
+    Static,
+    Discovered,
+    Cached,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize)]
+struct LegacyKnownPeer {
+    agent_id: AgentId,
+    addr: SocketAddr,
+    pubkey: String,
+    last_seen_unix_ms: u64,
 }
 
 pub async fn load_known_peers(path: &Path) -> Result<Vec<KnownPeer>> {
@@ -336,8 +354,20 @@ pub async fn load_known_peers(path: &Path) -> Result<Vec<KnownPeer>> {
                 .with_context(|| format!("failed to read known peers: {}", path.display()));
         }
     };
-    let peers = serde_json::from_str::<Vec<KnownPeer>>(&raw)
-        .with_context(|| format!("failed to parse known peers: {}", path.display()))?;
+    let peers = match serde_json::from_str::<Vec<KnownPeer>>(&raw) {
+        Ok(peers) => peers,
+        Err(parse_err) => {
+            if serde_json::from_str::<Vec<LegacyKnownPeer>>(&raw).is_ok() {
+                warn!(
+                    path = %path.display(),
+                    "ignoring legacy known_peers cache without source metadata; cache will be rebuilt"
+                );
+                return Ok(Vec::new());
+            }
+            return Err(parse_err)
+                .with_context(|| format!("failed to parse known peers: {}", path.display()));
+        }
+    };
     Ok(peers)
 }
 

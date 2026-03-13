@@ -6,8 +6,8 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Context, Result};
-use tokio::sync::{Mutex, RwLock, Semaphore, broadcast};
+use anyhow::{Context, Result, anyhow};
+use tokio::sync::{Mutex, OwnedSemaphorePermit, RwLock, Semaphore, broadcast};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
@@ -16,6 +16,7 @@ use crate::message::{AgentId, Envelope};
 use crate::peer_table::{PeerRecord, PubkeyMap};
 use crate::transport::PairRequest;
 
+use super::REQUEST_TIMEOUT;
 use super::connection::run_connection;
 use super::connection::{send_request, send_unidirectional};
 use super::tls::{build_endpoint, with_handshake_remote_addr};
@@ -36,7 +37,7 @@ pub struct QuicTransport {
     connecting_locks: Arc<RwLock<HashMap<String, Arc<Mutex<()>>>>>,
     inbound_tx: broadcast::Sender<Arc<Envelope>>,
     pair_request_tx: broadcast::Sender<PairRequest>,
-    inbound_semaphore: Arc<Semaphore>,
+    connection_semaphore: Arc<Semaphore>,
     cancel: CancellationToken,
     response_handler: Option<ResponseHandlerFn>,
     inbound_read_timeout: Duration,
@@ -87,7 +88,7 @@ impl QuicTransport {
             connecting_locks: Arc::new(RwLock::new(HashMap::new())),
             inbound_tx,
             pair_request_tx,
-            inbound_semaphore: Arc::new(Semaphore::new(max_connections)),
+            connection_semaphore: Arc::new(Semaphore::new(max_connections)),
             cancel,
             response_handler,
             inbound_read_timeout,
@@ -141,6 +142,12 @@ impl QuicTransport {
             return Ok(existing);
         }
 
+        let connection_permit = self
+            .connection_semaphore
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| anyhow!("connection limit reached"))?;
+
         let connecting = self
             .endpoint
             .connect(peer.addr, &peer.agent_id)
@@ -155,17 +162,32 @@ impl QuicTransport {
             .write()
             .await
             .insert(peer.agent_id.to_string(), connection.clone());
-        self.spawn_connection_loop(connection.clone());
+        self.spawn_connection_loop(connection.clone(), Some(connection_permit));
 
         Ok(connection)
     }
 
     pub async fn send(&self, peer: &PeerRecord, envelope: Envelope) -> Result<Option<Envelope>> {
+        self.send_with_timeout(peer, envelope, REQUEST_TIMEOUT)
+            .await
+    }
+
+    pub async fn send_with_timeout(
+        &self,
+        peer: &PeerRecord,
+        envelope: Envelope,
+        request_timeout: Duration,
+    ) -> Result<Option<Envelope>> {
         let connection = self.ensure_connection(peer).await?;
 
         if envelope.kind.expects_response() {
-            let response =
-                send_request(&connection, envelope, self.local_agent_id.as_str()).await?;
+            let response = send_request(
+                &connection,
+                envelope,
+                self.local_agent_id.as_str(),
+                request_timeout,
+            )
+            .await?;
             Ok(Some(response))
         } else {
             send_unidirectional(&connection, envelope).await?;
@@ -192,7 +214,7 @@ impl QuicTransport {
         let connections = self.connections.clone();
         let cancel = self.cancel.clone();
         let max_connections = self.max_connections;
-        let inbound_semaphore = self.inbound_semaphore.clone();
+        let connection_semaphore = self.connection_semaphore.clone();
         let response_handler = self.response_handler.clone();
         let inbound_read_timeout = self.inbound_read_timeout;
 
@@ -208,7 +230,7 @@ impl QuicTransport {
                         let remote_addr = connecting.remote_address();
                         match with_handshake_remote_addr(remote_addr, connecting.into_future()).await {
                             Ok(connection) => {
-                                let permit = match inbound_semaphore.clone().try_acquire_owned() {
+                                let permit = match connection_semaphore.clone().try_acquire_owned() {
                                     Ok(permit) => permit,
                                     Err(_) => {
                                         warn!(
@@ -234,9 +256,9 @@ impl QuicTransport {
                                         cancel,
                                         response_handler,
                                         inbound_read_timeout,
+                                        Some(permit),
                                     )
                                     .await;
-                                    drop(permit);
                                 });
                             }
                             Err(err) => warn!(error = %err, "failed to accept QUIC connection"),
@@ -247,7 +269,11 @@ impl QuicTransport {
         });
     }
 
-    fn spawn_connection_loop(&self, connection: quinn::Connection) {
+    fn spawn_connection_loop(
+        &self,
+        connection: quinn::Connection,
+        connection_permit: Option<OwnedSemaphorePermit>,
+    ) {
         let inbound_tx = self.inbound_tx.clone();
         let local_id = self.local_agent_id.clone();
         let connections = self.connections.clone();
@@ -264,6 +290,7 @@ impl QuicTransport {
                 cancel,
                 response_handler,
                 inbound_read_timeout,
+                connection_permit,
             )
             .await;
         });
