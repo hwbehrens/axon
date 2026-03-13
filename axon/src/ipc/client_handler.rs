@@ -1,38 +1,41 @@
-use std::sync::{Arc, LazyLock};
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
-use super::protocol::{CommandEvent, DaemonReply, IpcCommand, MAX_IPC_LINE_LENGTH};
+use super::protocol::{CommandEvent, DaemonReply, IpcCommand, IpcErrorCode, MAX_IPC_LINE_LENGTH};
 
-static INVALID_COMMAND_LINE: LazyLock<Arc<str>> = LazyLock::new(|| {
-    let error = super::protocol::IpcErrorCode::InvalidCommand;
+fn build_error_line(error: IpcErrorCode, req_id: Option<String>) -> Arc<str> {
     Arc::from(
         serde_json::to_string(&DaemonReply::Error {
             ok: false,
             message: error.message(),
             error,
-            req_id: None,
+            req_id,
         })
-        .expect("static error serialization"),
+        .expect("IPC error serialization"),
     )
-});
+}
 
-static COMMAND_TOO_LARGE_LINE: LazyLock<Arc<str>> = LazyLock::new(|| {
-    let error = super::protocol::IpcErrorCode::CommandTooLarge;
-    Arc::from(
-        serde_json::to_string(&DaemonReply::Error {
-            ok: false,
-            message: error.message(),
-            error,
-            req_id: None,
-        })
-        .expect("static error serialization"),
-    )
-});
+fn extract_req_id(line: &str) -> Option<String> {
+    let parsed = serde_json::from_str::<Value>(line).ok()?;
+    parsed
+        .get("req_id")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+}
+
+fn try_queue_error(
+    out_tx: &mpsc::Sender<Arc<str>>,
+    error: IpcErrorCode,
+    req_id: Option<String>,
+) -> bool {
+    out_tx.try_send(build_error_line(error, req_id)).is_ok()
+}
 
 pub(super) async fn handle_client(
     socket: UnixStream,
@@ -133,8 +136,9 @@ pub(super) async fn handle_client(
         }
 
         if exceeded {
-            let _ = out_tx.send(COMMAND_TOO_LARGE_LINE.clone()).await;
-            writer_close_mode = WriterCloseMode::FlushQueued;
+            if try_queue_error(&out_tx, IpcErrorCode::CommandTooLarge, None) {
+                writer_close_mode = WriterCloseMode::FlushQueued;
+            }
             break; // Close connection — can't reliably find next command boundary
         }
 
@@ -144,7 +148,9 @@ pub(super) async fn handle_client(
         let line = match std::str::from_utf8(&buf) {
             Ok(s) => s,
             Err(_) => {
-                let _ = out_tx.try_send(INVALID_COMMAND_LINE.clone());
+                if !try_queue_error(&out_tx, IpcErrorCode::InvalidCommand, None) {
+                    break;
+                }
                 continue;
             }
         };
@@ -156,7 +162,9 @@ pub(super) async fn handle_client(
                     .map_err(|_| anyhow::anyhow!("daemon command channel closed"))?;
             }
             Err(_err) => {
-                let _ = out_tx.try_send(INVALID_COMMAND_LINE.clone());
+                if !try_queue_error(&out_tx, IpcErrorCode::InvalidCommand, extract_req_id(line)) {
+                    break;
+                }
             }
         }
     }

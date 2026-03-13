@@ -436,10 +436,7 @@ fn select_identity_addr(
         return normalize_addr(addr);
     }
 
-    let ip = discover_default_route_ip().context(
-        "unable to auto-discover a routable IP; pass --addr host:port or set advertise_addr in config.yaml",
-    )?;
-    Ok(format!("{ip}:{port}"))
+    normalize_addr(&format!("{}:{port}", default_identity_host()))
 }
 
 fn normalize_addr(input: &str) -> Result<String> {
@@ -455,16 +452,17 @@ fn split_addr_port(addr: &str) -> Result<(String, u16)> {
     }
 }
 
-fn discover_default_route_ip() -> Result<std::net::IpAddr> {
-    let socket = std::net::UdpSocket::bind("0.0.0.0:0")
-        .context("failed to open UDP socket for route probe")?;
-    socket
-        .connect("8.8.8.8:80")
-        .context("failed to perform UDP route probe")?;
-    let local = socket
-        .local_addr()
-        .context("failed to read local address from route probe")?;
-    Ok(local.ip())
+fn default_identity_host() -> String {
+    for key in ["HOSTNAME", "COMPUTERNAME"] {
+        if let Ok(value) = std::env::var(key) {
+            let value = value.trim();
+            if !value.is_empty() && !value.contains(':') {
+                return value.to_string();
+            }
+        }
+    }
+
+    "localhost".to_string()
 }
 
 #[cfg(test)]

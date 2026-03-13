@@ -1,4 +1,5 @@
 use super::super::*;
+use crate::config::KnownPeerSource;
 use std::time::Duration;
 
 #[tokio::test]
@@ -13,6 +14,7 @@ async fn upsert_discovered_evicts_stale_cached_at_same_addr() {
             addr,
             pubkey: "b2xk".to_string(),
             last_seen_unix_ms: 1000,
+            source: KnownPeerSource::Cached,
         })
         .await;
     assert!(table.get("old_peer").await.is_some());
@@ -80,6 +82,7 @@ async fn upsert_cached_evicts_stale_discovered_at_same_addr() {
             addr,
             pubkey: "bmV3".to_string(),
             last_seen_unix_ms: 2000,
+            source: KnownPeerSource::Cached,
         })
         .await;
 
@@ -241,6 +244,7 @@ async fn upsert_cached_blocked_by_static_at_same_addr() {
             addr,
             pubkey: "bmV3".to_string(),
             last_seen_unix_ms: 5000,
+            source: KnownPeerSource::Cached,
         })
         .await;
 
@@ -268,6 +272,7 @@ async fn upsert_static_evicts_all_at_same_addr() {
             addr,
             pubkey: "key_b".to_string(),
             last_seen_unix_ms: 1000,
+            source: KnownPeerSource::Cached,
         })
         .await;
 

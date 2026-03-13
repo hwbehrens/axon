@@ -182,6 +182,7 @@ async fn known_peers_corruption_resilience() {
         addr: "10.0.0.1:7100".parse().unwrap(),
         pubkey: "Zm9v".to_string(),
         last_seen_unix_ms: 1000,
+        source: axon::config::KnownPeerSource::Discovered,
     }];
     save_known_peers(&path, &valid).await.unwrap();
     let loaded = load_known_peers(&path).await.unwrap();

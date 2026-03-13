@@ -280,7 +280,12 @@ async fn handle_send(
             Duration::from_secs(10)
         }
     };
-    let send_result = tokio::time::timeout(send_timeout, ctx.transport.send(&peer, envelope)).await;
+    let send_result = tokio::time::timeout(
+        send_timeout,
+        ctx.transport
+            .send_with_timeout(&peer, envelope, send_timeout),
+    )
+    .await;
 
     match send_result {
         Err(_elapsed) => {

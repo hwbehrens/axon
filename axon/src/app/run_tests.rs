@@ -119,3 +119,11 @@ fn select_identity_addr_prefers_override_then_config() {
         select_identity_addr(None, Some("alice.tailnet:7100"), 7300).expect("config advertise");
     assert_eq!(config_addr, "alice.tailnet:7100");
 }
+
+#[test]
+fn select_identity_addr_falls_back_to_local_host_without_network_probe() {
+    let addr = select_identity_addr(None, None, 7300).expect("fallback addr");
+    let (host, port) = split_addr_port(&addr).expect("split");
+    assert!(!host.is_empty());
+    assert_eq!(port, 7300);
+}

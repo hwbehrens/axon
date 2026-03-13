@@ -8,14 +8,14 @@ use crate::*;
 #[tokio::test]
 async fn static_discovery_feeds_peer_table() {
     let peers = vec![
-        StaticPeerConfig {
+        axon::config::PersistedStaticPeerConfig {
             agent_id: "ed25519.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
-            addr: "10.0.0.1:7100".parse().unwrap(),
+            addr: axon::config::PeerAddr::Socket("10.0.0.1:7100".parse().unwrap()),
             pubkey: "Zm9v".to_string(),
         },
-        StaticPeerConfig {
+        axon::config::PersistedStaticPeerConfig {
             agent_id: "ed25519.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
-            addr: "10.0.0.2:7100".parse().unwrap(),
+            addr: axon::config::PeerAddr::Socket("10.0.0.2:7100".parse().unwrap()),
             pubkey: "YmFy".to_string(),
         },
     ];
@@ -102,9 +102,9 @@ async fn peer_table_full_lifecycle() {
     assert_eq!(p.status, ConnectionStatus::Connected);
     assert_eq!(p.rtt_ms, Some(1.5));
 
-    // 4. Export as known peers.
+    // 4. Export dynamic peers as known peers.
     let known = table.to_known_peers().await;
-    assert_eq!(known.len(), 2);
+    assert_eq!(known.len(), 1);
 
     // 5. Disconnect and verify status.
     table.set_disconnected("discovered_peer").await;

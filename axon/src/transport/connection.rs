@@ -2,20 +2,22 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use rustls::pki_types::CertificateDer;
 use serde_json::json;
+use tokio::sync::OwnedSemaphorePermit;
 use tokio::sync::{RwLock, broadcast};
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
+use uuid::Uuid;
 
 use crate::message::{Envelope, MessageKind};
 
+use super::MAX_MESSAGE_SIZE_USIZE;
 use super::quic_transport::ResponseHandlerFn;
 use super::tls::{derive_agent_id_from_pubkey_bytes, extract_ed25519_pubkey_from_cert_der};
-use super::{MAX_MESSAGE_SIZE_USIZE, REQUEST_TIMEOUT};
 
 // ---------------------------------------------------------------------------
 // Framing helpers — length-delimited read/write on QUIC streams
@@ -62,6 +64,7 @@ pub(crate) async fn send_request(
     connection: &quinn::Connection,
     envelope: Envelope,
     local_agent_id: &str,
+    request_timeout: Duration,
 ) -> Result<Envelope> {
     let bytes = envelope
         .wire_encode()
@@ -74,17 +77,40 @@ pub(crate) async fn send_request(
     write_framed(&mut send, &bytes).await?;
     send.finish().context("failed to finish request stream")?;
 
-    let response_bytes = timeout(REQUEST_TIMEOUT, read_framed(&mut recv))
+    let timeout_label = if request_timeout.as_millis() < 1000 {
+        format!("{}ms", request_timeout.as_millis())
+    } else {
+        format!("{}s", request_timeout.as_secs())
+    };
+    let response_bytes = timeout(request_timeout, read_framed(&mut recv))
         .await
-        .context("request timed out after 30s")??;
+        .with_context(|| format!("request timed out after {timeout_label}"))??;
     let mut response = serde_json::from_slice::<Envelope>(&response_bytes)
         .context("failed to decode response envelope")?;
     response
         .validate()
         .context("response envelope failed validation")?;
+    validate_bidi_response(&response, envelope.id)?;
     let peer_id = derive_peer_id_from_connection(connection)?;
     overwrite_authenticated_identity(&mut response, &peer_id, local_agent_id);
     Ok(response)
+}
+
+fn validate_bidi_response(response: &Envelope, request_id: Uuid) -> Result<()> {
+    if !response.kind.is_response() {
+        bail!(
+            "bidirectional reply must use response|error kind, got {}",
+            response.kind
+        );
+    }
+    if response.ref_id != Some(request_id) {
+        bail!(
+            "bidirectional reply ref {:?} does not match request {}",
+            response.ref_id,
+            request_id
+        );
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -148,6 +174,7 @@ fn overwrite_authenticated_identity(envelope: &mut Envelope, peer_id: &str, loca
 // Connection context — shared state for stream handlers
 // ---------------------------------------------------------------------------
 
+#[derive(Clone)]
 struct ConnectionContext {
     connection: quinn::Connection,
     local_agent_id: String,
@@ -315,6 +342,7 @@ async fn unregister_connection_if_current(
 // Connection loop
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_connection(
     connection: quinn::Connection,
     local_agent_id: String,
@@ -323,6 +351,7 @@ pub(crate) async fn run_connection(
     cancel: CancellationToken,
     response_handler: Option<ResponseHandlerFn>,
     inbound_read_timeout: Duration,
+    _connection_permit: Option<OwnedSemaphorePermit>,
 ) {
     let peer_id = match derive_peer_id_from_connection(&connection) {
         Ok(peer_id) => peer_id,
@@ -332,14 +361,14 @@ pub(crate) async fn run_connection(
         }
     };
 
-    let ctx = ConnectionContext {
+    let ctx = Arc::new(ConnectionContext {
         connection: connection.clone(),
         local_agent_id,
         inbound_tx,
         connections,
         response_handler,
         inbound_read_timeout,
-    };
+    });
 
     let my_stable_id = register_connection(&ctx.connections, &peer_id, &ctx.connection).await;
 
@@ -351,14 +380,24 @@ pub(crate) async fn run_connection(
             }
             uni = connection.accept_uni() => {
                 match uni {
-                    Ok(recv) => handle_uni_stream(&ctx, &peer_id, recv).await,
+                    Ok(recv) => {
+                        let ctx = ctx.clone();
+                        let peer_id = peer_id.clone();
+                        tokio::spawn(async move {
+                            handle_uni_stream(&ctx, &peer_id, recv).await;
+                        });
+                    }
                     Err(_) => break,
                 }
             }
             bi = connection.accept_bi() => {
                 match bi {
                     Ok((send, recv)) => {
-                        handle_bidi_stream(&ctx, &peer_id, send, recv).await;
+                        let ctx = ctx.clone();
+                        let peer_id = peer_id.clone();
+                        tokio::spawn(async move {
+                            handle_bidi_stream(&ctx, &peer_id, send, recv).await;
+                        });
                     }
                     Err(_) => break,
                 }

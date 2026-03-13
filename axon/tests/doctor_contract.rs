@@ -314,8 +314,8 @@ fn doctor_check_detects_duplicate_peer_addresses() {
 
     // Write known_peers.json with two peers at the same address
     let peers = serde_json::json!([
-        {"agent_id": "ed25519.aaaa", "addr": "10.0.0.1:7100", "pubkey": "a2V5MQ==", "last_seen_unix_ms": 1000},
-        {"agent_id": "ed25519.bbbb", "addr": "10.0.0.1:7100", "pubkey": "a2V5Mg==", "last_seen_unix_ms": 2000}
+        {"agent_id": "ed25519.aaaa", "addr": "10.0.0.1:7100", "pubkey": "a2V5MQ==", "last_seen_unix_ms": 1000, "source": "discovered"},
+        {"agent_id": "ed25519.bbbb", "addr": "10.0.0.1:7100", "pubkey": "a2V5Mg==", "last_seen_unix_ms": 2000, "source": "discovered"}
     ]);
     fs::write(
         root.path().join("known_peers.json"),
@@ -351,8 +351,8 @@ fn doctor_fix_prunes_duplicate_peer_addresses() {
 
     // Write known_peers.json with two peers at the same address
     let peers = serde_json::json!([
-        {"agent_id": "ed25519.aaaa", "addr": "10.0.0.1:7100", "pubkey": "a2V5MQ==", "last_seen_unix_ms": 1000},
-        {"agent_id": "ed25519.bbbb", "addr": "10.0.0.1:7100", "pubkey": "a2V5Mg==", "last_seen_unix_ms": 2000}
+        {"agent_id": "ed25519.aaaa", "addr": "10.0.0.1:7100", "pubkey": "a2V5MQ==", "last_seen_unix_ms": 1000, "source": "discovered"},
+        {"agent_id": "ed25519.bbbb", "addr": "10.0.0.1:7100", "pubkey": "a2V5Mg==", "last_seen_unix_ms": 2000, "source": "discovered"}
     ]);
     fs::write(
         root.path().join("known_peers.json"),

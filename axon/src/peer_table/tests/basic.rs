@@ -1,4 +1,5 @@
 use super::super::*;
+use crate::config::KnownPeerSource;
 use std::time::Duration;
 
 fn make_static_cfg(id: &str) -> StaticPeerConfig {
@@ -15,6 +16,7 @@ fn make_known_peer(id: &str) -> KnownPeer {
         addr: "127.0.0.1:7100".parse().expect("addr"),
         pubkey: "Zm9v".to_string(),
         last_seen_unix_ms: 12345,
+        source: KnownPeerSource::Cached,
     }
 }
 
@@ -332,7 +334,7 @@ async fn concurrent_access() {
 }
 
 #[tokio::test]
-async fn to_known_peers_returns_all_peers() {
+async fn to_known_peers_skips_static_peers() {
     let table = PeerTable::new();
 
     table
@@ -351,13 +353,13 @@ async fn to_known_peers_returns_all_peers() {
             addr: "127.0.0.1:7102".parse().expect("addr"),
             pubkey: "Zm9v".to_string(),
             last_seen_unix_ms: 12345,
+            source: KnownPeerSource::Cached,
         })
         .await;
 
     let known = table.to_known_peers().await;
-    assert_eq!(known.len(), 3);
+    assert_eq!(known.len(), 2);
     let ids: std::collections::HashSet<_> = known.iter().map(|k| k.agent_id.as_str()).collect();
-    assert!(ids.contains("ed25519.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));
     assert!(ids.contains("ed25519.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"));
     assert!(ids.contains("ed25519.cccccccccccccccccccccccccccccccc"));
 }
