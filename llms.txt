@@ -1,0 +1,41 @@
+# AXON
+
+> Rust QUIC-based agent-to-agent messaging daemon with Ed25519 identity, mDNS discovery, and Unix socket IPC.
+
+Core entrypoints:
+
+- ./AGENTS.md — LLM agent onboarding, module map, key invariants
+- ./README.md — Project overview, quickstart, configuration reference
+- ./CONTRIBUTING.md — Contribution workflow, full module map, testing requirements
+- ./docs/agent-index.json — Machine-readable subsystem map for task routing and file discovery
+- ./spec/SPEC.md — Architecture, identity, discovery, transport lifecycle
+- ./spec/MESSAGE_TYPES.md — Message kinds (4) and stream mapping
+- ./spec/WIRE_FORMAT.md — Normative interoperable wire format
+- ./spec/IPC.md — IPC protocol, Unix socket commands
+
+Primary areas:
+
+- ./spec/ — Protocol specifications (authoritative, normative)
+- ./axon/src/ — Rust implementation (daemon, CLI, IPC, QUIC transport, identity, discovery)
+- ./rubrics/ — Evaluation rubrics (quality, documentation, alignment, agent-readability)
+- ./evaluations/ — Evaluation artifacts
+- ./docs/ — Operational docs, decision log, open questions
+
+Operating rules:
+
+- Authority hierarchy: spec/* > AGENTS.md / CONTRIBUTING.md > README.md > code comments
+- If implementation disagrees with a spec, the spec wins; stop and clarify before proceeding
+- Log architectural decisions in docs/decision-log.md; log ambiguities in docs/open-questions.md
+- Verification: `cd axon && make verify` (fmt + lint + full test suite)
+- All Rust source files must stay under 500 lines
+- Unit tests live in sibling *_tests.rs files; integration/e2e tests in axon/tests/
+
+Suggested agent loading order:
+
+1. `AGENTS.md` — orientation, module map, invariants
+2. `docs/agent-index.json` — machine-readable routing index
+3. `spec/SPEC.md` — architecture and lifecycle
+4. `spec/MESSAGE_TYPES.md` + `spec/WIRE_FORMAT.md` + `spec/IPC.md` — protocol details
+5. `CONTRIBUTING.md` — workflow, testing, module conventions
+6. `docs/decision-log.md` — prior decisions (search before proposing alternatives)
+7. `docs/open-questions.md` — unresolved ambiguities (do not silently resolve)

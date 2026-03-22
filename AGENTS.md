@@ -44,6 +44,10 @@ If two normative sources conflict or implementation behavior disagrees with a sp
 | `rubrics/README.md` | Normative |
 | `rubrics/AGENT-READABILITY.md` | Normative |
 | `rubrics/EVALUATION-PRINCIPLES.md` | Normative |
+| `prompts/assumption-audit.md` | Draft |
+| `prompts/api-contract-review.md` | Draft |
+| `prompts/steelman-challenge.md` | Draft |
+| `llms.txt` | Normative |
 | `plans/llm-friendliness-remediation.md` | Archived |
 
 ## Repository Layout
@@ -52,6 +56,7 @@ If two normative sources conflict or implementation behavior disagrees with a sp
 README.md                  Project overview, quickstart, docs index
 AGENTS.md                  This file (LLM agent onboarding/orientation)
 CONTRIBUTING.md            Contribution workflow, full module map, invariants, testing requirements
+llms.txt                   Compact retrieval manifest for agent loading
 LICENSE
 
 spec/                      Protocol specifications (authoritative)
@@ -66,6 +71,11 @@ docs/                      Operational documentation
   open-questions.md        Unresolved ambiguities
 
 rubrics/                   Evaluation rubrics (quality, documentation, alignment, agent-readability)
+
+prompts/                   Structured review and interrogation protocols
+  assumption-audit.md      Pre-commitment plan interrogation
+  api-contract-review.md   IPC/wire-format change review checklist
+  steelman-challenge.md    Adversarial plan review with structured verdicts
 
 axon/                      Rust implementation (Cargo crate)
   Cargo.toml               Dependencies and package metadata (Rust 2024 edition)
@@ -202,6 +212,16 @@ Detailed requirements and recipes live in `CONTRIBUTING.md`. Key conventions:
 
 Maintenance rule: when adding, removing, or renaming major subsystem directories, update this index and the affected nested `AGENTS.md` files in the same change.
 
+## Prompt Templates
+
+Reusable structured review and interrogation protocols in `prompts/`:
+
+| Prompt | Purpose |
+|---|---|
+| `prompts/assumption-audit.md` | Pre-commitment interrogation — surface hidden assumptions before implementing a plan |
+| `prompts/api-contract-review.md` | Contract review checklist for IPC, wire format, and message type changes |
+| `prompts/steelman-challenge.md` | Adversarial plan review with independent evidence gathering and structured verdicts |
+
 ## Specs to Read First
 
 1. `spec/SPEC.md` — architecture + lifecycle (identity, discovery, transport)
@@ -211,3 +231,4 @@ Maintenance rule: when adding, removing, or renaming major subsystem directories
 5. `CONTRIBUTING.md` — contribution workflow, full module map, invariants, testing requirements
 6. `docs/decision-log.md` — prior architectural decisions (search before proposing alternatives)
 7. `docs/open-questions.md` — unresolved ambiguities (do not silently resolve)
+8. `llms.txt` — compact retrieval manifest for agent loading
