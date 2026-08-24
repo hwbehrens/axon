@@ -18,7 +18,7 @@ pub struct PeerStore {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct StoredPeer {
+pub struct StoredPeer {
     pub agent_id: AgentId,
     pub public_key: String,
     pub locators: Vec<PeerLocator>,
@@ -51,6 +51,24 @@ impl PeerStore {
             .context("peer-store load task failed")?
     }
 
+    /// Decode and validate peer-store bytes without touching the filesystem.
+    ///
+    /// This is the single validated entrypoint for untrusted peer-store
+    /// content: file loads and the fuzz harness share it, so no caller can
+    /// bypass version, bound, identity-binding, or duplicate checks.
+    pub fn decode(data: &[u8]) -> Result<Vec<StoredPeer>> {
+        let document: PeerStoreDocument = serde_json::from_slice(data)
+            .with_context(|| "failed to parse peer store".to_string())?;
+        if document.version != PEER_STORE_VERSION {
+            bail!(
+                "unsupported peer-store version {}; expected {PEER_STORE_VERSION}",
+                document.version
+            );
+        }
+        validate_peers(&document.peers)?;
+        Ok(document.peers)
+    }
+
     pub(crate) async fn save(&self, peers: Vec<StoredPeer>) -> Result<()> {
         let path = self.path.clone();
         tokio::task::spawn_blocking(move || save_sync(&path, peers))
@@ -68,18 +86,7 @@ fn load_sync(path: &Path) -> Result<Vec<StoredPeer>> {
                 .with_context(|| format!("failed to read peer store: {}", path.display()));
         }
     };
-    let document: PeerStoreDocument = serde_json::from_slice(&data)
-        .with_context(|| format!("failed to parse peer store: {}", path.display()))?;
-    if document.version != PEER_STORE_VERSION {
-        bail!(
-            "unsupported peer-store version {} at {}; expected {}",
-            document.version,
-            path.display(),
-            PEER_STORE_VERSION
-        );
-    }
-    validate_peers(&document.peers)?;
-    Ok(document.peers)
+    PeerStore::decode(&data).with_context(|| format!("in peer store {}", path.display()))
 }
 
 fn save_sync(path: &Path, peers: Vec<StoredPeer>) -> Result<()> {

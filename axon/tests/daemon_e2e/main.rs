@@ -12,6 +12,9 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use tokio_util::sync::CancellationToken;
 
+mod enrollment;
+mod traffic;
+
 fn free_port() -> u16 {
     std::net::UdpSocket::bind("127.0.0.1:0")
         .unwrap()
@@ -40,6 +43,57 @@ impl RunningDaemon {
 }
 
 async fn prepare_pair() -> (RunningDaemon, RunningDaemon) {
+    let pending = prepare_identities();
+    let directory_a = PeerDirectory::load(
+        AgentId::parse(pending.identity_a.agent_id()).unwrap(),
+        PeerStore::new(pending.paths_a.peers.clone()),
+    )
+    .await
+    .unwrap();
+    let directory_b = PeerDirectory::load(
+        AgentId::parse(pending.identity_b.agent_id()).unwrap(),
+        PeerStore::new(pending.paths_b.peers.clone()),
+    )
+    .await
+    .unwrap();
+    directory_a
+        .enroll(
+            PeerIdentity::from_public_key(pending.identity_b.public_key_base64()).unwrap(),
+            vec![PeerLocator::Socket(
+                format!("127.0.0.1:{}", pending.port_b).parse().unwrap(),
+            )],
+        )
+        .await
+        .unwrap();
+    directory_b
+        .enroll(
+            PeerIdentity::from_public_key(pending.identity_a.public_key_base64()).unwrap(),
+            vec![PeerLocator::Socket(
+                format!("127.0.0.1:{}", pending.port_a).parse().unwrap(),
+            )],
+        )
+        .await
+        .unwrap();
+    drop(directory_a);
+    drop(directory_b);
+    // Enrollment must land in peers.json before the daemons load it.
+    start_pair(pending).await
+}
+
+/// Identities, paths, and ports prepared but not yet started, so callers
+/// can seed peer state before the daemons load it.
+struct PendingPair {
+    root_a: TempDir,
+    root_b: TempDir,
+    paths_a: AxonPaths,
+    paths_b: AxonPaths,
+    identity_a: Identity,
+    identity_b: Identity,
+    port_a: u16,
+    port_b: u16,
+}
+
+fn prepare_identities() -> PendingPair {
     let root_a = tempfile::tempdir().unwrap();
     let root_b = tempfile::tempdir().unwrap();
     let paths_a = AxonPaths::from_root(PathBuf::from(root_a.path()));
@@ -48,45 +102,45 @@ async fn prepare_pair() -> (RunningDaemon, RunningDaemon) {
     paths_b.ensure_root_exists().unwrap();
     let identity_a = Identity::load_or_generate(&paths_a).unwrap();
     let identity_b = Identity::load_or_generate(&paths_b).unwrap();
-    let port_a = free_port();
-    let port_b = free_port();
+    PendingPair {
+        root_a,
+        root_b,
+        paths_a,
+        paths_b,
+        identity_a,
+        identity_b,
+        port_a: free_port(),
+        port_b: free_port(),
+    }
+}
 
-    let directory_a = PeerDirectory::load(
-        AgentId::parse(identity_a.agent_id()).unwrap(),
-        PeerStore::new(paths_a.peers.clone()),
-    )
-    .await
-    .unwrap();
-    let directory_b = PeerDirectory::load(
-        AgentId::parse(identity_b.agent_id()).unwrap(),
-        PeerStore::new(paths_b.peers.clone()),
-    )
-    .await
-    .unwrap();
-    directory_a
-        .enroll(
-            PeerIdentity::from_public_key(identity_b.public_key_base64()).unwrap(),
-            vec![PeerLocator::Socket(
-                format!("127.0.0.1:{port_b}").parse().unwrap(),
-            )],
-        )
-        .await
-        .unwrap();
-    directory_b
-        .enroll(
-            PeerIdentity::from_public_key(identity_a.public_key_base64()).unwrap(),
-            vec![PeerLocator::Socket(
-                format!("127.0.0.1:{port_a}").parse().unwrap(),
-            )],
-        )
-        .await
-        .unwrap();
-
-    let daemon_a = spawn(root_a, paths_a, identity_a, port_a);
-    let daemon_b = spawn(root_b, paths_b, identity_b, port_b);
+async fn start_pair(pending: PendingPair) -> (RunningDaemon, RunningDaemon) {
+    let PendingPair {
+        root_a,
+        root_b,
+        paths_a,
+        paths_b,
+        identity_a,
+        identity_b,
+        port_a,
+        port_b,
+    } = pending;
+    let daemon_a = spawn(root_a, paths_a, identity_a.clone(), port_a);
+    let daemon_b = spawn(root_b, paths_b, identity_b.clone(), port_b);
     wait_for_socket(&daemon_a.paths.socket).await;
     wait_for_socket(&daemon_b.paths.socket).await;
     (daemon_a, daemon_b)
+}
+
+/// Spawn two daemons with fresh identities but NO enrolled peers.
+async fn spawn_pair() -> (RunningDaemon, RunningDaemon, Identity, Identity, u16, u16) {
+    let pending = prepare_identities();
+    let identity_a = pending.identity_a.clone();
+    let identity_b = pending.identity_b.clone();
+    let port_a = pending.port_a;
+    let port_b = pending.port_b;
+    let (daemon_a, daemon_b) = start_pair(pending).await;
+    (daemon_a, daemon_b, identity_a, identity_b, port_a, port_b)
 }
 
 fn spawn(root: TempDir, paths: AxonPaths, identity: Identity, port: u16) -> RunningDaemon {
@@ -140,6 +194,28 @@ async fn read_json(reader: &mut BufReader<tokio::net::unix::OwnedReadHalf>) -> V
         .expect("IPC read timeout")
         .unwrap();
     serde_json::from_str(&line).unwrap()
+}
+
+/// Poll `peers` until `agent_id` reports `connected`, failing after the
+/// timeout so missing connectivity cannot hang the suite.
+pub(crate) async fn wait_for_peer_connected(path: &Path, agent_id: &str) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "peer {agent_id} never reached connected state"
+        );
+        let reply = ipc_command(path, json!({ "cmd": "peers" })).await;
+        if reply["peers"].as_array().is_some_and(|peers| {
+            peers.iter().any(|peer| {
+                peer["agent_id"].as_str() == Some(agent_id)
+                    && peer["status"].as_str() == Some("connected")
+            })
+        }) {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
 }
 
 #[tokio::test]

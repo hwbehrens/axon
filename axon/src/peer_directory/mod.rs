@@ -12,7 +12,7 @@ use tokio::sync::RwLock;
 use crate::message::AgentId;
 use state::{CandidatePeer, DirectoryState, EnrolledPeer, LiveObservation, insert_observation};
 
-pub use store::PeerStore;
+pub use store::{PeerStore, StoredPeer};
 pub use types::{
     DialTarget, ObservationId, ObservationSource, ObserveOutcome, PeerIdentity, PeerLocator,
     PeerObservation, PeerTrust, PeerView,
@@ -317,3 +317,7 @@ impl PeerDirectory {
 #[cfg(test)]
 #[path = "tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "properties.rs"]
+mod properties;

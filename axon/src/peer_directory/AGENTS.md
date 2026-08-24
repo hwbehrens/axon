@@ -25,4 +25,6 @@ Identity and trust invariants > one authoritative owner > availability.
 ## Test targets
 
 - Unit: `tests.rs` plus module-local tests where needed
+- Property: `properties.rs` — model-based trust/persistence/endpoint-conflict invariants and store roundtrip/bound properties
 - Integration/adversarial: `axon/tests/integration.rs`, `axon/tests/adversarial.rs`
+- Fuzz: `axon/fuzz/fuzz_targets/fuzz_peer_store.rs` exercises the untrusted `peers.json` decode path

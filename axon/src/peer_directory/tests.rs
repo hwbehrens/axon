@@ -228,3 +228,77 @@ async fn revocation_removes_observation_index_entries() {
         "revocation must not leave a stale observation owner"
     );
 }
+
+fn store_document(peers: serde_json::Value) -> Vec<u8> {
+    serde_json::to_vec(&serde_json::json!({ "version": 1, "peers": peers }))
+        .expect("encode fixture")
+}
+
+#[test]
+fn store_decode_rejects_oversized_enrolled_set() {
+    let peers: Vec<serde_json::Value> = (0..=MAX_ENROLLED_PEERS)
+        .map(|index| {
+            let peer = identity(index as u8);
+            serde_json::json!({
+                "agent_id": peer.agent_id().as_str(),
+                "public_key": peer.public_key(),
+                "locators": []
+            })
+        })
+        .collect();
+
+    assert!(
+        PeerStore::decode(&store_document(serde_json::Value::Array(peers))).is_err(),
+        "more than MAX_ENROLLED_PEERS records must fail validation"
+    );
+}
+
+#[test]
+fn store_decode_rejects_oversized_locator_set() {
+    let remote = identity(1);
+    let locators: Vec<String> = (0..=MAX_LOCATORS_PER_PEER)
+        .map(|index| format!("svc-{index}.internal:{}", 7100 + index))
+        .collect();
+    let document = store_document(serde_json::json!([{
+        "agent_id": remote.agent_id().as_str(),
+        "public_key": remote.public_key(),
+        "locators": locators
+    }]));
+
+    assert!(
+        PeerStore::decode(&document).is_err(),
+        "more than MAX_LOCATORS_PER_PEER locators must fail validation"
+    );
+}
+
+#[test]
+fn store_decode_rejects_wrong_version() {
+    let remote = identity(2);
+    let document = serde_json::to_vec(&serde_json::json!({
+        "version": 999,
+        "peers": [{
+            "agent_id": remote.agent_id().as_str(),
+            "public_key": remote.public_key(),
+            "locators": []
+        }]
+    }))
+    .expect("encode fixture");
+
+    assert!(PeerStore::decode(&document).is_err());
+}
+
+#[test]
+fn store_decode_never_panics_on_arbitrary_bytes() {
+    for input in [
+        &b""[..],
+        b"{",
+        b"null",
+        b"[]",
+        b"{\"version\":1}",
+        b"{\"version\":1,\"peers\":{}}",
+        b"{\"version\":1,\"peers\":[{}]}",
+        b"{\"version\":1,\"peers\":[{\"agent_id\":\"ed25519.\",\"public_key\":\"AAA\",\"locators\":[\":\"]}]}",
+    ] {
+        assert!(PeerStore::decode(input).is_err());
+    }
+}
