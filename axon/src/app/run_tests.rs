@@ -66,7 +66,7 @@ fn connect_command_parses_token() {
     let cli = Cli::try_parse_from(["axon", "connect", "axon://abc@127.0.0.1:7100"])
         .expect("parse connect");
     match cli.command {
-        Commands::Connect { token } => assert_eq!(token, "axon://abc@127.0.0.1:7100"),
+        Commands::Connect { peer } => assert_eq!(peer, "axon://abc@127.0.0.1:7100"),
         _ => panic!("expected connect command"),
     }
 }

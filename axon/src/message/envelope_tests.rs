@@ -1,12 +1,12 @@
 use super::*;
 use serde_json::json;
 
-fn agent_a() -> String {
-    "ed25519.a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4".to_string()
+fn agent_a() -> AgentId {
+    AgentId::parse("ed25519.a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4").unwrap()
 }
 
-fn agent_b() -> String {
-    "ed25519.f6e5d4c3b2a1f6e5d4c3b2a1f6e5d4c3".to_string()
+fn agent_b() -> AgentId {
+    AgentId::parse("ed25519.f6e5d4c3b2a1f6e5d4c3b2a1f6e5d4c3").unwrap()
 }
 
 #[test]
@@ -109,8 +109,8 @@ proptest! {
         from_hex in "[0-9a-f]{32}",
         to_hex in "[0-9a-f]{32}",
     ) {
-        let from_id = format!("ed25519.{from_hex}");
-        let to_id = format!("ed25519.{to_hex}");
+        let from_id = AgentId::parse(&format!("ed25519.{from_hex}")).unwrap();
+        let to_id = AgentId::parse(&format!("ed25519.{to_hex}")).unwrap();
         let req = Envelope::new(from_id, to_id.clone(), MessageKind::Request, json!({"q":"?"}));
         let resp = Envelope::response_to(&req, to_id, MessageKind::Response, json!({}));
         prop_assert_eq!(resp.ref_id, Some(req.id));
@@ -128,7 +128,10 @@ fn message_kind_display() {
     assert_eq!(MessageKind::Response.to_string(), "response");
     assert_eq!(MessageKind::Message.to_string(), "message");
     assert_eq!(MessageKind::Error.to_string(), "error");
-    assert_eq!(MessageKind::Unknown.to_string(), "unknown");
+    assert_eq!(
+        MessageKind::unknown("future_kind").to_string(),
+        "future_kind"
+    );
 }
 
 #[test]
@@ -148,36 +151,38 @@ fn kind_serde_roundtrip() {
 #[test]
 fn unknown_kind_deserializes_from_unrecognized_string() {
     let kind: MessageKind = serde_json::from_str(r#""foo_bar_baz""#).unwrap();
-    assert_eq!(kind, MessageKind::Unknown);
+    assert_eq!(kind, MessageKind::unknown("foo_bar_baz"));
 
     let kind: MessageKind = serde_json::from_str(r#""stream""#).unwrap();
-    assert_eq!(kind, MessageKind::Unknown);
+    assert_eq!(kind, MessageKind::unknown("stream"));
 }
 
-const ALL_KINDS: &[MessageKind] = &[
-    MessageKind::Request,
-    MessageKind::Response,
-    MessageKind::Message,
-    MessageKind::Error,
-    MessageKind::Unknown,
-];
+fn all_kinds() -> Vec<MessageKind> {
+    vec![
+        MessageKind::Request,
+        MessageKind::Response,
+        MessageKind::Message,
+        MessageKind::Error,
+        MessageKind::unknown("future_kind"),
+    ]
+}
 
 proptest! {
     #[test]
     fn expects_response_xor_is_response_for_known_kinds(
-        kind_idx in 0..ALL_KINDS.len(),
+        kind_idx in 0..5usize,
     ) {
-        let kind = ALL_KINDS[kind_idx];
+        let kind = all_kinds()[kind_idx].clone();
         // Message and Unknown are neither request nor response
-        if kind != MessageKind::Message && kind != MessageKind::Unknown {
+        if kind != MessageKind::Message && !matches!(kind, MessageKind::Unknown(_)) {
             prop_assert_ne!(kind.expects_response(), kind.is_response(),
                 "kind {:?} must be exactly one of request or response", kind);
         }
     }
 
     #[test]
-    fn display_roundtrips_through_serde(kind_idx in 0..ALL_KINDS.len()) {
-        let kind = ALL_KINDS[kind_idx];
+    fn display_roundtrips_through_serde(kind_idx in 0..5usize) {
+        let kind = all_kinds()[kind_idx].clone();
         let serialized = serde_json::to_string(&kind).unwrap();
         let deserialized: MessageKind = serde_json::from_str(&serialized).unwrap();
         prop_assert_eq!(kind, deserialized);

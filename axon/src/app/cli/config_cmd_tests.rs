@@ -66,7 +66,6 @@ fn render_list_text_only_includes_set_keys() {
         name: Some("alice".to_string()),
         port: None,
         advertise_addr: Some("host:7100".to_string()),
-        peers: Vec::new(),
     };
 
     let rendered = render_list_text(&config);

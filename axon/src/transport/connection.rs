@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -6,14 +5,14 @@ use anyhow::{Context, Result, anyhow, bail};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use rustls::pki_types::CertificateDer;
 use serde_json::json;
-use tokio::sync::OwnedSemaphorePermit;
-use tokio::sync::{RwLock, broadcast};
+use tokio::sync::broadcast;
+use tokio::task::JoinSet;
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 use uuid::Uuid;
 
-use crate::message::{Envelope, MessageKind};
+use crate::message::{AgentId, Envelope, MessageKind};
 
 use super::MAX_MESSAGE_SIZE_USIZE;
 use super::quic_transport::ResponseHandlerFn;
@@ -63,7 +62,7 @@ pub(crate) async fn send_unidirectional(
 pub(crate) async fn send_request(
     connection: &quinn::Connection,
     envelope: Envelope,
-    local_agent_id: &str,
+    local_agent_id: &AgentId,
     request_timeout: Duration,
 ) -> Result<Envelope> {
     let bytes = envelope
@@ -122,7 +121,7 @@ fn validate_bidi_response(response: &Envelope, request_id: Uuid) -> Result<()> {
 pub fn default_error_response(request: &Envelope, local_agent_id: &str) -> Envelope {
     Envelope::response_to(
         request,
-        local_agent_id.to_string(),
+        AgentId::parse(local_agent_id).expect("transport local Agent ID is validated at bind"),
         MessageKind::Error,
         json!({
             "code": "unhandled",
@@ -157,7 +156,7 @@ pub(crate) fn extract_peer_pubkey_base64_from_connection(
     Ok(STANDARD.encode(key))
 }
 
-fn derive_peer_id_from_connection(connection: &quinn::Connection) -> Result<String> {
+pub(crate) fn derive_peer_id_from_connection(connection: &quinn::Connection) -> Result<String> {
     let peer_cert_pubkey_b64 = extract_peer_pubkey_base64_from_connection(connection)?;
     let pubkey_bytes = STANDARD
         .decode(&peer_cert_pubkey_b64)
@@ -165,9 +164,15 @@ fn derive_peer_id_from_connection(connection: &quinn::Connection) -> Result<Stri
     Ok(derive_agent_id_from_pubkey_bytes(&pubkey_bytes))
 }
 
-fn overwrite_authenticated_identity(envelope: &mut Envelope, peer_id: &str, local_agent_id: &str) {
-    envelope.from = Some(peer_id.into());
-    envelope.to = Some(local_agent_id.into());
+fn overwrite_authenticated_identity(
+    envelope: &mut Envelope,
+    peer_id: &str,
+    local_agent_id: &AgentId,
+) {
+    envelope.from = Some(
+        AgentId::parse(peer_id).expect("peer Agent ID is derived from authenticated key material"),
+    );
+    envelope.to = Some(local_agent_id.clone());
 }
 
 // ---------------------------------------------------------------------------
@@ -176,10 +181,8 @@ fn overwrite_authenticated_identity(envelope: &mut Envelope, peer_id: &str, loca
 
 #[derive(Clone)]
 struct ConnectionContext {
-    connection: quinn::Connection,
-    local_agent_id: String,
+    local_agent_id: AgentId,
     inbound_tx: broadcast::Sender<Arc<Envelope>>,
-    connections: Arc<RwLock<HashMap<String, quinn::Connection>>>,
     response_handler: Option<ResponseHandlerFn>,
     inbound_read_timeout: Duration,
 }
@@ -193,8 +196,8 @@ async fn handle_uni_stream(ctx: &ConnectionContext, peer_id: &str, mut recv: qui
         Ok(Ok(bytes)) => match serde_json::from_slice::<Envelope>(&bytes) {
             Ok(mut envelope) => {
                 overwrite_authenticated_identity(&mut envelope, peer_id, &ctx.local_agent_id);
-                if envelope.kind.expects_response() {
-                    debug!("dropping request kind on uni stream");
+                if !envelope.kind.is_allowed_on_unidirectional() {
+                    debug!(kind = %envelope.kind, "dropping kind that is invalid on uni stream");
                 } else if let Err(err) = envelope.validate() {
                     debug!(error = %err, "dropping invalid uni envelope");
                 } else {
@@ -224,27 +227,7 @@ async fn handle_authenticated_bidi(
     request: Envelope,
     mut send: quinn::SendStream,
 ) {
-    if request.kind == MessageKind::Unknown {
-        let response = Envelope::response_to(
-            &request,
-            ctx.local_agent_id.clone(),
-            MessageKind::Error,
-            json!({
-                "code": "unknown_kind",
-                "message": "unknown message kind on bidirectional stream",
-                "retryable": false,
-            }),
-        );
-        send_response(&mut send, &response).await;
-    } else if !request.kind.expects_response() {
-        // Fire-and-forget kind on a bidi stream — accept it gracefully
-        if let Err(err) = request.validate() {
-            debug!(error = %err, "dropping invalid bidi fire-and-forget envelope");
-        } else {
-            let _ = ctx.inbound_tx.send(Arc::new(request));
-        }
-        let _ = send.finish();
-    } else if let Err(err) = request.validate() {
+    if let Err(err) = request.validate() {
         let response = Envelope::response_to(
             &request,
             ctx.local_agent_id.clone(),
@@ -256,16 +239,39 @@ async fn handle_authenticated_bidi(
             }),
         );
         send_response(&mut send, &response).await;
+    } else if let MessageKind::Unknown(kind) = &request.kind {
+        let response = Envelope::response_to(
+            &request,
+            ctx.local_agent_id.clone(),
+            MessageKind::Error,
+            json!({
+                "code": "unsupported_kind",
+                "message": format!("unsupported message kind '{kind}' on bidirectional stream"),
+                "retryable": false,
+            }),
+        );
+        send_response(&mut send, &response).await;
+    } else if !request.kind.expects_response() {
+        let response = Envelope::response_to(
+            &request,
+            ctx.local_agent_id.clone(),
+            MessageKind::Error,
+            json!({
+                "code": "invalid_envelope",
+                "message": format!("message kind '{}' cannot initiate a bidirectional stream", request.kind),
+                "retryable": false,
+            }),
+        );
+        send_response(&mut send, &response).await;
     } else {
         let request_arc = Arc::new(request.clone());
-        let _ = ctx.inbound_tx.send(request_arc.clone());
         let response = if let Some(ref handler) = ctx.response_handler {
             match handler(request_arc).await {
                 Some(resp) => resp,
-                None => default_error_response(&request, &ctx.local_agent_id),
+                None => default_error_response(&request, ctx.local_agent_id.as_str()),
             }
         } else {
-            default_error_response(&request, &ctx.local_agent_id)
+            default_error_response(&request, ctx.local_agent_id.as_str())
         };
         send_response(&mut send, &response).await;
     }
@@ -311,33 +317,6 @@ async fn send_response(send: &mut quinn::SendStream, response: &Envelope) {
     }
 }
 
-async fn register_connection(
-    connections: &Arc<RwLock<HashMap<String, quinn::Connection>>>,
-    peer_id: &str,
-    connection: &quinn::Connection,
-) -> usize {
-    let stable_id = connection.stable_id();
-    connections
-        .write()
-        .await
-        .insert(peer_id.to_string(), connection.clone());
-    stable_id
-}
-
-async fn unregister_connection_if_current(
-    connections: &Arc<RwLock<HashMap<String, quinn::Connection>>>,
-    peer_id: &str,
-    stable_id: usize,
-) {
-    let mut conns = connections.write().await;
-    if conns
-        .get(peer_id)
-        .is_some_and(|c| c.stable_id() == stable_id)
-    {
-        conns.remove(peer_id);
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Connection loop
 // ---------------------------------------------------------------------------
@@ -345,13 +324,11 @@ async fn unregister_connection_if_current(
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_connection(
     connection: quinn::Connection,
-    local_agent_id: String,
+    local_agent_id: AgentId,
     inbound_tx: broadcast::Sender<Arc<Envelope>>,
-    connections: Arc<RwLock<HashMap<String, quinn::Connection>>>,
     cancel: CancellationToken,
     response_handler: Option<ResponseHandlerFn>,
     inbound_read_timeout: Duration,
-    _connection_permit: Option<OwnedSemaphorePermit>,
 ) {
     let peer_id = match derive_peer_id_from_connection(&connection) {
         Ok(peer_id) => peer_id,
@@ -362,15 +339,12 @@ pub(crate) async fn run_connection(
     };
 
     let ctx = Arc::new(ConnectionContext {
-        connection: connection.clone(),
         local_agent_id,
         inbound_tx,
-        connections,
         response_handler,
         inbound_read_timeout,
     });
-
-    let my_stable_id = register_connection(&ctx.connections, &peer_id, &ctx.connection).await;
+    let mut streams = JoinSet::new();
 
     loop {
         tokio::select! {
@@ -383,7 +357,7 @@ pub(crate) async fn run_connection(
                     Ok(recv) => {
                         let ctx = ctx.clone();
                         let peer_id = peer_id.clone();
-                        tokio::spawn(async move {
+                        streams.spawn(async move {
                             handle_uni_stream(&ctx, &peer_id, recv).await;
                         });
                     }
@@ -395,7 +369,7 @@ pub(crate) async fn run_connection(
                     Ok((send, recv)) => {
                         let ctx = ctx.clone();
                         let peer_id = peer_id.clone();
-                        tokio::spawn(async move {
+                        streams.spawn(async move {
                             handle_bidi_stream(&ctx, &peer_id, send, recv).await;
                         });
                     }
@@ -405,9 +379,8 @@ pub(crate) async fn run_connection(
         }
     }
 
-    // Only remove our entry if we're still the registered connection.
-    // Another connection loop (from a simultaneous dial) may have replaced us.
-    unregister_connection_if_current(&ctx.connections, &peer_id, my_stable_id).await;
+    streams.abort_all();
+    while streams.join_next().await.is_some() {}
 }
 
 #[cfg(test)]

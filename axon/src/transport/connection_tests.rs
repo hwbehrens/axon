@@ -1,12 +1,12 @@
 use super::*;
 use serde_json::json;
 
-fn agent_a() -> String {
-    "ed25519.a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4".to_string()
+fn agent_a() -> AgentId {
+    AgentId::parse("ed25519.a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4").unwrap()
 }
 
-fn agent_b() -> String {
-    "ed25519.f6e5d4c3b2a1f6e5d4c3b2a1f6e5d4c3".to_string()
+fn agent_b() -> AgentId {
+    AgentId::parse("ed25519.f6e5d4c3b2a1f6e5d4c3b2a1f6e5d4c3").unwrap()
 }
 
 #[test]
@@ -37,7 +37,7 @@ fn arb_kind() -> impl Strategy<Value = MessageKind> {
         Just(MessageKind::Response),
         Just(MessageKind::Message),
         Just(MessageKind::Error),
-        Just(MessageKind::Unknown),
+        Just(MessageKind::unknown("future_kind")),
     ]
 }
 
@@ -46,7 +46,7 @@ proptest! {
     fn default_error_response_always_returns_error(kind in arb_kind()) {
         let req = Envelope::new(agent_a(), agent_b(), kind, json!({}));
         let resp = default_error_response(&req, &agent_b());
-        prop_assert_eq!(resp.kind, MessageKind::Error);
+        prop_assert_eq!(&resp.kind, &MessageKind::Error);
         prop_assert_eq!(resp.ref_id, Some(req.id));
         let payload = resp.payload_value().unwrap();
         prop_assert!(payload.get("code").and_then(|v| v.as_str()).is_some());

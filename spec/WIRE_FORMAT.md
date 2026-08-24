@@ -22,10 +22,10 @@ AXON is a secure point-to-point messaging protocol over:
 - **JSON** message encoding, delimited by QUIC stream FIN
 - **One application message per QUIC stream** (both uni and bidi)
 
-There are two interfaces:
+There are two interfaces with separate normative contracts:
 
 1. **Network protocol:** QUIC/TLS/streams carrying framed JSON envelopes.
-2. **Local IPC protocol:** Unix domain socket, **newline-delimited JSON** commands/replies.
+2. **Local IPC protocol:** Unix domain socket, **newline-delimited JSON** commands/replies, specified only by [`IPC.md`](./IPC.md).
 
 ---
 
@@ -94,7 +94,7 @@ Server binds to `0.0.0.0:<port>` (all interfaces).
 
 AXON uses TLS 1.3 over QUIC with **mutual authentication**.
 
-Either side may initiate a connection to any discovered peer. There is no deterministic initiator rule.
+Either side may initiate a connection to an enrolled peer. Discovery alone does not authorize a connection. If simultaneous cross-dials race, both implementations MUST prefer the connection initiated by the lexicographically lower canonical Agent ID. The preferred initiator rule is only a duplicate-selection tie-breaker; either side MAY dial when no authoritative connection exists.
 
 #### 3.2.1 SNI / "server name" usage (normative)
 
@@ -107,16 +107,16 @@ This SNI value is used as an *identity label* for certificate verification (not 
 #### 3.2.2 Server certificate verification (client-side, normative)
 
 Given:
-- Expected remote agent id: `REMOTE_ID` (from discovery / peer table)
+- Expected remote agent id: `REMOTE_ID` (from the enrolled pin set)
 - Peer certificate with Ed25519 public key `CERT_PUBKEY` (32 bytes)
 
 Client verification MUST enforce:
 
 1. `DERIVED_ID = "ed25519." + hex(SHA256(CERT_PUBKEY)[0..16])`  
    **MUST equal** `REMOTE_ID` (from SNI / intended peer id).
-2. The peer must be "known" (discovered or statically configured).  
-   The daemon's peer table holds a map of `agent_id → base64(pubkey)` and **rejects** if there is no entry.
-3. If the peer table has an entry for `REMOTE_ID`, its base64 value **MUST** match `base64(CERT_PUBKEY)` exactly.
+2. The peer must be explicitly enrolled.
+   The daemon's current pinning snapshot holds a map of `agent_id → base64(pubkey)` and **rejects** if there is no entry. An mDNS observation alone MUST NOT create this entry.
+3. The enrolled pinning snapshot's value for `REMOTE_ID` **MUST** match `base64(CERT_PUBKEY)` exactly.
 
 If any check fails: the connection is rejected at TLS verification.
 
@@ -126,11 +126,11 @@ Server verification MUST enforce:
 
 1. Extract Ed25519 public key `CERT_PUBKEY` from the client certificate.
 2. Compute `DERIVED_ID` from `CERT_PUBKEY` as in §2.2.
-3. Require that the daemon's peer table has an entry for `DERIVED_ID` and its value equals `base64(CERT_PUBKEY)` exactly.
+3. Require that the daemon's enrolled pinning snapshot has an entry for `DERIVED_ID` and its value equals `base64(CERT_PUBKEY)` exactly.
 
 If unknown (no expected key recorded), the connection is rejected.
 
-**Operational implication:** A peer must be present in the daemon's peer table (from mDNS, static config, or cache) *before* an inbound connection will be accepted.
+**Operational implication:** A peer must be intentionally enrolled *before* an inbound connection will be accepted. An implementation MAY surface the validated identity from a rejected unknown handshake as an untrusted local candidate, but MUST NOT admit it automatically.
 
 ### 3.3 Keepalives and idle timeout
 
@@ -144,6 +144,16 @@ If idle timeout triggers, QUIC will close the connection. Implementations SHOULD
 ### 3.4 Connection limits
 
 Max concurrent QUIC connections: **128** (hardcoded). If exceeded, new inbound QUIC connections are closed immediately with QUIC close reason "connection limit reached".
+
+### 3.5 Authoritative connection selection
+
+An implementation MUST expose at most one authoritative connection per enrolled peer to application traffic.
+
+- A healthy incumbent wins against duplicate candidates in the same connection generation.
+- Failure, an unhealthy transition, or a failed/timed-out exchange advances the generation; retrying redials rather than reusing suspect state.
+- An older generation's completion or teardown MUST NOT mutate a newer generation's slot.
+- A replacement MUST authenticate and become usable before displacing a still-live incumbent.
+- Losing candidates MUST be closed and their owned tasks/resources joined or otherwise deterministically reclaimed.
 
 ---
 
@@ -235,11 +245,13 @@ Every network message body is a JSON object:
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `id` | string | Yes | UUID v4 message identifier. |
-| `kind` | string | Yes | Message kind (see §4.3). |
+| `kind` | string | Yes | Known message kind (see §4.3) or a losslessly retained unknown string. |
 | `ref` | string | Conditional | Referenced message ID. Present for responses. |
 | `payload` | object | Yes | Kind-specific data. Unknown fields MUST be ignored. |
 
 **Note:** `from` and `to` fields are **not** present on the wire. The daemon populates these for IPC clients based on the QUIC connection's authenticated identity.
+
+Receivers MUST retain an unknown `kind` string exactly when decoding and re-encoding. An unknown kind on a unidirectional stream MAY be forwarded to the local application unchanged. An unknown kind on a bidirectional stream MUST receive an `error` reply with code `unsupported_kind`; the receiver cannot infer future response semantics.
 
 ### 6.3 `ref` field handling (interoperability note)
 
@@ -260,14 +272,15 @@ Every network message body is a JSON object:
 
 ### 7.1 Peer pinning requirements (normative)
 
-TLS verification consults the daemon's peer table, which maintains an "expected peer pubkeys" map:
+TLS verification consults the daemon's current enrolled-pin snapshot, which maintains an "expected peer pubkeys" map:
 
-- A peer's base64 Ed25519 public key **MUST** be known (via discovery, static config, or cached peers) before initiating or accepting a connection.
+- A peer's base64 Ed25519 public key **MUST** be explicitly enrolled before initiating or accepting a connection.
 - If a peer is unknown at connect time, the connection is rejected at TLS verification.
+- Discovery observations MUST NOT mutate this snapshot. Once enrolled, a conflicting key for the same Agent ID MUST be rejected rather than replacing the pin.
 
 ### 7.2 Reconnection and backoff
 
-Implementations SHOULD attempt reconnects to discovered peers when:
+Implementations SHOULD attempt reconnects to enrolled peers with a current dial target when:
 - The peer is not currently connected.
 
 RECOMMENDED backoff schedule:
@@ -320,6 +333,7 @@ Errors are carried as normal envelopes with `kind: "error"`:
 
 Valid error codes:
 - `unhandled`
+- `unsupported_kind`
 - `peer_not_found`
 - `invalid_envelope`
 - `internal`
@@ -330,100 +344,9 @@ Valid error codes:
 
 ---
 
-## 10. IPC wire protocol (Unix domain socket)
+## 10. Local IPC protocol
 
-### 10.1 Socket location and permissions
-
-Default socket path: `~/.axon/axon.sock`
-
-- On startup, if the socket file exists, it is removed and re-created.
-- Permissions: **0600** (owner read/write).
-
-### 10.2 Framing: newline-delimited JSON (normative)
-
-- Each command or reply is one JSON object terminated by `\n` (LF, `0x0A`).
-- No length prefix.
-- Embedded newlines inside JSON strings must be JSON-escaped (`\n`), not literal newline bytes.
-
-### 10.3 Client → daemon commands
-
-#### Send
-```json
-{"cmd":"send","to":"<agent_id>","kind":"request|message","payload":{...},"ref":"<uuid>"}
-```
-- `ref` is optional.
-- `kind` is restricted to `request` or `message`. Other values MUST return `invalid_command`.
-- For `request`, the daemon waits for the remote response and returns it inline in the `SendOk` reply.
-
-#### Peers
-```json
-{"cmd":"peers"}
-```
-
-#### Status
-```json
-{"cmd":"status"}
-```
-
-#### Whoami
-```json
-{"cmd":"whoami"}
-```
-
-### 10.4 Daemon → client replies
-
-#### SendOk
-
-For fire-and-forget (`message`):
-```json
-{"ok":true,"msg_id":"<uuid>"}
-```
-
-For bidirectional requests (`request`), the response is included inline:
-```json
-{"ok":true,"msg_id":"<uuid>","response":{...}}
-```
-
-#### Peers
-```json
-{"ok":true,"peers":[{"id":"<agent_id>","addr":"ip:port","status":"connected","rtt_ms":0.4,"source":"static"}]}
-```
-
-#### Status
-```json
-{"ok":true,"uptime_secs":3600,"peers_connected":1,"messages_sent":42,"messages_received":38}
-```
-
-#### Whoami
-```json
-{"ok":true,"agent_id":"<agent_id>","public_key":"<base64-ed25519-pubkey>","name":"<optional-display-name>","version":"<daemon-version>","uptime_secs":3600}
-```
-
-`name` is optional and may be omitted when unset.
-
-#### Error
-```json
-{"ok":false,"error":"<error_code>","message":"<explanation>"}
-```
-
-IPC error codes:
-- `invalid_command`
-- `peer_not_found`
-- `peer_unreachable`
-- `internal_error`
-
-#### InboundEvent (broadcast to connected clients)
-```json
-{"event":"inbound","from":"<agent_id>","envelope":{...}}
-```
-
-### 10.5 Multiple IPC clients
-
-- Multiple clients may connect simultaneously (default limit: **64**).
-- If the client limit is reached, new connections are rejected.
-- Connected IPC clients receive inbound messages via broadcast as `InboundEvent` lines while they keep up with delivery.
-- Each client has a bounded outbound queue. If `InboundEvent` delivery would overflow that queue, the daemon disconnects that lagging client (deliver-or-disconnect).
-- There is no subscription mechanism; messages are dropped when no IPC client is connected.
+The local Unix-domain-socket protocol is normatively specified only by [`IPC.md`](./IPC.md). Network implementations that do not provide an AXON-compatible daemon API need not implement it. This document intentionally does not duplicate IPC commands or response shapes.
 
 ---
 
@@ -443,12 +366,13 @@ IPC error codes:
 
 ### 11.3 Staleness and refresh
 
-- A discovered peer SHOULD be considered stale if no mDNS refresh within a reasonable period. RECOMMENDED: **60 seconds**.
+- Each service instance/interface result is a distinct observation. A candidate locator SHOULD be considered stale if its observation is not refreshed within its advertised or implementation-defined lifetime. RECOMMENDED fallback: **60 seconds**.
 - Stale cleanup SHOULD run periodically. RECOMMENDED: every **5 seconds**.
+- Removing one observation MUST NOT remove another live observation for the same Agent ID.
 
 ### 11.4 Interaction with TLS pinning
 
-Discovery **MUST** populate the daemon's peer table used by TLS verification (§3.2). A peer's `agent_id → pubkey(base64)` mapping must be available before connections can be established.
+Discovery **MUST NOT** populate the enrolled pinning snapshot used by TLS verification (§3.2). It produces untrusted candidates only. A same-user local enrollment action must validate and persist the candidate before its `agent_id → pubkey(base64)` mapping becomes available to TLS.
 
 ---
 
@@ -460,7 +384,9 @@ Discovery **MUST** populate the daemon's peer table used by TLS verification (§
 | Request timeout | 30 seconds | RECOMMENDED | Max wait for bidi response |
 | QUIC keepalive interval | 15 seconds | RECOMMENDED | Keepalive ping interval |
 | QUIC idle timeout | 60 seconds | RECOMMENDED | Max idle before connection close |
-| Discovery stale timeout | 60 seconds | RECOMMENDED | Remove unrefreshed peers |
+| Discovery stale timeout | 60 seconds | RECOMMENDED fallback | Expire unrefreshed observations |
+| Enrolled peers | 256 | Reference bound | Maximum durable peer records |
+| Configured locators per peer | 8 | Reference bound | Maximum durable locators for one peer |
 | IPC max clients | 64 | RECOMMENDED | Max concurrent socket clients |
 | QUIC max connections | 128 | Hardcoded | Max concurrent QUIC connections |
 | Reconnect backoff initial | 1 second | RECOMMENDED | First reconnect delay |
@@ -478,7 +404,7 @@ A compatible implementation MUST:
 4. Set SNI to remote Agent ID for outbound connections (§3.2.1).
 5. Use one-message-per-stream with QUIC stream FIN as delimiter — no length prefix (§4, §5).
 6. Encode envelopes as UTF-8 JSON, max 65,536 bytes body (§6).
-7. Implement the IPC newline-delimited JSON protocol if providing a daemon-compatible local API (§10).
+7. Implement [`IPC.md`](./IPC.md) if providing a daemon-compatible local API (§10).
 8. Implement mDNS discovery `_axon._udp.local.` with required TXT keys if providing zero-config LAN discovery (§11).
 
 ---
@@ -487,5 +413,5 @@ A compatible implementation MUST:
 
 - `"ref"` is usually **omitted** from JSON, not `null`. Accept both.
 - The reference daemon auto-responds to unhandled bidi requests with `kind: "error"`, code `"unhandled"`.
-- TLS pinning requires the peer's pubkey to be known **before** connection; unknown inbound connections are rejected during TLS verification.
+- TLS pinning requires the peer's pubkey to be explicitly enrolled **before** connection; discovery alone is insufficient and unknown inbound connections are rejected during TLS verification.
 - Authentication is via mTLS only. Once the QUIC handshake completes successfully, the connection is fully authenticated and all message kinds are accepted immediately.

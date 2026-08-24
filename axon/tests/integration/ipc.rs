@@ -242,15 +242,20 @@ fn ipc_send_rejects_non_sendable_kinds() {
     }
 }
 
-/// IPC add_peer command parses with required fields.
+/// IPC add_peer command parses an intentional candidate enrollment.
 #[test]
 fn ipc_add_peer_command_deserializes() {
-    let input = r#"{"cmd":"add_peer","pubkey":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=","addr":"127.0.0.1:7100"}"#;
+    let input = r#"{"cmd":"add_peer","agent_id":"ed25519.deadbeef01234567deadbeef01234567"}"#;
     let cmd: IpcCommand = serde_json::from_str(input).unwrap();
     match cmd {
-        IpcCommand::AddPeer { pubkey, addr, .. } => {
-            assert_eq!(pubkey, "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=");
-            assert_eq!(addr, "127.0.0.1:7100");
+        IpcCommand::AddPeer {
+            agent_id, token, ..
+        } => {
+            assert_eq!(
+                agent_id.unwrap().as_str(),
+                "ed25519.deadbeef01234567deadbeef01234567"
+            );
+            assert!(token.is_none());
         }
         _ => panic!("expected AddPeer"),
     }
@@ -302,8 +307,8 @@ async fn ipc_client_disconnect_isolation() {
 
     // Client B should still receive broadcasts.
     let envelope = Envelope::new(
-        "ed25519.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
-        "ed25519.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string(),
+        AgentId::parse("ed25519.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").unwrap(),
+        AgentId::parse("ed25519.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb").unwrap(),
         MessageKind::Message,
         json!({"topic": "meta.status", "data": {}}),
     );
@@ -329,8 +334,8 @@ async fn ipc_broadcast_to_all_clients() {
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     let envelope = Envelope::new(
-        "ed25519.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
-        "ed25519.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string(),
+        AgentId::parse("ed25519.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").unwrap(),
+        AgentId::parse("ed25519.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb").unwrap(),
         MessageKind::Request,
         json!({}),
     );
@@ -346,7 +351,7 @@ async fn ipc_broadcast_to_all_clients() {
     assert!(line_b.contains("\"event\":\"inbound\""));
 }
 
-/// IPC cleanup removes socket file.
+/// IPC shutdown closes clients and removes the socket file.
 #[tokio::test]
 async fn ipc_cleanup_removes_socket() {
     let dir = tempdir().unwrap();
@@ -355,7 +360,13 @@ async fn ipc_cleanup_removes_socket() {
         .await
         .unwrap();
 
-    assert!(socket_path.exists());
-    server.cleanup_socket().unwrap();
+    let mut client = UnixStream::connect(&socket_path).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    assert_eq!(server.client_count().await, 1);
+
+    server.shutdown().await.unwrap();
+
     assert!(!socket_path.exists());
+    let mut byte = [0_u8; 1];
+    assert_eq!(client.read(&mut byte).await.unwrap(), 0);
 }

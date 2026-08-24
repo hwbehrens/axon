@@ -1,7 +1,6 @@
 use super::*;
 use crate::config::AxonPaths;
 use crate::identity::Identity;
-use crate::peer_table::PeerTable;
 use rustls::SignatureScheme;
 use rustls::client::danger::ServerCertVerifier;
 use rustls::server::danger::ClientCertVerifier;
@@ -32,7 +31,7 @@ fn cert_pubkey_extraction_matches_identity() {
 fn make_test_verifier() -> PeerCertVerifier {
     let (pair_request_tx, _) = broadcast::channel(8);
     PeerCertVerifier {
-        expected_pubkeys: PeerTable::new().pubkey_map(),
+        expected_pubkeys: pin_map([]),
         pair_request_tx,
         pair_request_seen: Arc::new(Mutex::new(HashMap::new())),
     }
@@ -41,11 +40,15 @@ fn make_test_verifier() -> PeerCertVerifier {
 fn make_test_client_verifier() -> PeerClientCertVerifier {
     let (pair_request_tx, _) = broadcast::channel(8);
     PeerClientCertVerifier {
-        expected_pubkeys: PeerTable::new().pubkey_map(),
+        expected_pubkeys: pin_map([]),
         roots: vec![],
         pair_request_tx,
         pair_request_seen: Arc::new(Mutex::new(HashMap::new())),
     }
+}
+
+fn pin_map<const N: usize>(entries: [(String, String); N]) -> PinningSnapshotHandle {
+    Arc::new(StdRwLock::new(Arc::new(entries.into_iter().collect())))
 }
 
 #[test]
@@ -113,8 +116,8 @@ fn server_verifier_rejects_unknown_peer() {
     );
     assert!(result.is_err(), "unknown peer must be rejected");
     assert!(
-        format!("{}", result.unwrap_err()).contains("no public key on record"),
-        "error should mention missing discovery data"
+        format!("{}", result.unwrap_err()).contains("no enrolled public key"),
+        "error should mention missing enrollment"
     );
 }
 
@@ -126,11 +129,10 @@ fn server_verifier_accepts_known_peer() {
     let identity = Identity::load_or_generate(&paths).expect("identity");
     let cert = identity.make_quic_certificate().expect("cert");
 
-    let pubkey_map = Arc::new(StdRwLock::new(HashMap::new()));
-    pubkey_map.write().unwrap().insert(
+    let pubkey_map = pin_map([(
         identity.agent_id().to_string(),
         identity.public_key_base64().to_string(),
-    );
+    )]);
 
     let verifier = PeerCertVerifier {
         expected_pubkeys: pubkey_map,
@@ -163,11 +165,10 @@ fn server_verifier_accepts_uppercase_expected_agent_id() {
     let cert = identity.make_quic_certificate().expect("cert");
 
     let uppercase_id = identity.agent_id().to_ascii_uppercase();
-    let pubkey_map = Arc::new(StdRwLock::new(HashMap::new()));
-    pubkey_map.write().unwrap().insert(
-        uppercase_id.clone(),
+    let pubkey_map = pin_map([(
+        identity.agent_id().to_string(),
         identity.public_key_base64().to_string(),
-    );
+    )]);
 
     let verifier = PeerCertVerifier {
         expected_pubkeys: pubkey_map,
@@ -198,12 +199,7 @@ fn server_verifier_rejects_pubkey_mismatch() {
     let identity = Identity::load_or_generate(&paths).expect("identity");
     let cert = identity.make_quic_certificate().expect("cert");
 
-    let pubkey_map = Arc::new(StdRwLock::new(HashMap::new()));
-    // Register the agent_id but with a wrong pubkey
-    pubkey_map
-        .write()
-        .unwrap()
-        .insert(identity.agent_id().to_string(), STANDARD.encode([99u8; 32]));
+    let pubkey_map = pin_map([(identity.agent_id().to_string(), STANDARD.encode([99u8; 32]))]);
 
     let verifier = PeerCertVerifier {
         expected_pubkeys: pubkey_map,
@@ -243,19 +239,17 @@ fn client_verifier_rejects_unknown_peer() {
 }
 
 #[test]
-fn client_verifier_accepts_uppercase_peer_table_key() {
+fn client_verifier_accepts_uppercase_pinning_snapshot_key() {
     ensure_crypto_provider();
     let dir = tempdir().expect("tempdir");
     let paths = AxonPaths::from_root(PathBuf::from(dir.path()));
     let identity = Identity::load_or_generate(&paths).expect("identity");
     let cert = identity.make_quic_certificate().expect("cert");
 
-    let uppercase_id = identity.agent_id().to_ascii_uppercase();
-    let pubkey_map = Arc::new(StdRwLock::new(HashMap::new()));
-    pubkey_map
-        .write()
-        .unwrap()
-        .insert(uppercase_id, identity.public_key_base64().to_string());
+    let pubkey_map = pin_map([(
+        identity.agent_id().to_string(),
+        identity.public_key_base64().to_string(),
+    )]);
 
     let verifier = PeerClientCertVerifier {
         expected_pubkeys: pubkey_map,
@@ -295,7 +289,7 @@ fn unknown_peer_pair_request_is_rate_limited() {
 
     let (pair_request_tx, mut pair_request_rx) = broadcast::channel(8);
     let verifier = PeerCertVerifier {
-        expected_pubkeys: PeerTable::new().pubkey_map(),
+        expected_pubkeys: pin_map([]),
         pair_request_tx,
         pair_request_seen: Arc::new(Mutex::new(HashMap::new())),
     };
@@ -333,7 +327,7 @@ async fn unknown_peer_pair_request_includes_remote_addr_from_handshake_context()
 
     let (pair_request_tx, mut pair_request_rx) = broadcast::channel(8);
     let verifier = PeerCertVerifier {
-        expected_pubkeys: PeerTable::new().pubkey_map(),
+        expected_pubkeys: pin_map([]),
         pair_request_tx,
         pair_request_seen: Arc::new(Mutex::new(HashMap::new())),
     };

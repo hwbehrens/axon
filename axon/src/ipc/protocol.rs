@@ -2,17 +2,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
-use crate::message::{Envelope, MessageKind};
+use crate::message::{AgentId, Envelope, MessageKind};
 
-/// Maximum length of a single IPC command line (64 KB).
 pub const MAX_IPC_LINE_LENGTH: usize = 64 * 1024;
 
-// ---------------------------------------------------------------------------
-// IPC protocol types
-// ---------------------------------------------------------------------------
-
-/// Client-to-daemon IPC command, deserialized from line-delimited JSON.
-/// Tagged by the `cmd` field (e.g., `{"cmd": "send", ...}`).
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum IpcSendKind {
@@ -23,8 +16,24 @@ pub enum IpcSendKind {
 impl IpcSendKind {
     pub fn as_message_kind(self) -> MessageKind {
         match self {
-            IpcSendKind::Request => MessageKind::Request,
-            IpcSendKind::Message => MessageKind::Message,
+            Self::Request => MessageKind::Request,
+            Self::Message => MessageKind::Message,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum IpcReplyKind {
+    Response,
+    Error,
+}
+
+impl IpcReplyKind {
+    pub fn as_message_kind(self) -> MessageKind {
+        match self {
+            Self::Response => MessageKind::Response,
+            Self::Error => MessageKind::Error,
         }
     }
 }
@@ -33,7 +42,7 @@ impl IpcSendKind {
 #[serde(tag = "cmd", rename_all = "snake_case")]
 pub enum IpcCommand {
     Send {
-        to: String,
+        to: AgentId,
         kind: IpcSendKind,
         payload: Value,
         #[serde(default)]
@@ -56,8 +65,26 @@ pub enum IpcCommand {
         req_id: Option<String>,
     },
     AddPeer {
-        pubkey: String,
-        addr: String,
+        #[serde(default)]
+        agent_id: Option<AgentId>,
+        #[serde(default)]
+        token: Option<String>,
+        #[serde(default)]
+        req_id: Option<String>,
+    },
+    RemovePeer {
+        agent_id: AgentId,
+        #[serde(default)]
+        req_id: Option<String>,
+    },
+    Serve {
+        #[serde(default)]
+        req_id: Option<String>,
+    },
+    Reply {
+        request_id: Uuid,
+        kind: IpcReplyKind,
+        payload: Value,
         #[serde(default)]
         req_id: Option<String>,
     },
@@ -66,44 +93,50 @@ pub enum IpcCommand {
 impl IpcCommand {
     pub fn req_id(&self) -> Option<&str> {
         match self {
-            IpcCommand::Send { req_id, .. }
-            | IpcCommand::Peers { req_id, .. }
-            | IpcCommand::Status { req_id, .. }
-            | IpcCommand::Whoami { req_id, .. }
-            | IpcCommand::AddPeer { req_id, .. } => req_id.as_deref(),
+            Self::Send { req_id, .. }
+            | Self::Peers { req_id }
+            | Self::Status { req_id }
+            | Self::Whoami { req_id }
+            | Self::AddPeer { req_id, .. }
+            | Self::RemovePeer { req_id, .. }
+            | Self::Serve { req_id }
+            | Self::Reply { req_id, .. } => req_id.as_deref(),
         }
     }
 
     pub fn cmd_name(&self) -> &'static str {
         match self {
-            IpcCommand::Send { .. } => "send",
-            IpcCommand::Peers { .. } => "peers",
-            IpcCommand::Status { .. } => "status",
-            IpcCommand::Whoami { .. } => "whoami",
-            IpcCommand::AddPeer { .. } => "add_peer",
+            Self::Send { .. } => "send",
+            Self::Peers { .. } => "peers",
+            Self::Status { .. } => "status",
+            Self::Whoami { .. } => "whoami",
+            Self::AddPeer { .. } => "add_peer",
+            Self::RemovePeer { .. } => "remove_peer",
+            Self::Serve { .. } => "serve",
+            Self::Reply { .. } => "reply",
         }
     }
 }
 
-/// A parsed IPC command paired with the originating client's connection ID.
 #[derive(Debug, Clone)]
 pub struct CommandEvent {
     pub client_id: u64,
     pub command: IpcCommand,
 }
 
-/// Summary of a connected or known peer, returned by the `peers` command.
 #[derive(Debug, Clone, Serialize)]
 pub struct PeerSummary {
     pub agent_id: String,
-    pub addr: String,
-    pub status: String,
+    pub public_key: String,
+    pub trust: &'static str,
+    pub locators: Vec<String>,
+    pub status: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rtt_ms: Option<f64>,
-    pub source: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
 }
 
-/// Daemon identity information returned by the `whoami` command.
 #[derive(Debug, Clone, Serialize)]
 pub struct WhoamiInfo {
     pub agent_id: String,
@@ -114,60 +147,42 @@ pub struct WhoamiInfo {
     pub uptime_secs: u64,
 }
 
-// ---------------------------------------------------------------------------
-// Error codes
-// ---------------------------------------------------------------------------
-
-/// IPC error codes returned in error responses.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum IpcErrorCode {
     InvalidCommand,
     CommandTooLarge,
     PeerNotFound,
+    PeerNotObserved,
+    PeerConflict,
     SelfSend,
     PeerUnreachable,
     Timeout,
+    HandlerBusy,
+    NotHandler,
+    RequestNotFound,
     InternalError,
 }
 
-impl std::fmt::Display for IpcErrorCode {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            IpcErrorCode::InvalidCommand => write!(f, "invalid_command"),
-            IpcErrorCode::CommandTooLarge => write!(f, "command_too_large"),
-            IpcErrorCode::PeerNotFound => write!(f, "peer_not_found"),
-            IpcErrorCode::SelfSend => write!(f, "self_send"),
-            IpcErrorCode::PeerUnreachable => write!(f, "peer_unreachable"),
-            IpcErrorCode::Timeout => write!(f, "timeout"),
-            IpcErrorCode::InternalError => write!(f, "internal_error"),
-        }
-    }
-}
-
 impl IpcErrorCode {
-    /// Human-readable explanation of the error code.
-    pub fn message(&self) -> &'static str {
+    pub fn message(self) -> &'static str {
         match self {
-            IpcErrorCode::InvalidCommand => {
-                "malformed command, unknown cmd, or invalid field value"
-            }
-            IpcErrorCode::CommandTooLarge => "IPC command exceeds 64KB limit",
-            IpcErrorCode::PeerNotFound => "target agent_id not in peer table",
-            IpcErrorCode::SelfSend => "cannot send messages to self",
-            IpcErrorCode::PeerUnreachable => "peer known but connection failed",
-            IpcErrorCode::Timeout => "request timed out waiting for peer response",
-            IpcErrorCode::InternalError => "unexpected daemon error",
+            Self::InvalidCommand => "malformed command or invalid field combination",
+            Self::CommandTooLarge => "IPC command exceeds 64KB",
+            Self::PeerNotFound => "target is not an enrolled peer",
+            Self::PeerNotObserved => "candidate is not currently observed",
+            Self::PeerConflict => "Agent ID conflicts with an enrolled public key",
+            Self::SelfSend => "cannot enroll or send to the local Agent ID",
+            Self::PeerUnreachable => "peer is enrolled but unreachable",
+            Self::Timeout => "request timed out waiting for a response",
+            Self::HandlerBusy => "another IPC connection owns the request-handler lease",
+            Self::NotHandler => "this IPC connection does not own the request-handler lease",
+            Self::RequestNotFound => "request is unknown, expired, or already completed",
+            Self::InternalError => "unexpected daemon or persistence failure",
         }
     }
 }
 
-// ---------------------------------------------------------------------------
-// Daemon replies
-// ---------------------------------------------------------------------------
-
-/// Daemon-to-client IPC response, serialized as line-delimited JSON.
-/// Uses `#[serde(untagged)]` — variants are distinguished by their field shapes.
 #[derive(Debug, Clone, Serialize)]
 #[serde(untagged)]
 pub enum DaemonReply {
@@ -194,25 +209,6 @@ pub enum DaemonReply {
         #[serde(skip_serializing_if = "Option::is_none")]
         req_id: Option<String>,
     },
-    Error {
-        ok: bool,
-        error: IpcErrorCode,
-        message: &'static str,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        req_id: Option<String>,
-    },
-    InboundEvent {
-        event: &'static str, // always "inbound"
-        from: String,
-        envelope: Envelope,
-    },
-    PairRequestEvent {
-        event: &'static str, // always "pair_request"
-        agent_id: String,
-        pubkey: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        addr: Option<String>,
-    },
     Whoami {
         ok: bool,
         #[serde(flatten)]
@@ -220,10 +216,47 @@ pub enum DaemonReply {
         #[serde(skip_serializing_if = "Option::is_none")]
         req_id: Option<String>,
     },
-    AddPeer {
+    PeerChanged {
         ok: bool,
         agent_id: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         req_id: Option<String>,
+    },
+    Serving {
+        ok: bool,
+        serving: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        req_id: Option<String>,
+    },
+    Replied {
+        ok: bool,
+        request_id: Uuid,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        req_id: Option<String>,
+    },
+    Error {
+        ok: bool,
+        error: IpcErrorCode,
+        message: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        req_id: Option<String>,
+    },
+    InboundEvent {
+        event: &'static str,
+        from: String,
+        envelope: Envelope,
+    },
+    RequestEvent {
+        event: &'static str,
+        request_id: Uuid,
+        from: String,
+        envelope: Envelope,
+    },
+    PeerCandidateEvent {
+        event: &'static str,
+        agent_id: String,
+        public_key: String,
+        locators: Vec<String>,
+        source: &'static str,
     },
 }

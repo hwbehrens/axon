@@ -77,8 +77,7 @@ pub async fn run(paths: &AxonPaths, args: &DoctorArgs) -> Result<DoctorReport> {
     checks::check_state_root(paths, args, &mut report)?;
     identity_check::check_identity(paths, args, &mut report)?;
     checks::check_daemon_artifacts(paths, args, &mut report)?;
-    checks::check_known_peers(paths, args, &mut report).await?;
-    checks::check_duplicate_peer_addrs(paths, args, &mut report).await?;
+    checks::check_peer_store(paths, args, &mut report).await?;
     checks::check_config(paths, args, &mut report).await?;
 
     Ok(report)

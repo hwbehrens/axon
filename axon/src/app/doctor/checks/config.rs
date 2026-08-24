@@ -22,7 +22,13 @@ pub(in crate::app::doctor) async fn check_config(
                 "config",
                 true,
                 false,
-                format!("config.yaml parsed ({} static peers)", cfg.peers.len()),
+                format!(
+                    "config.yaml parsed (name: {}, port: {}, advertise_addr: {})",
+                    cfg.name.as_deref().unwrap_or("unset"),
+                    cfg.port
+                        .map_or_else(|| "default".to_string(), |port| port.to_string()),
+                    cfg.advertise_addr.as_deref().unwrap_or("unset")
+                ),
             );
         }
         Err(err) => {
@@ -32,7 +38,7 @@ pub(in crate::app::doctor) async fn check_config(
                 report.add_fix(
                     "config_reset",
                     format!(
-                        "backed up corrupt config.yaml to {} and reset to defaults (peer enrollments lost — re-run `axon connect` to restore)",
+                        "backed up unsupported or corrupt config.yaml to {} and reset local settings to defaults",
                         backup.display()
                     ),
                 );

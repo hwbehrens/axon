@@ -24,17 +24,17 @@ Know where to make changes before you start editing:
 |--------|---------|
 | Envelope schema / message kinds | `axon/src/message/envelope.rs` |
 | TLS peer verification / cert parsing | `axon/src/transport/tls.rs` |
-| QUIC bind / connect / send | `axon/src/transport/quic_transport.rs` |
+| Connection ownership / QUIC bind / connect / send | `axon/src/transport/quic_transport.rs`, `axon/src/transport/connection_registry.rs` |
 | Connection loop / framing | `axon/src/transport/connection.rs` |
+| Reconnect attempt versioning / backoff | `axon/src/transport/reconnect.rs` |
 | IPC command/reply schema | `axon/src/ipc/protocol.rs` |
 | IPC server behavior / broadcast | `axon/src/ipc/server.rs` |
 | IPC peer credential auth | `axon/src/ipc/auth.rs` |
-| Peer table / pinning / PubkeyMap | `axon/src/peer_table/` |
-| mDNS / static discovery | `axon/src/discovery/` |
+| Peer identity / trust / locators / pin snapshots | `axon/src/peer_directory/` |
+| Inbound request correlation / handler lease | `axon/src/request_broker/` |
+| Bonjour/mDNS candidate discovery | `axon/src/discovery/` |
 | Daemon event loop / startup / shutdown | `axon/src/daemon/mod.rs` |
 | Command dispatch | `axon/src/daemon/command_handler.rs` |
-| Discovery event handling | `axon/src/daemon/peer_events.rs` |
-| Reconnection logic | `axon/src/daemon/reconnect.rs` |
 | CLI commands | `axon/src/app/run.rs` |
 | Doctor diagnostics | `axon/src/app/doctor/` |
 | CLI example output | `axon/src/app/examples.rs` |
@@ -47,10 +47,12 @@ For machine-readable task routing (subsystem → files → specs → tests), see
 
 Do not break these. They are load-bearing:
 
-- **Agent ID = SHA-256(pubkey)** — the `from` field must match the public key in the peer's TLS certificate. Reject on mismatch.
-- **Peer pinning** — unknown peers must not be accepted at TLS/transport; peers must be in the peer table before connection.
-- **Address uniqueness** — at most one non-static peer per network address; when a new identity appears at an existing address, the stale entry is evicted from the PeerTable. Discovered/cached peers are blocked from inserting when a static peer already occupies the address.
-- **PeerTable owns the pubkey map** — TLS verifiers read from PeerTable's shared PubkeyMap. No manual sync needed.
+- **Agent ID = SHA-256(pubkey)** — all Agent IDs are canonical validated values; authenticated envelope identity comes from the peer certificate, never wire claims.
+- **Intentional admission** — discovery creates candidates only. A key enters the TLS pin set only after explicit enrollment; revocation persists before the pin is removed and the connection is closed.
+- **PeerDirectory owns logical peer state** — it is the only mutable owner of identities, trust, configured locators, live observations, and derived immutable pin snapshots/views.
+- **ConnectionManager owns physical state** — one authoritative generation-checked slot per peer; deterministic cross-dial selection closes losers, and stale outcomes cannot clear a newer winner.
+- **Locator conflicts fail closed** — observations that assign one endpoint to multiple identities are quarantined. Trusted identities are never evicted because an address was reused.
+- **RequestBroker owns request correlation** — one IPC handler lease and exactly one terminal outcome per inbound request on its original QUIC stream.
 
 ## Verification
 
@@ -100,7 +102,7 @@ When adding a new binary-only module:
 
 #### Leaf submodules inside a directory may remain single files
 
-Files like `daemon/reconnect.rs` or `transport/tls.rs` are fine as single files inside their parent directory. If a leaf submodule grows and needs splitting, promote it to its own subdirectory (`tls/mod.rs` + children) without affecting sibling modules.
+Files like `transport/reconnect.rs` or `transport/tls.rs` are fine as single files inside their parent directory. If a leaf submodule grows and needs splitting, promote it to its own subdirectory (`tls/mod.rs` + children) without affecting sibling modules.
 
 #### Test placement
 
@@ -118,11 +120,11 @@ Tests live **inside their module's directory**, not at the `src/` root.
   #[path = "tests/mod.rs"]
   mod tests;
   ```
-  Example: `peer_table/tests/{mod.rs, basic.rs, eviction.rs, proptest.rs}`.
+  Example: `transport/quic_transport_tests/{mod.rs, basic.rs, requests.rs}`.
 #### Naming conventions
 
-- Module directories use **snake_case**: `peer_table/`, `peer_token/`.
-- Files inside a directory do **not** repeat the module name: use `tests/basic.rs`, not `tests/peer_table_basic.rs`.
+- Module directories use **snake_case**: `peer_directory/`, `peer_token/`.
+- Files inside a directory do **not** repeat the module name: use `tests/basic.rs`, not `tests/peer_directory_basic.rs`.
 - Test files for leaf submodules use the `<name>_tests.rs` suffix: `reconnect.rs` → `reconnect_tests.rs`.
 
 #### When to split a file
@@ -159,7 +161,7 @@ Every change must include tests. The test structure:
 ### Required review gates for user-visible changes
 
 - If you touch CLI parsing/output/routing in `axon/src/app/run.rs`, add or update at least one black-box CLI contract test in `axon/tests/cli_contract.rs`.
-- If you change persisted files or on-disk formats (`identity.key`, `identity.pub`, `known_peers.json`, `config.yaml` semantics), document reset/re-init guidance in the same PR (README/spec/release notes as appropriate).
+- If you change persisted files or on-disk formats (`identity.key`, `identity.pub`, `peers.json`, `config.yaml` semantics), document reset/re-init guidance in the same PR (README/spec/release notes as appropriate).
 - If you change behavior shown in CLI help, examples, or spec text, update all affected artifacts in the same PR (`--help`, `README.md`, `spec/`).
 - If you change CLI command inventory/help semantics, update docs-conformance coverage (`axon/tests/spec_compliance/cli_help.rs`) as needed.
 - If you change `doctor` behavior (CLI wiring or reported checks), update `axon/tests/doctor_contract.rs` to preserve black-box contract coverage.
@@ -199,7 +201,7 @@ Don't test third-party crate internals (`quinn`, `ed25519-dalek`, `mdns-sd`). Te
 
 ## Message Kinds
 
-Message kinds are fixed at the protocol level (`request`, `response`, `message`, `error`). Do not add new kinds without updating the spec. New application-level semantics should be expressed via message payload content, not new kinds.
+The four interpreted message kinds are fixed at the protocol level (`request`, `response`, `message`, `error`). Unknown wire strings must be retained losslessly for forward compatibility and answered with `unsupported_kind` on bidirectional streams. Do not add an interpreted kind without updating the spec.
 
 ## License
 

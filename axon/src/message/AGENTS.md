@@ -13,7 +13,8 @@ Spec compliance first — envelope schema must match `spec/WIRE_FORMAT.md` §6.
 
 ## Guardrails
 
-- 4 message kinds are fixed at the protocol level (`request`, `response`, `message`, `error`). Do not add new kinds without updating `spec/MESSAGE_TYPES.md`.
+- Four kinds have defined v1 semantics (`request`, `response`, `message`, `error`), but unknown kind strings must be retained exactly for forward compatibility.
+- `AgentId` values must be validated at construction; do not add unchecked string constructors.
 - Unknown JSON fields must be tolerated (forward compatibility).
 - `MAX_MESSAGE_SIZE` changes require README.md Configuration Reference update.
 

@@ -4,7 +4,7 @@ use super::*;
 // §10 Protocol Violation — Message Kind Classification
 // =========================================================================
 
-/// `spec/WIRE_FORMAT.md` unknown-kind compatibility: deserialization uses `#[serde(other)]`.
+/// `spec/WIRE_FORMAT.md` unknown-kind compatibility retains the exact string.
 #[test]
 fn unknown_kind_from_wire() {
     let raw = r#"{
@@ -13,30 +13,28 @@ fn unknown_kind_from_wire() {
         "payload": {}
     }"#;
     let env: Envelope = serde_json::from_str(raw).unwrap();
-    assert_eq!(env.kind, MessageKind::Unknown);
+    assert_eq!(env.kind, MessageKind::unknown("future_kind_v99"));
 }
 
-/// `spec/WIRE_FORMAT.md` stream mapping: request kinds on uni stream should be dropped.
+/// `spec/WIRE_FORMAT.md` stream mapping: request/response kinds are invalid on uni streams.
 #[test]
-fn request_kinds_classified_for_uni_drop() {
-    assert!(
-        MessageKind::Request.expects_response(),
-        "Request should be classified as expects_response, would be dropped on uni"
-    );
+fn invalid_uni_kinds_are_classified_for_drop() {
+    assert!(!MessageKind::Request.is_allowed_on_unidirectional());
+    assert!(!MessageKind::Response.is_allowed_on_unidirectional());
 }
 
-/// `spec/WIRE_FORMAT.md` stream mapping: fire-and-forget kinds should not expect a response.
+/// `spec/WIRE_FORMAT.md` stream mapping: only message, unsolicited error, and unknown future kinds are admitted on uni streams.
 #[test]
-fn fire_and_forget_kinds_classified() {
-    let faf_kinds = [
+fn unidirectional_kinds_classified() {
+    let uni_kinds = [
         MessageKind::Message,
-        MessageKind::Response,
         MessageKind::Error,
+        MessageKind::unknown("future_kind"),
     ];
-    for kind in &faf_kinds {
+    for kind in &uni_kinds {
         assert!(
-            !kind.expects_response(),
-            "{kind} should NOT expect a response (fire-and-forget)"
+            kind.is_allowed_on_unidirectional(),
+            "{kind} should be admitted on a unidirectional stream"
         );
     }
 }

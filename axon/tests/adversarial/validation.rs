@@ -4,8 +4,7 @@ use crate::*;
 // §4 Envelope validation edge cases
 // =========================================================================
 
-/// Envelope::validate() rejects nil UUIDs. Agent-ID format, version, and
-/// timestamp checks were removed in the architecture simplification.
+/// Envelope::validate() rejects nil UUIDs; Agent IDs are validated at construction.
 #[test]
 fn envelope_validation_edge_cases() {
     // Valid envelope — validate() should pass.
@@ -14,8 +13,10 @@ fn envelope_validation_edge_cases() {
         kind: MessageKind::Request,
         ref_id: None,
         payload: Envelope::raw_json(&json!({})),
-        from: Some("ed25519.A1B2C3D4E5F6A7B8A1B2C3D4E5F6A7B8".into()),
-        to: Some(agent_b().into()),
+        from: Some(
+            axon::message::AgentId::parse("ed25519.A1B2C3D4E5F6A7B8A1B2C3D4E5F6A7B8").unwrap(),
+        ),
+        to: Some(agent_b()),
     };
     assert!(env.validate().is_ok(), "valid envelope should pass");
 
@@ -25,8 +26,8 @@ fn envelope_validation_edge_cases() {
         kind: MessageKind::Request,
         ref_id: None,
         payload: Envelope::raw_json(&json!({})),
-        from: Some(agent_a().into()),
-        to: Some(agent_b().into()),
+        from: Some(agent_a()),
+        to: Some(agent_b()),
     };
     assert!(env.validate().is_err(), "nil UUID should fail validation");
 
@@ -140,54 +141,42 @@ fn wire_format_boundary_conditions() {
 }
 
 // =========================================================================
-// §8 Known peers corruption resilience
+// §8 Peer-store corruption resilience
 // =========================================================================
 
-/// load_known_peers handles corrupt, truncated, and wrong-schema files
+/// PeerStore handles corrupt, truncated, and wrong-schema files
 /// without panicking.
 #[tokio::test]
-async fn known_peers_corruption_resilience() {
+async fn peer_store_corruption_resilience() {
+    use axon::peer_directory::PeerStore;
+
     let dir = tempdir().unwrap();
-    let path = dir.path().join("known_peers.json");
+    let path = dir.path().join("peers.json");
+    let store = PeerStore::new(path.clone());
 
     // Random bytes.
     std::fs::write(&path, b"\x80\x81\x82\xff random garbage").unwrap();
     assert!(
-        load_known_peers(&path).await.is_err(),
+        store.validate().await.is_err(),
         "random bytes should return Err"
     );
 
     // Truncated JSON.
-    std::fs::write(&path, b"[{\"agent_id\":\"aaa").unwrap();
+    std::fs::write(&path, b"{\"version\":1,\"peers\":[{").unwrap();
     assert!(
-        load_known_peers(&path).await.is_err(),
+        store.validate().await.is_err(),
         "truncated JSON should return Err"
     );
 
-    // Wrong schema — array of strings instead of KnownPeer objects.
+    // Wrong schema — the canonical store is a versioned object.
     std::fs::write(&path, b"[\"not\",\"a\",\"peer\"]").unwrap();
     assert!(
-        load_known_peers(&path).await.is_err(),
+        store.validate().await.is_err(),
         "wrong schema should return Err"
     );
 
-    // Empty array — valid, should load as empty vec.
-    std::fs::write(&path, b"[]").unwrap();
-    let peers = load_known_peers(&path).await.unwrap();
-    assert!(peers.is_empty(), "empty array should load as empty vec");
-
-    // Valid data.
-    let valid = vec![KnownPeer {
-        agent_id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
-        addr: "10.0.0.1:7100".parse().unwrap(),
-        pubkey: "Zm9v".to_string(),
-        last_seen_unix_ms: 1000,
-        source: axon::config::KnownPeerSource::Discovered,
-    }];
-    save_known_peers(&path, &valid).await.unwrap();
-    let loaded = load_known_peers(&path).await.unwrap();
-    assert_eq!(loaded.len(), 1, "valid data should load correctly");
-    assert_eq!(loaded[0].agent_id, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    std::fs::write(&path, br#"{"version":1,"peers":[]}"#).unwrap();
+    assert_eq!(store.validate().await.unwrap(), 0);
 }
 
 // =========================================================================
@@ -236,14 +225,10 @@ async fn config_corruption_resilience() {
         7100,
         "missing config should use default port"
     );
-    assert!(
-        config.peers.is_empty(),
-        "missing config should have no peers"
-    );
 
     // Valid minimal config.
     std::fs::write(&path, b"port: 9000").unwrap();
     let config = Config::load(&path).await.unwrap();
     assert_eq!(config.effective_port(None), 9000);
-    assert!(config.peers.is_empty());
+    assert!(config.name.is_none());
 }

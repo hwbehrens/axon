@@ -19,6 +19,9 @@ Spec compliance (`spec/IPC.md`) > security > usability.
 - Command semantics must match `spec/IPC.md` §3.
 - Bounded queues must overflow-disconnect lagging clients, not silently drop messages.
 - Validate all inbound data before forwarding to IPC subscribers.
+- `add_peer`/`remove_peer` are the only runtime trust mutation boundary.
+- `serve` leases the single request-handler role; `reply` completes only requests owned by that client.
+- The server owns and joins its accept/client tasks during bounded shutdown.
 - `MAX_IPC_LINE_LENGTH` changes require README.md update.
 
 ## Test targets

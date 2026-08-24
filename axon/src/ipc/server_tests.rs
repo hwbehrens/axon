@@ -4,8 +4,9 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 
 use serde_json::json;
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::{Mutex, broadcast, mpsc};
 use tokio_util::sync::CancellationToken;
+use tokio_util::task::TaskTracker;
 
 use super::*;
 use crate::message::MessageKind;
@@ -31,6 +32,9 @@ fn test_server_with_clients(clients: HashMap<u64, mpsc::Sender<Arc<str>>>) -> Ip
         owner_uid: 0,
         max_client_queue: 8,
         config: Arc::new(IpcServerConfig::default()),
+        disconnected_tx: broadcast::channel(8).0,
+        cancel: CancellationToken::new(),
+        tasks: TaskTracker::new(),
     }
 }
 
@@ -49,8 +53,8 @@ async fn broadcast_inbound_disconnects_full_client_queue() {
     let server = test_server_with_clients(clients);
 
     let envelope = Envelope::new(
-        "ed25519.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        "ed25519.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        crate::message::AgentId::parse("ed25519.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").unwrap(),
+        crate::message::AgentId::parse("ed25519.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb").unwrap(),
         MessageKind::Message,
         json!({"data": "x"}),
     );
@@ -96,6 +100,9 @@ async fn close_client_cancels_client_handle() {
         owner_uid: 0,
         max_client_queue: 8,
         config: Arc::new(IpcServerConfig::default()),
+        disconnected_tx: broadcast::channel(8).0,
+        cancel: CancellationToken::new(),
+        tasks: TaskTracker::new(),
     };
 
     server.close_client(7).await;
@@ -108,7 +115,7 @@ async fn close_client_cancels_client_handle() {
 }
 
 #[tokio::test]
-async fn broadcast_pair_request_reaches_connected_clients() {
+async fn broadcast_peer_candidate_reaches_connected_clients() {
     let (tx_a, mut rx_a) = mpsc::channel::<Arc<str>>(8);
     let (tx_b, mut rx_b) = mpsc::channel::<Arc<str>>(8);
 
@@ -118,10 +125,11 @@ async fn broadcast_pair_request_reaches_connected_clients() {
     let server = test_server_with_clients(clients);
 
     server
-        .broadcast_pair_request(
+        .broadcast_peer_candidate(
             "ed25519.cccccccccccccccccccccccccccccccc",
             "cHVia2V5",
-            Some("127.0.0.1:7100"),
+            vec!["127.0.0.1:7100".to_string()],
+            "handshake",
         )
         .await
         .expect("pair request broadcast");
@@ -129,8 +137,8 @@ async fn broadcast_pair_request_reaches_connected_clients() {
     let line_a = rx_a.recv().await.expect("client A event");
     let line_b = rx_b.recv().await.expect("client B event");
 
-    assert!(line_a.contains("\"event\":\"pair_request\""));
-    assert!(line_a.contains("\"pubkey\":\"cHVia2V5\""));
-    assert!(line_b.contains("\"event\":\"pair_request\""));
+    assert!(line_a.contains("\"event\":\"peer_candidate\""));
+    assert!(line_a.contains("\"public_key\":\"cHVia2V5\""));
+    assert!(line_b.contains("\"event\":\"peer_candidate\""));
     assert!(line_b.contains("\"agent_id\":\"ed25519.cccccccccccccccccccccccccccccccc\""));
 }

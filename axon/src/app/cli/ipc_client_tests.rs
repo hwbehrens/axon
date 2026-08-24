@@ -42,7 +42,8 @@ async fn send_ipc_rejects_oversized_command() {
         root: PathBuf::from("/tmp/axon-test-nonexistent"),
         socket: PathBuf::from("/tmp/axon-test-nonexistent/axon.sock"),
         config: PathBuf::from("/tmp/axon-test-nonexistent/config.yaml"),
-        known_peers: PathBuf::from("/tmp/axon-test-nonexistent/known_peers.json"),
+        peers: PathBuf::from("/tmp/axon-test-nonexistent/peers.json"),
+        legacy_known_peers: PathBuf::from("/tmp/axon-test-nonexistent/known_peers.json"),
         identity_key: PathBuf::from("/tmp/axon-test-nonexistent/identity.key"),
         identity_pub: PathBuf::from("/tmp/axon-test-nonexistent/identity.pub"),
     };

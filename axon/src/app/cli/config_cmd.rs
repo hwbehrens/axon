@@ -1,9 +1,8 @@
 use std::process::ExitCode;
 
 use anyhow::{Context, Result, anyhow};
-use axon::config::{
-    AxonPaths, PeerAddr, PersistedConfig, load_persisted_config, save_persisted_config,
-};
+use axon::config::{AxonPaths, PersistedConfig, load_persisted_config, save_persisted_config};
+use axon::peer_directory::PeerLocator;
 use clap::{ArgGroup, Args, ValueEnum};
 use serde_json::{Map, Value, json};
 use tokio::process::Command;
@@ -172,7 +171,7 @@ fn apply_set(config: &mut PersistedConfig, key: ConfigKey, value: &str) -> Resul
             config.port = Some(port);
         }
         ConfigKey::AdvertiseAddr => {
-            let parsed = PeerAddr::parse(value)
+            let parsed = PeerLocator::parse(value)
                 .with_context(|| format!("invalid advertise_addr '{value}'"))?;
             config.advertise_addr = Some(parsed.to_string());
         }

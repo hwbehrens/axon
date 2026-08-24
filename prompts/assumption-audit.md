@@ -56,8 +56,9 @@ If one question's answer reveals coupling with other questions, call that out ex
 Verify the plan against load-bearing invariants:
 - Agent ID = SHA-256(pubkey) — does the plan preserve this?
 - Peer pinning — does the plan maintain transport-layer rejection of unknown peers?
-- Address uniqueness — does the plan preserve at-most-one-non-static-peer-per-address?
-- PeerTable owns the pubkey map — does the plan respect this ownership boundary?
+- Locator conflict quarantine — does the plan avoid silently assigning one observed endpoint to conflicting identities?
+- PeerDirectory owns logical peer truth and derives pinning snapshots — does the plan respect this ownership boundary?
+- ConnectionManager owns physical connections and versioned attempts — can stale outcomes mutate newer state?
 
 ### Step 4: Summarize and confirm
 

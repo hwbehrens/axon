@@ -1,0 +1,142 @@
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use tokio::sync::RwLock;
+
+use crate::message::AgentId;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Direction {
+    Inbound,
+    Outbound,
+}
+
+#[derive(Clone)]
+struct ConnectionSlot {
+    generation: u64,
+    direction: Direction,
+    connection: quinn::Connection,
+}
+
+#[derive(Default)]
+struct RegistryState {
+    slots: HashMap<AgentId, ConnectionSlot>,
+    generations: HashMap<AgentId, u64>,
+}
+
+#[derive(Clone)]
+pub(crate) struct ConnectionRegistry {
+    local_agent_id: AgentId,
+    state: Arc<RwLock<RegistryState>>,
+}
+
+pub(crate) enum Admission {
+    Accepted { generation: u64 },
+    Existing(quinn::Connection),
+}
+
+impl ConnectionRegistry {
+    pub(crate) fn new(local_agent_id: AgentId) -> Self {
+        Self {
+            local_agent_id,
+            state: Arc::new(RwLock::new(RegistryState::default())),
+        }
+    }
+
+    pub(crate) async fn current(&self, peer: &AgentId) -> Option<quinn::Connection> {
+        let mut state = self.state.write().await;
+        if state
+            .slots
+            .get(peer)
+            .is_some_and(|slot| slot.connection.close_reason().is_some())
+        {
+            state.slots.remove(peer);
+            *state.generations.entry(peer.clone()).or_default() += 1;
+        }
+        state.slots.get(peer).map(|slot| slot.connection.clone())
+    }
+
+    pub(crate) async fn admit(
+        &self,
+        peer: AgentId,
+        connection: quinn::Connection,
+        direction: Direction,
+    ) -> Admission {
+        let mut state = self.state.write().await;
+        if state
+            .slots
+            .get(&peer)
+            .is_some_and(|slot| slot.connection.close_reason().is_some())
+        {
+            state.slots.remove(&peer);
+            *state.generations.entry(peer.clone()).or_default() += 1;
+        }
+        let generation = *state.generations.entry(peer.clone()).or_default();
+        if let Some(incumbent) = state.slots.get(&peer) {
+            if incumbent.connection.stable_id() == connection.stable_id() {
+                return Admission::Existing(incumbent.connection.clone());
+            }
+            let preferred = if self.local_agent_id < peer {
+                Direction::Outbound
+            } else {
+                Direction::Inbound
+            };
+            if incumbent.direction == preferred || direction != preferred {
+                connection.close(0u32.into(), b"duplicate connection");
+                return Admission::Existing(incumbent.connection.clone());
+            }
+        }
+
+        let replaced = state.slots.insert(
+            peer,
+            ConnectionSlot {
+                generation,
+                direction,
+                connection: connection.clone(),
+            },
+        );
+        drop(state);
+        if let Some(replaced) = replaced {
+            replaced
+                .connection
+                .close(0u32.into(), b"preferred connection selected");
+        }
+        Admission::Accepted { generation }
+    }
+
+    pub(crate) async fn release_if_current(
+        &self,
+        peer: &AgentId,
+        generation: u64,
+        stable_id: usize,
+    ) {
+        let mut state = self.state.write().await;
+        let is_current = state.slots.get(peer).is_some_and(|slot| {
+            slot.generation == generation && slot.connection.stable_id() == stable_id
+        });
+        if is_current {
+            state.slots.remove(peer);
+            *state.generations.entry(peer.clone()).or_default() += 1;
+        }
+    }
+
+    pub(crate) async fn close_peer(&self, peer: &AgentId, reason: &'static [u8]) {
+        let mut state = self.state.write().await;
+        if let Some(slot) = state.slots.remove(peer) {
+            slot.connection.close(0u32.into(), reason);
+        }
+        *state.generations.entry(peer.clone()).or_default() += 1;
+    }
+
+    pub(crate) async fn close_all(&self) {
+        let mut state = self.state.write().await;
+        for slot in state.slots.values() {
+            slot.connection.close(0u32.into(), b"shutdown");
+        }
+        state.slots.clear();
+    }
+
+    pub(crate) async fn count(&self) -> usize {
+        self.state.read().await.slots.len()
+    }
+}

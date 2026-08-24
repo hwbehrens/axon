@@ -28,7 +28,7 @@ fn ipc_whoami_command_and_response_shape() {
 
 #[test]
 fn ipc_add_peer_response_shape() {
-    let reply = axon::ipc::DaemonReply::AddPeer {
+    let reply = axon::ipc::DaemonReply::PeerChanged {
         ok: true,
         agent_id: "ed25519.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
         req_id: None,

@@ -1,306 +1,91 @@
-use super::*;
 use tempfile::tempdir;
 
+use super::*;
+
 #[tokio::test]
-async fn config_defaults_when_missing() {
-    let dir = tempdir().expect("temp dir");
-    let cfg = Config::load(&dir.path().join("missing.yaml"))
+async fn missing_config_uses_local_defaults() {
+    let root = tempdir().expect("tempdir");
+
+    let config = Config::load(&root.path().join("config.yaml"))
         .await
         .expect("load missing config");
-    assert_eq!(cfg.effective_port(None), 7100);
-    assert!(cfg.peers.is_empty());
-    assert!(cfg.advertise_addr.is_none());
+
+    assert_eq!(config, Config::default());
+    assert_eq!(config.effective_port(None), 7100);
 }
 
 #[tokio::test]
-async fn config_parses_static_peers() {
-    let dir = tempdir().expect("temp dir");
-    let path = dir.path().join("config.yaml");
-    std::fs::write(
+async fn config_contains_only_local_daemon_settings() {
+    let root = tempdir().expect("tempdir");
+    let path = root.path().join("config.yaml");
+    tokio::fs::write(
         &path,
-        r#"
-port: 8111
-advertise_addr: "alice.tailnet:7100"
-peers:
-  - agent_id: "ed25519.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-    addr: "127.0.0.1:7100"
-    pubkey: "Zm9v"
-            "#,
-    )
-    .expect("write config");
-
-    let cfg = Config::load(&path).await.expect("load config");
-    assert_eq!(cfg.effective_port(None), 8111);
-    assert_eq!(cfg.advertise_addr.as_deref(), Some("alice.tailnet:7100"));
-    assert_eq!(cfg.peers.len(), 1);
-    assert_eq!(cfg.peers[0].addr.to_string(), "127.0.0.1:7100");
-}
-
-#[tokio::test]
-async fn config_parses_hostname_peer_addr() {
-    let dir = tempdir().expect("temp dir");
-    let path = dir.path().join("config.yaml");
-    std::fs::write(
-        &path,
-        r#"
-peers:
-  - agent_id: "ed25519.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-    addr: "localhost:7100"
-    pubkey: "Zm9v"
-            "#,
-    )
-    .expect("write config");
-
-    let cfg = Config::load(&path).await.expect("load config");
-    assert_eq!(cfg.peers.len(), 1);
-    assert_eq!(cfg.peers[0].addr.port(), 7100);
-    assert!(cfg.peers[0].addr.ip().is_loopback());
-}
-
-#[tokio::test]
-async fn config_skips_unresolvable_or_invalid_peer_addr() {
-    let dir = tempdir().expect("temp dir");
-    let path = dir.path().join("config.yaml");
-    std::fs::write(
-        &path,
-        r#"
-peers:
-  - agent_id: "ed25519.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-    addr: "127.0.0.1:7100"
-    pubkey: "Zm9v"
-  - agent_id: "ed25519.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-    addr: "peer-does-not-exist.invalid:7100"
-    pubkey: "YmFy"
-            "#,
-    )
-    .expect("write config");
-
-    let cfg = Config::load(&path).await.expect("load config");
-    assert_eq!(cfg.peers.len(), 1);
-    assert_eq!(
-        cfg.peers[0].agent_id.as_str(),
-        "ed25519.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-    );
-}
-
-#[test]
-fn cli_override_takes_precedence() {
-    let cfg = Config {
-        name: None,
-        port: Some(8000),
-        advertise_addr: None,
-        peers: Vec::new(),
-        persisted_peers: Vec::new(),
-    };
-    assert_eq!(cfg.effective_port(Some(9999)), 9999);
-    assert_eq!(cfg.effective_port(None), 8000);
-}
-
-#[tokio::test]
-async fn invalid_yaml_returns_error() {
-    let dir = tempdir().expect("temp dir");
-    let path = dir.path().join("config.yaml");
-    std::fs::write(&path, "not: [valid").expect("write");
-    assert!(Config::load(&path).await.is_err());
-}
-
-#[test]
-fn persisted_config_omits_none_fields_when_serializing() {
-    let persisted = PersistedConfig::default();
-    let yaml = serde_yaml::to_string(&persisted).expect("serialize");
-    assert!(!yaml.contains("name: null"));
-    assert!(!yaml.contains("port: null"));
-    assert!(!yaml.contains("advertise_addr: null"));
-}
-
-#[tokio::test]
-async fn config_ignores_unknown_fields() {
-    let dir = tempdir().expect("temp dir");
-    let path = dir.path().join("config.yaml");
-    std::fs::write(
-        &path,
-        "max_ipc_clients: 32\nmax_connections: 256\nkeepalive_secs: 5\nport: 7200\n",
-    )
-    .expect("write");
-    let cfg = Config::load(&path)
-        .await
-        .expect("load config with old fields");
-    assert_eq!(cfg.effective_port(None), 7200);
-}
-
-#[tokio::test]
-async fn known_peers_roundtrip() {
-    let dir = tempdir().expect("temp dir");
-    let path = dir.path().join("known.json");
-    let peers = vec![KnownPeer {
-        agent_id: "ed25519.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
-        addr: "127.0.0.1:7100".parse().expect("addr"),
-        pubkey: "Zm9v".to_string(),
-        last_seen_unix_ms: 123,
-        source: KnownPeerSource::Discovered,
-    }];
-
-    save_known_peers(&path, &peers).await.expect("save");
-    let loaded = load_known_peers(&path).await.expect("load");
-    assert_eq!(loaded, peers);
-}
-
-#[tokio::test]
-async fn known_peers_empty_when_missing() {
-    let dir = tempdir().expect("temp dir");
-    let loaded = load_known_peers(&dir.path().join("missing.json"))
-        .await
-        .expect("load");
-    assert!(loaded.is_empty());
-}
-
-#[tokio::test]
-async fn legacy_known_peers_cache_is_ignored() {
-    let dir = tempdir().expect("temp dir");
-    let path = dir.path().join("known.json");
-    std::fs::write(
-        &path,
-        r#"[{"agent_id":"ed25519.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","addr":"127.0.0.1:7100","pubkey":"Zm9v","last_seen_unix_ms":123}]"#,
-    )
-    .expect("write legacy known peers");
-
-    let loaded = load_known_peers(&path).await.expect("load");
-    assert!(loaded.is_empty());
-}
-
-#[test]
-fn discover_paths_from_root() {
-    let root = PathBuf::from("/tmp/axon-test");
-    let paths = AxonPaths::from_root(root.clone());
-    assert_eq!(paths.identity_key, root.join("identity.key"));
-    assert_eq!(paths.identity_pub, root.join("identity.pub"));
-    assert_eq!(paths.config, root.join("config.yaml"));
-    assert_eq!(paths.known_peers, root.join("known_peers.json"));
-    assert_eq!(paths.socket, root.join("axon.sock"));
-}
-
-#[test]
-fn discover_with_override_uses_override_root() {
-    let root = PathBuf::from("/tmp/axon-override");
-    let paths = AxonPaths::discover_with_override(Some(root.as_path())).expect("discover");
-    assert_eq!(paths.root, root);
-    assert_eq!(paths.socket, PathBuf::from("/tmp/axon-override/axon.sock"));
-}
-
-#[test]
-fn peer_addr_parse_and_resolve_ipv4_socket() {
-    let addr = PeerAddr::parse("127.0.0.1:7100").expect("parse");
-    assert_eq!(
-        addr.resolve().expect("resolve"),
-        "127.0.0.1:7100".parse().expect("socket addr")
-    );
-}
-
-#[test]
-fn peer_addr_parse_hostname_with_port() {
-    let addr = PeerAddr::parse("localhost:7100").expect("parse");
-    let PeerAddr::Host { host, port } = addr else {
-        panic!("expected host variant");
-    };
-    assert_eq!(host, "localhost");
-    assert_eq!(port, 7100);
-}
-
-#[test]
-fn peer_addr_requires_port() {
-    let err = PeerAddr::parse("localhost").expect_err("missing port should fail");
-    assert!(err.to_string().contains("host:port"));
-}
-
-#[test]
-fn ensure_root_creates_and_sets_perms() {
-    let dir = tempdir().expect("temp dir");
-    let root = dir.path().join("axon-subdir");
-    let paths = AxonPaths::from_root(root.clone());
-    paths.ensure_root_exists().expect("ensure root");
-    assert!(root.exists());
-    let mode = fs::metadata(&root).unwrap().permissions().mode();
-    assert_eq!(mode & 0o777, 0o700);
-}
-
-// =========================================================================
-// Property-based tests
-// =========================================================================
-
-use proptest::prelude::*;
-
-proptest! {
-    #[test]
-    fn effective_port_cli_always_wins(config_port in proptest::option::of(1u16..),
-                                      cli_port in 1u16..) {
-        let cfg = Config {
-            name: None,
-            port: config_port,
-            advertise_addr: None,
-            peers: Vec::new(),
-            persisted_peers: Vec::new(),
-        };
-        prop_assert_eq!(cfg.effective_port(Some(cli_port)), cli_port);
-    }
-
-    #[test]
-    fn effective_port_without_cli_uses_config_or_default(config_port in proptest::option::of(1u16..)) {
-        let cfg = Config {
-            name: None,
-            port: config_port,
-            advertise_addr: None,
-            peers: Vec::new(),
-            persisted_peers: Vec::new(),
-        };
-        let expected = config_port.unwrap_or(7100);
-        prop_assert_eq!(cfg.effective_port(None), expected);
-    }
-}
-
-#[tokio::test]
-async fn append_static_peer_persists_yaml_entry() {
-    let dir = tempdir().expect("temp dir");
-    let path = dir.path().join("config.yaml");
-
-    append_static_peer(
-        &path,
-        PersistedStaticPeerConfig {
-            agent_id: "ed25519.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
-            addr: PeerAddr::parse("127.0.0.1:7100").expect("addr"),
-            pubkey: "Zm9v".to_string(),
-        },
+        "name: alice\nport: 7200\nadvertise_addr: alice.local:7200\n",
     )
     .await
-    .expect("append peer");
+    .expect("write config");
 
-    let persisted = load_persisted_config(&path).await.expect("load persisted");
-    assert_eq!(persisted.peers.len(), 1);
-    assert_eq!(
-        persisted.peers[0].agent_id,
-        "ed25519.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-    );
+    let config = Config::load(&path).await.expect("load config");
+
+    assert_eq!(config.name.as_deref(), Some("alice"));
+    assert_eq!(config.port, Some(7200));
+    assert_eq!(config.advertise_addr.as_deref(), Some("alice.local:7200"));
 }
 
-// =========================================================================
-// Mutation-coverage: save_known_peers creates parent dir
-// =========================================================================
+#[tokio::test]
+async fn legacy_peer_entries_are_rejected_instead_of_imported() {
+    let root = tempdir().expect("tempdir");
+    let path = root.path().join("config.yaml");
+    tokio::fs::write(
+        &path,
+        "peers:\n  - agent_id: ed25519.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n    addr: 127.0.0.1:7100\n    pubkey: invalid\n",
+    )
+    .await
+    .expect("write config");
+
+    let error = Config::load(&path)
+        .await
+        .expect_err("legacy peers must fail closed");
+
+    assert!(error.to_string().contains("Legacy `peers` entries"));
+}
 
 #[tokio::test]
-async fn save_known_peers_creates_parent_dir() {
-    let dir = tempdir().expect("temp dir");
-    let path = dir.path().join("nested").join("subdir").join("known.json");
-    let peers = vec![KnownPeer {
-        agent_id: "ed25519.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
-        addr: "127.0.0.1:7100".parse().expect("addr"),
-        pubkey: "Zm9v".to_string(),
-        last_seen_unix_ms: 456,
-        source: KnownPeerSource::Cached,
-    }];
+async fn persisted_config_roundtrips() {
+    let root = tempdir().expect("tempdir");
+    let path = root.path().join("config.yaml");
+    let expected = PersistedConfig {
+        name: Some("alice".to_string()),
+        port: Some(7200),
+        advertise_addr: Some("alice.local:7200".to_string()),
+    };
 
-    save_known_peers(&path, &peers)
+    save_persisted_config(&path, &expected)
         .await
-        .expect("save should create parent dirs");
-    assert!(path.exists(), "file should exist after save");
-    let loaded = load_known_peers(&path).await.expect("load");
-    assert_eq!(loaded, peers);
+        .expect("save config");
+    let loaded = load_persisted_config(&path).await.expect("load config");
+
+    assert_eq!(loaded, expected);
+}
+
+#[test]
+fn paths_separate_peer_store_from_legacy_cache() {
+    let root = std::path::PathBuf::from("/tmp/axon-path-test");
+    let paths = AxonPaths::from_root(root.clone());
+
+    assert_eq!(paths.peers, root.join("peers.json"));
+    assert_eq!(paths.legacy_known_peers, root.join("known_peers.json"));
+}
+
+#[test]
+fn legacy_known_peers_file_is_reported() {
+    let root = tempdir().expect("tempdir");
+    let paths = AxonPaths::from_root(root.path().to_path_buf());
+    std::fs::write(&paths.legacy_known_peers, b"[]").expect("write legacy file");
+
+    let error = paths
+        .reject_legacy_peer_state()
+        .expect_err("legacy peer state must be rejected");
+
+    assert!(error.to_string().contains("intentionally re-enroll"));
 }

@@ -3,176 +3,253 @@
 Status: Normative
 
 **Status:** Normative  
-**Authors:** Kit (OpenClaw agent), Hans Behrens  
+**Authors:** Kit (OpenClaw agent), Hans Behrens
 
 ---
 
 ## 1. Overview
 
-The IPC interface connects local client processes (CLI tools, agents) with the AXON daemon over a Unix domain socket. It provides message sending, peer listing, daemon status, identity queries, and runtime peer enrollment via a simple line-delimited JSON protocol.
+The IPC interface connects same-user local clients (CLI tools and agent applications) to one AXON daemon over a Unix domain socket. It provides outbound messaging, candidate inspection, intentional peer enrollment and revocation, daemon status, identity queries, and one connection-bound inbound request handler.
 
-All inbound messages from peers are broadcast to connected IPC clients (deliver-or-disconnect under bounded-queue backpressure).
+IPC is transport plumbing. `PeerDirectory` owns peer trust and observations, while `RequestBroker` owns handler and pending-request state. IPC connections do not independently own either fact.
 
----
-
-## 2. Socket and Security
-
-**Socket path:** `~/.axon/axon.sock` (Unix domain socket).
-
-**Protocol:** Line-delimited JSON — one complete JSON object per `\n`-terminated line. No handshake or version negotiation.
-
-**Permissions:** The daemon creates the socket with mode `0600` (owner read/write only).
-
-**Peer credential check:** On connect, the daemon extracts the connecting process's UID via `SO_PEERCRED` (Linux) or `getpeereid` (macOS). If the UID does not match the socket-owning UID, the connection is rejected.
+Ordinary inbound messages are broadcast to connected clients with deliver-or-disconnect backpressure. Inbound requests are delivered only to the one client holding the handler lease.
 
 ---
 
-## 3. Commands
+## 2. Socket, Framing, and Security
 
-All commands are JSON objects with a `"cmd"` field. An optional `"req_id"` (string) may be included on any command; if present, the daemon echoes it in the response.
+**Socket path:** `~/.axon/axon.sock` (or `<state_root>/axon.sock`).
 
-### 3.1 `send`
+**Protocol:** Line-delimited JSON. Each command, response, or event is one complete JSON object terminated by `\n`. Literal newlines inside strings MUST be escaped. There is no handshake or version negotiation.
 
-Send a message to a peer.
+**Maximum line size:** 65,536 bytes including the trailing newline. An overlong command receives `command_too_large` when possible and the connection is closed.
 
-**Request:**
-```json
-{"cmd": "send", "to": "<agent_id>", "kind": "request|message", "payload": {...}, "timeout_secs": 30, "ref": "<uuid-optional>"}
-```
+**Permissions:** The daemon creates the socket with mode `0600`.
 
-`timeout_secs` is optional and only meaningful for `kind=request`.
-
-**Response (unidirectional):**
-```json
-{"ok": true, "msg_id": "<uuid>"}
-```
-
-**Response (bidirectional — inline response from peer):**
-```json
-{"ok": true, "msg_id": "<uuid>", "response": {...}}
-```
-
-### 3.2 `peers`
-
-List connected peers.
-
-**Request:**
-```json
-{"cmd": "peers"}
-```
-
-**Response:**
-```json
-{"ok": true, "peers": [{"agent_id": "<agent_id>", "addr": "ip:port", "status": "connected", "rtt_ms": 1.23, "source": "static"}]}
-```
-
-`agent_id` is the canonical peer identity field name in `peers` responses.
-
-### 3.3 `status`
-
-Daemon status.
-
-**Request:**
-```json
-{"cmd": "status"}
-```
-
-**Response:**
-```json
-{"ok": true, "uptime_secs": 3600, "peers_connected": 1, "messages_sent": 42, "messages_received": 38}
-```
-
-### 3.4 `whoami`
-
-Daemon identity.
-
-**Request:**
-```json
-{"cmd": "whoami"}
-```
-
-**Response:**
-```json
-{"ok": true, "agent_id": "ed25519.a1b2...", "public_key": "<base64>", "name": "agent-name", "version": "0.5.0", "uptime_secs": 3600}
-```
-
-Response shape notes:
-- `public_key` is standard base64 (Ed25519 public key).
-- `name` is optional and may be omitted when unset.
-
-### 3.5 `add_peer`
-
-Enroll a static peer while the daemon is running.
-
-**Request:**
-```json
-{"cmd": "add_peer", "pubkey": "<base64>", "addr": "host:port"}
-```
-
-**Response:**
-```json
-{"ok": true, "agent_id": "ed25519.a1b2..."}
-```
+**Peer credential check:** On connect, the daemon extracts the process UID using `SO_PEERCRED` (Linux) or `getpeereid` (macOS). A UID different from the socket owner's UID is rejected.
 
 ---
 
-## 4. Error Codes
+## 3. Common Command Rules
 
-All error responses use the format:
+Every command is a JSON object with a `cmd` string. An optional `req_id` string may be included on any command and is echoed in its response.
+
+Unknown IPC command names are rejected immediately with `invalid_command`. They are not retained or replayed after upgrades.
+
+---
+
+## 4. Commands
+
+### 4.1 `send`
+
+Send a message to an enrolled peer.
+
 ```json
-{"ok": false, "error": "<code>", "message": "<explanation>"}
+{"cmd":"send","to":"<agent_id>","kind":"request|message","payload":{},"timeout_secs":30,"ref":"<uuid-optional>"}
 ```
 
-If `req_id` was present on the command, it is echoed in the error response.
+`timeout_secs` is optional and only valid for `request`.
+
+For `message`:
+
+```json
+{"ok":true,"msg_id":"<uuid>"}
+```
+
+For `request`, the peer's response is returned inline:
+
+```json
+{"ok":true,"msg_id":"<uuid>","response":{}}
+```
+
+### 4.2 `peers`
+
+List bounded read-only views of discovered candidates and enrolled peers.
+
+```json
+{"cmd":"peers"}
+```
+
+```json
+{
+  "ok": true,
+  "peers": [
+    {
+      "agent_id": "ed25519.a1b2...",
+      "public_key": "<base64>",
+      "trust": "candidate|enrolled",
+      "locators": ["host-or-ip:7100"],
+      "status": "discovered|disconnected|connecting|connected|backoff",
+      "rtt_ms": 1.23,
+      "display_name": "optional-name"
+    }
+  ]
+}
+```
+
+`rtt_ms` and `display_name` are omitted when unavailable. Candidate entries always use `status=discovered`; they are not trusted and cannot be messaged until enrolled.
+
+### 4.3 `status`
+
+```json
+{"cmd":"status"}
+```
+
+```json
+{"ok":true,"uptime_secs":3600,"peers_connected":1,"messages_sent":42,"messages_received":38}
+```
+
+### 4.4 `whoami`
+
+```json
+{"cmd":"whoami"}
+```
+
+```json
+{"ok":true,"agent_id":"ed25519.a1b2...","public_key":"<base64>","name":"agent-name","version":"0.8.0","uptime_secs":3600}
+```
+
+`name` is omitted when unset.
+
+### 4.5 `add_peer`
+
+Intentionally enroll either a currently observed candidate or an out-of-band peer token. Exactly one of `agent_id` and `token` MUST be present.
+
+```json
+{"cmd":"add_peer","agent_id":"ed25519.a1b2..."}
+```
+
+```json
+{"cmd":"add_peer","token":"axon://<pubkey-base64url>@<host-or-ip>:7100"}
+```
+
+The daemon validates Agent ID/public-key binding and locator syntax, atomically persists the complete next peer-store snapshot, commits the PeerDirectory transition, and only then reports success:
+
+```json
+{"ok":true,"agent_id":"ed25519.a1b2..."}
+```
+
+Re-enrolling the same Agent ID and public key is idempotent. A conflicting key is rejected and never replaces the existing pin.
+
+### 4.6 `remove_peer`
+
+Revoke an enrolled peer.
+
+```json
+{"cmd":"remove_peer","agent_id":"ed25519.a1b2..."}
+```
+
+The daemon atomically persists the complete next peer-store snapshot, removes the pin and dial targets, cancels connection attempts, closes the active connection, and reports:
+
+```json
+{"ok":true,"agent_id":"ed25519.a1b2..."}
+```
+
+Removing a candidate observation is not supported; it expires with discovery.
+
+### 4.7 `serve`
+
+Acquire the daemon's single inbound request-handler lease for the lifetime of this IPC connection.
+
+```json
+{"cmd":"serve"}
+```
+
+```json
+{"ok":true,"serving":true}
+```
+
+A second client receives `handler_busy`. Repeating `serve` on the lease holder is idempotent. The lease is released immediately when its IPC connection closes.
+
+### 4.8 `reply`
+
+Resolve one pending request delivered to the current handler.
+
+```json
+{"cmd":"reply","request_id":"<uuid>","kind":"response|error","payload":{}}
+```
+
+```json
+{"ok":true,"request_id":"<uuid>"}
+```
+
+Only the handler that received the request may reply. Exactly one reply is admitted. Duplicate, late, unknown, and non-owner replies are rejected explicitly.
+
+---
+
+## 5. Errors
+
+```json
+{"ok":false,"error":"<code>","message":"<explanation>","req_id":"<optional>"}
+```
 
 | Code | Condition |
-|------|-----------|
-| `invalid_command` | Malformed JSON, unknown `cmd`, or missing/invalid field. |
-| `command_too_large` | IPC commands over 64 KB are rejected. |
-| `peer_not_found` | Target `agent_id` not in peer table. |
-| `self_send` | Sending to your own `agent_id` is rejected. |
-| `peer_unreachable` | Peer known but QUIC connection/setup failed. |
+|---|---|
+| `invalid_command` | Malformed JSON, unknown command, or invalid/mutually exclusive fields. |
+| `command_too_large` | IPC command exceeds 65,536 bytes. |
+| `peer_not_found` | Target is not an enrolled peer. |
+| `peer_not_observed` | Candidate enrollment names no current observation. |
+| `peer_conflict` | Agent ID/public-key binding conflicts with enrolled state. |
+| `self_send` | Target is the local Agent ID. |
+| `peer_unreachable` | Peer is enrolled but no connection could be established. |
 | `timeout` | Request timed out waiting for a peer response. |
-| `internal_error` | Unexpected daemon error. |
+| `handler_busy` | Another IPC connection owns the handler lease. |
+| `not_handler` | The client attempted a handler-only operation without the lease. |
+| `request_not_found` | Request is unknown, expired, disconnected, or already completed. |
+| `internal_error` | Unexpected daemon or persistence failure. |
+
+Errors are instructive and MUST NOT report a timeout as `peer_unreachable`.
 
 ---
 
-## 5. Inbound Events
+## 6. Events
 
-All inbound messages from peers are broadcast to connected IPC clients as unsolicited events:
+Events contain `event` and never contain `ok` or `req_id`.
+
+### 6.1 Ordinary inbound message
+
+Broadcast to connected clients:
 
 ```json
-{"event": "inbound", "from": "<agent_id>", "envelope": {...}}
+{"event":"inbound","from":"<agent_id>","envelope":{}}
 ```
 
-Rejected unknown-peer handshakes are also broadcast as informational events:
+Losslessly retained unknown unidirectional message kinds use the same event.
+
+### 6.2 Inbound request
+
+Delivered only to the handler lease holder:
 
 ```json
-{"event": "pair_request", "agent_id": "<agent_id>", "pubkey": "<base64>", "addr": "ip:port-or-host:port"}
+{"event":"request","request_id":"<request-uuid>","from":"<agent_id>","envelope":{}}
 ```
 
-`pair_request.addr` is best-effort and may be omitted. AXON captures the remote address from QUIC handshake context when available, but rustls verifier callbacks do not carry it directly.
+If no handler exists, handler delivery overflows, the handler disconnects, or the handler deadline expires, the broker sends one terminal `error` response to the remote requester. AXON guarantees at most one protocol reply, not exactly-once application execution.
 
-Inbound events are identified by the presence of an `"event"` key. They never carry `"ok"` or `"req_id"`.
+### 6.3 Peer candidate
 
-Clients demultiplex by checking for `"event"` — if present, it is a pushed event; otherwise it is a command response.
+Broadcast when a new validated but untrusted candidate becomes observable:
 
-The daemon uses a bounded per-client outbound queue. If a client cannot keep up and its queue overflows, that client is disconnected (deliver-or-disconnect semantics). Messages arriving when no IPC client is connected are dropped.
+```json
+{"event":"peer_candidate","agent_id":"<agent_id>","public_key":"<base64>","locators":["host-or-ip:7100"],"source":"mdns|handshake"}
+```
 
----
-
-## 6. Multiple Clients
-
-Up to 64 IPC clients may connect simultaneously. Connected clients that keep up receive all inbound broadcast events. Lagging clients are disconnected on queue overflow. Commands are handled independently per client.
+Candidate events are hints. Only `add_peer` establishes trust.
 
 ---
 
-## 7. Multi-Agent Per Host
+## 7. Multiple Clients and Backpressure
 
-When multiple agents share a host, each MUST run its own daemon instance with:
+Up to 64 IPC clients may connect simultaneously. Each has a bounded outbound queue, and the request broker retains at most 1,024 pending inbound requests.
 
-- Separate socket path (e.g., `~/.axon/<agent-name>/axon.sock`)
-- Separate QUIC port
-- Separate identity (keypair)
+- Ordinary inbound messages and candidate events are broadcast to clients that keep up.
+- Queue overflow disconnects the lagging client instead of silently dropping a subset.
+- Inbound requests are queued only to the handler. Handler queue overflow terminates the lease and the affected request with an explicit remote error.
+- Messages arriving with no observer are dropped; AXON has no durable inbox or store-and-forward behavior.
 
-The daemon does NOT multiplex between agents. One daemon = one identity.
+---
+
+## 8. Multi-Agent Per Host
+
+Each local agent identity runs a separate daemon with its own state root, Unix socket, QUIC port, identity, and peer store. The daemon does not multiplex identities.

@@ -1,0 +1,194 @@
+use std::fs::{self, File, OpenOptions};
+use std::io::{ErrorKind, Write};
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::path::{Path, PathBuf};
+
+use anyhow::{Context, Result, bail};
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
+
+use super::{MAX_ENROLLED_PEERS, MAX_LOCATORS_PER_PEER, PeerIdentity, PeerLocator};
+use crate::message::AgentId;
+
+const PEER_STORE_VERSION: u32 = 1;
+
+#[derive(Debug, Clone)]
+pub struct PeerStore {
+    path: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct StoredPeer {
+    pub agent_id: AgentId,
+    pub public_key: String,
+    pub locators: Vec<PeerLocator>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PeerStoreDocument {
+    version: u32,
+    peers: Vec<StoredPeer>,
+}
+
+impl PeerStore {
+    pub fn new(path: PathBuf) -> Self {
+        Self { path }
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub async fn validate(&self) -> Result<usize> {
+        self.load().await.map(|peers| peers.len())
+    }
+
+    pub(crate) async fn load(&self) -> Result<Vec<StoredPeer>> {
+        let path = self.path.clone();
+        tokio::task::spawn_blocking(move || load_sync(&path))
+            .await
+            .context("peer-store load task failed")?
+    }
+
+    pub(crate) async fn save(&self, peers: Vec<StoredPeer>) -> Result<()> {
+        let path = self.path.clone();
+        tokio::task::spawn_blocking(move || save_sync(&path, peers))
+            .await
+            .context("peer-store save task failed")?
+    }
+}
+
+fn load_sync(path: &Path) -> Result<Vec<StoredPeer>> {
+    let data = match fs::read(path) {
+        Ok(data) => data,
+        Err(err) if err.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(err) => {
+            return Err(err)
+                .with_context(|| format!("failed to read peer store: {}", path.display()));
+        }
+    };
+    let document: PeerStoreDocument = serde_json::from_slice(&data)
+        .with_context(|| format!("failed to parse peer store: {}", path.display()))?;
+    if document.version != PEER_STORE_VERSION {
+        bail!(
+            "unsupported peer-store version {} at {}; expected {}",
+            document.version,
+            path.display(),
+            PEER_STORE_VERSION
+        );
+    }
+    validate_peers(&document.peers)?;
+    Ok(document.peers)
+}
+
+fn save_sync(path: &Path, peers: Vec<StoredPeer>) -> Result<()> {
+    validate_peers(&peers)?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("peer-store path has no parent: {}", path.display()))?;
+    fs::create_dir_all(parent).with_context(|| {
+        format!(
+            "failed to create peer-store directory: {}",
+            parent.display()
+        )
+    })?;
+    fs::set_permissions(parent, fs::Permissions::from_mode(0o700)).with_context(|| {
+        format!(
+            "failed to set peer-store directory permissions: {}",
+            parent.display()
+        )
+    })?;
+
+    let document = PeerStoreDocument {
+        version: PEER_STORE_VERSION,
+        peers,
+    };
+    let mut data = serde_json::to_vec_pretty(&document).context("failed to encode peer store")?;
+    data.push(b'\n');
+
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("peers.json");
+    let temp_path = parent.join(format!(".{file_name}.{}.tmp", Uuid::new_v4()));
+    let result = write_and_replace(path, &temp_path, parent, &data);
+    if result.is_err() {
+        let _ = fs::remove_file(&temp_path);
+    }
+    result
+}
+
+fn write_and_replace(path: &Path, temp_path: &Path, parent: &Path, data: &[u8]) -> Result<()> {
+    let mut temp = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(temp_path)
+        .with_context(|| {
+            format!(
+                "failed to create temporary peer store: {}",
+                temp_path.display()
+            )
+        })?;
+    temp.write_all(data).with_context(|| {
+        format!(
+            "failed to write temporary peer store: {}",
+            temp_path.display()
+        )
+    })?;
+    temp.sync_all().with_context(|| {
+        format!(
+            "failed to sync temporary peer store: {}",
+            temp_path.display()
+        )
+    })?;
+    drop(temp);
+
+    fs::rename(temp_path, path).with_context(|| {
+        format!(
+            "failed to atomically replace peer store {} with {}",
+            path.display(),
+            temp_path.display()
+        )
+    })?;
+    File::open(parent)
+        .and_then(|directory| directory.sync_all())
+        .with_context(|| format!("failed to sync peer-store directory: {}", parent.display()))?;
+    Ok(())
+}
+
+fn validate_bounds(peers: &[StoredPeer]) -> Result<()> {
+    if peers.len() > MAX_ENROLLED_PEERS {
+        bail!(
+            "peer store contains {} peers; maximum is {MAX_ENROLLED_PEERS}",
+            peers.len()
+        );
+    }
+    for peer in peers {
+        if peer.locators.len() > MAX_LOCATORS_PER_PEER {
+            bail!(
+                "peer {} contains {} locators; maximum is {MAX_LOCATORS_PER_PEER}",
+                peer.agent_id,
+                peer.locators.len()
+            );
+        }
+    }
+    Ok(())
+}
+
+fn validate_peers(peers: &[StoredPeer]) -> Result<()> {
+    validate_bounds(peers)?;
+    let mut identities = std::collections::BTreeSet::new();
+    for peer in peers {
+        PeerIdentity::from_parts(peer.agent_id.clone(), &peer.public_key)?;
+        if !identities.insert(peer.agent_id.clone()) {
+            bail!("peer store contains duplicate Agent ID {}", peer.agent_id);
+        }
+        let unique_locators: std::collections::BTreeSet<_> = peer.locators.iter().collect();
+        if unique_locators.len() != peer.locators.len() {
+            bail!("peer {} contains duplicate locators", peer.agent_id);
+        }
+    }
+    Ok(())
+}

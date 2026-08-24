@@ -13,7 +13,7 @@ fn build_error_line(error: IpcErrorCode, req_id: Option<String>) -> Arc<str> {
     Arc::from(
         serde_json::to_string(&DaemonReply::Error {
             ok: false,
-            message: error.message(),
+            message: error.message().to_string(),
             error,
             req_id,
         })

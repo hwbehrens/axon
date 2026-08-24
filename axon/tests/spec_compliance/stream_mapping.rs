@@ -97,7 +97,7 @@ fn deserialize_error_example() {
     assert!(env.ref_id.is_some());
 }
 
-/// Unknown kind on wire deserializes to Unknown via serde(other).
+/// Unknown kind on wire is retained exactly.
 #[test]
 fn deserialize_unknown_kind() {
     let j = json!({
@@ -106,5 +106,5 @@ fn deserialize_unknown_kind() {
         "payload": {}
     });
     let env: Envelope = serde_json::from_value(j).unwrap();
-    assert_eq!(env.kind, MessageKind::Unknown);
+    assert_eq!(env.kind, MessageKind::unknown("future_kind_v99"));
 }

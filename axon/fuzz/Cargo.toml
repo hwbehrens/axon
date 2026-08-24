@@ -36,11 +36,6 @@ path = "fuzz_targets/fuzz_config_yaml.rs"
 doc = false
 
 [[bin]]
-name = "fuzz_known_peers"
-path = "fuzz_targets/fuzz_known_peers.rs"
-doc = false
-
-[[bin]]
 name = "fuzz_envelope_roundtrip"
 path = "fuzz_targets/fuzz_envelope_roundtrip.rs"
 doc = false

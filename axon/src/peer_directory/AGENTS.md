@@ -1,0 +1,28 @@
+# AGENTS.md (peer_directory)
+
+This file applies to logical peer ownership in `axon/src/peer_directory/`.
+
+## Priorities
+
+Identity and trust invariants > one authoritative owner > availability.
+
+## File responsibilities
+
+- `mod.rs`: `PeerDirectory` transitions, bounded candidates/enrolled peers, derived views and pinning snapshots.
+- `state.rs`: internal peer/observation state and derived representations.
+- `types.rs`: validated identities, observations, locators, trust and conflict representations.
+- `store.rs`: versioned `peers.json` schema and atomic whole-file persistence.
+
+## Guardrails
+
+- `PeerDirectory` is the sole live owner of identity, trust, locators, observations, and conflicts.
+- Discovery adds candidates only; explicit enrollment is the only path into the TLS pin set.
+- Persist enrolled intent and configured locators only. Never persist mDNS liveness or observed addresses.
+- Validate and durably persist a mutation before publishing its new immutable pinning snapshot.
+- Conflicting identity/address evidence is quarantined, never resolved by last-writer-wins.
+- Keep all peer, locator, and observation collections bounded; constant changes require README.md updates.
+
+## Test targets
+
+- Unit: `tests.rs` plus module-local tests where needed
+- Integration/adversarial: `axon/tests/integration.rs`, `axon/tests/adversarial.rs`

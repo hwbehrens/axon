@@ -302,7 +302,7 @@ fn doctor_subcommand_is_visible_in_help() {
 }
 
 #[test]
-fn doctor_check_detects_duplicate_peer_addresses() {
+fn doctor_check_detects_unsupported_legacy_peer_state() {
     let root = tempdir().expect("tempdir");
     fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).expect("set perms");
 
@@ -312,34 +312,25 @@ fn doctor_check_detects_duplicate_peer_addresses() {
     )
     .expect("generate identity");
 
-    // Write known_peers.json with two peers at the same address
-    let peers = serde_json::json!([
-        {"agent_id": "ed25519.aaaa", "addr": "10.0.0.1:7100", "pubkey": "a2V5MQ==", "last_seen_unix_ms": 1000, "source": "discovered"},
-        {"agent_id": "ed25519.bbbb", "addr": "10.0.0.1:7100", "pubkey": "a2V5Mg==", "last_seen_unix_ms": 2000, "source": "discovered"}
-    ]);
-    fs::write(
-        root.path().join("known_peers.json"),
-        serde_json::to_string(&peers).unwrap(),
-    )
-    .expect("write known_peers");
+    fs::write(root.path().join("known_peers.json"), b"[]").expect("write legacy state");
 
     let output = run_doctor_json(root.path(), &[]);
     assert_eq!(output.status.code(), Some(2));
 
     let report = parse_report(&output);
-    let dup_check = check_by_name(&report, "duplicate_peer_addr");
-    assert_eq!(dup_check["ok"], false);
-    assert_eq!(dup_check["fixable"], true);
+    let legacy = check_by_name(&report, "legacy_peer_state");
+    assert_eq!(legacy["ok"], false);
+    assert_eq!(legacy["fixable"], true);
     assert!(
-        dup_check["message"]
+        legacy["message"]
             .as_str()
             .unwrap()
-            .contains("duplicate address")
+            .contains("intentionally re-enroll")
     );
 }
 
 #[test]
-fn doctor_fix_prunes_duplicate_peer_addresses() {
+fn doctor_fix_moves_legacy_peer_state_aside_without_importing_it() {
     let root = tempdir().expect("tempdir");
     fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).expect("set perms");
 
@@ -349,32 +340,23 @@ fn doctor_fix_prunes_duplicate_peer_addresses() {
     )
     .expect("generate identity");
 
-    // Write known_peers.json with two peers at the same address
-    let peers = serde_json::json!([
-        {"agent_id": "ed25519.aaaa", "addr": "10.0.0.1:7100", "pubkey": "a2V5MQ==", "last_seen_unix_ms": 1000, "source": "discovered"},
-        {"agent_id": "ed25519.bbbb", "addr": "10.0.0.1:7100", "pubkey": "a2V5Mg==", "last_seen_unix_ms": 2000, "source": "discovered"}
-    ]);
-    fs::write(
-        root.path().join("known_peers.json"),
-        serde_json::to_string(&peers).unwrap(),
-    )
-    .expect("write known_peers");
+    fs::write(root.path().join("known_peers.json"), b"[]").expect("write legacy state");
 
     let output = run_doctor_json(root.path(), &["--fix"]);
     assert!(output.status.success());
 
     let report = parse_report(&output);
-    let dup_check = check_by_name(&report, "duplicate_peer_addr");
-    assert_eq!(dup_check["ok"], true);
-
-    // Verify known_peers.json was updated — only one peer should remain
-    let saved: Vec<serde_json::Value> = serde_json::from_str(
-        &fs::read_to_string(root.path().join("known_peers.json")).expect("read peers"),
-    )
-    .expect("parse peers");
-    assert_eq!(saved.len(), 1);
-    // The one with higher last_seen should be kept
-    assert_eq!(saved[0]["agent_id"], "ed25519.bbbb");
+    let legacy = check_by_name(&report, "legacy_peer_state");
+    assert_eq!(legacy["ok"], true);
+    assert!(!root.path().join("known_peers.json").exists());
+    assert!(!root.path().join("peers.json").exists());
+    assert!(fs::read_dir(root.path()).unwrap().any(|entry| {
+        entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with("known_peers.json.bak.")
+    }));
 }
 
 #[test]

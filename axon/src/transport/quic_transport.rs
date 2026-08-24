@@ -1,54 +1,55 @@
 use std::collections::HashMap;
-use std::future::Future;
-use std::future::IntoFuture;
+use std::future::{Future, IntoFuture};
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result, anyhow};
-use tokio::sync::{Mutex, OwnedSemaphorePermit, RwLock, Semaphore, broadcast};
+use anyhow::{Context, Result, anyhow, bail};
+use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore, broadcast};
 use tokio_util::sync::CancellationToken;
+use tokio_util::task::TaskTracker;
 use tracing::{debug, info, warn};
 
 use crate::identity::Identity;
 use crate::message::{AgentId, Envelope};
-use crate::peer_table::{PeerRecord, PubkeyMap};
-use crate::transport::PairRequest;
+use crate::peer_directory::{DialTarget, PeerDirectory, PinningSnapshotHandle};
+use crate::transport::{DialPeer, PairRequest};
 
-use super::REQUEST_TIMEOUT;
-use super::connection::run_connection;
-use super::connection::{send_request, send_unidirectional};
+use super::connection::{
+    derive_peer_id_from_connection, run_connection, send_request, send_unidirectional,
+};
+use super::connection_registry::{Admission, ConnectionRegistry, Direction};
+use super::reconnect::ReconnectBook;
 use super::tls::{build_endpoint, with_handshake_remote_addr};
 
-/// Optional callback to produce a response for a bidirectional request.
-/// If `None` is returned, the default error response is used.
 pub type ResponseHandlerFn = Arc<
     dyn Fn(Arc<Envelope>) -> Pin<Box<dyn Future<Output = Option<Envelope>> + Send>> + Send + Sync,
 >;
 
 #[derive(Clone)]
-pub struct QuicTransport {
+pub struct ConnectionManager {
     endpoint: quinn::Endpoint,
     local_agent_id: AgentId,
     max_connections: usize,
-    connections: Arc<RwLock<HashMap<String, quinn::Connection>>>,
-    /// Per-peer lock to prevent concurrent connection attempts to the same peer.
-    connecting_locks: Arc<RwLock<HashMap<String, Arc<Mutex<()>>>>>,
+    registry: ConnectionRegistry,
+    connecting_locks: Arc<Mutex<HashMap<AgentId, Arc<Mutex<()>>>>>,
     inbound_tx: broadcast::Sender<Arc<Envelope>>,
     pair_request_tx: broadcast::Sender<PairRequest>,
     connection_semaphore: Arc<Semaphore>,
     cancel: CancellationToken,
     response_handler: Option<ResponseHandlerFn>,
     inbound_read_timeout: Duration,
+    tasks: TaskTracker,
+    reconnect: ReconnectBook,
 }
 
-impl QuicTransport {
+impl ConnectionManager {
     pub async fn bind(
         bind_addr: SocketAddr,
         identity: &Identity,
         max_connections: usize,
-        pubkey_map: PubkeyMap,
+        pubkey_map: PinningSnapshotHandle,
     ) -> Result<Self> {
         Self::bind_cancellable(
             bind_addr,
@@ -74,27 +75,29 @@ impl QuicTransport {
         idle_timeout: Duration,
         response_handler: Option<ResponseHandlerFn>,
         inbound_read_timeout: Duration,
-        pubkey_map: PubkeyMap,
+        pubkey_map: PinningSnapshotHandle,
     ) -> Result<Self> {
+        let local_agent_id = AgentId::parse(identity.agent_id())?;
         let cert = identity.make_quic_certificate()?;
         let (endpoint, inbound_tx, pair_request_tx) =
             build_endpoint(bind_addr, &cert, pubkey_map, keepalive, idle_timeout)?;
-
-        let transport = Self {
+        let manager = Self {
             endpoint,
-            local_agent_id: AgentId::from(identity.agent_id()),
+            local_agent_id: local_agent_id.clone(),
             max_connections,
-            connections: Arc::new(RwLock::new(HashMap::new())),
-            connecting_locks: Arc::new(RwLock::new(HashMap::new())),
+            registry: ConnectionRegistry::new(local_agent_id),
+            connecting_locks: Arc::new(Mutex::new(HashMap::new())),
             inbound_tx,
             pair_request_tx,
             connection_semaphore: Arc::new(Semaphore::new(max_connections)),
             cancel,
             response_handler,
             inbound_read_timeout,
+            tasks: TaskTracker::new(),
+            reconnect: ReconnectBook::default(),
         };
-        transport.spawn_accept_loop();
-        Ok(transport)
+        manager.spawn_accept_loop();
+        Ok(manager)
     }
 
     pub fn subscribe_inbound(&self) -> broadcast::Receiver<Arc<Envelope>> {
@@ -105,99 +108,180 @@ impl QuicTransport {
         self.pair_request_tx.subscribe()
     }
 
-    pub async fn has_connection(&self, agent_id: &str) -> bool {
-        self.connections.read().await.contains_key(agent_id)
+    pub async fn has_connection(&self, agent_id: &AgentId) -> bool {
+        self.registry.current(agent_id).await.is_some()
     }
 
-    pub async fn ensure_connection(&self, peer: &PeerRecord) -> Result<quinn::Connection> {
-        // Fast path: already connected.
-        if let Some(existing) = self
-            .connections
-            .read()
-            .await
-            .get(peer.agent_id.as_str())
-            .cloned()
-        {
+    pub async fn connected_count(&self) -> usize {
+        self.registry.count().await
+    }
+
+    pub async fn close_peer(&self, agent_id: &AgentId, reason: &'static [u8]) {
+        self.registry.close_peer(agent_id, reason).await;
+        self.connecting_locks.lock().await.remove(agent_id);
+    }
+
+    pub async fn maintain(&self, directory: &PeerDirectory) {
+        let enrolled: std::collections::HashSet<_> =
+            directory.enrolled_agent_ids().await.into_iter().collect();
+        self.reconnect.retain(&enrolled).await;
+        for peer in enrolled {
+            if self.registry.current(&peer).await.is_some() {
+                continue;
+            }
+            if directory.dial_targets(&peer).await.is_empty() {
+                continue;
+            }
+            let Some(ticket) = self.reconnect.claim(peer.clone(), Instant::now()).await else {
+                continue;
+            };
+            let manager = self.clone();
+            let directory = directory.clone();
+            self.tasks.spawn(async move {
+                match manager.connect_peer(&directory, &peer).await {
+                    Ok(_) => manager.reconnect.succeeded(&peer, ticket).await,
+                    Err(err) => {
+                        if let Some(wait) = manager
+                            .reconnect
+                            .failed(&peer, ticket, Instant::now())
+                            .await
+                        {
+                            warn!(peer = %peer, error = %err, retry_in = ?wait, "reconnect attempt failed");
+                        }
+                    }
+                }
+            });
+        }
+    }
+
+    pub async fn send_to(
+        &self,
+        directory: &PeerDirectory,
+        peer: &AgentId,
+        envelope: Envelope,
+        request_timeout: Duration,
+    ) -> Result<Option<Envelope>> {
+        let connection = self.connect_peer(directory, peer).await?;
+        let result = if envelope.kind.expects_response() {
+            send_request(&connection, envelope, &self.local_agent_id, request_timeout)
+                .await
+                .map(Some)
+        } else {
+            send_unidirectional(&connection, envelope)
+                .await
+                .map(|()| None)
+        };
+        if result.is_err() {
+            self.close_peer(peer, b"send failed; refresh connection")
+                .await;
+        }
+        result
+    }
+
+    async fn connect_peer(
+        &self,
+        directory: &PeerDirectory,
+        peer: &AgentId,
+    ) -> Result<quinn::Connection> {
+        if let Some(existing) = self.registry.current(peer).await {
             return Ok(existing);
         }
+        let targets = directory.dial_targets(peer).await;
+        let mut addresses = Vec::new();
+        let mut last_error = None;
+        for target in targets {
+            match target {
+                DialTarget::Observed(address) => addresses.push(address),
+                DialTarget::Configured(locator) => match locator.resolve().await {
+                    Ok(resolved) => addresses.extend(resolved),
+                    Err(err) => last_error = Some(err),
+                },
+            }
+        }
+        addresses.sort();
+        addresses.dedup();
+        for addr in addresses {
+            match self
+                .ensure_connection(&DialPeer {
+                    agent_id: peer.clone(),
+                    addr,
+                })
+                .await
+            {
+                Ok(connection) => return Ok(connection),
+                Err(err) => last_error = Some(err),
+            }
+        }
+        Err(last_error.unwrap_or_else(|| anyhow!("peer {peer} has no usable dial target")))
+    }
 
-        // Acquire per-peer lock to prevent duplicate concurrent connection attempts.
+    pub async fn ensure_connection(&self, peer: &DialPeer) -> Result<quinn::Connection> {
+        if let Some(existing) = self.registry.current(&peer.agent_id).await {
+            return Ok(existing);
+        }
         let peer_lock = {
-            let mut locks = self.connecting_locks.write().await;
+            let mut locks = self.connecting_locks.lock().await;
             locks
-                .entry(peer.agent_id.to_string())
+                .entry(peer.agent_id.clone())
                 .or_insert_with(|| Arc::new(Mutex::new(())))
                 .clone()
         };
         let _guard = peer_lock.lock().await;
-
-        // Re-check after acquiring the lock — another task may have connected.
-        if let Some(existing) = self
-            .connections
-            .read()
-            .await
-            .get(peer.agent_id.as_str())
-            .cloned()
-        {
+        if let Some(existing) = self.registry.current(&peer.agent_id).await {
             return Ok(existing);
         }
-
-        let connection_permit = self
+        let permit = self
             .connection_semaphore
             .clone()
             .try_acquire_owned()
             .map_err(|_| anyhow!("connection limit reached"))?;
-
         let connecting = self
             .endpoint
-            .connect(peer.addr, &peer.agent_id)
+            .connect(peer.addr, peer.agent_id.as_str())
             .with_context(|| format!("failed to begin QUIC connect to {}", peer.addr))?;
         let remote_addr = connecting.remote_address();
-
         let connection = with_handshake_remote_addr(remote_addr, connecting)
             .await
             .with_context(|| format!("QUIC handshake failed with {}", peer.addr))?;
-
-        self.connections
-            .write()
-            .await
-            .insert(peer.agent_id.to_string(), connection.clone());
-        self.spawn_connection_loop(connection.clone(), Some(connection_permit));
-
-        Ok(connection)
-    }
-
-    pub async fn send(&self, peer: &PeerRecord, envelope: Envelope) -> Result<Option<Envelope>> {
-        self.send_with_timeout(peer, envelope, REQUEST_TIMEOUT)
-            .await
-    }
-
-    pub async fn send_with_timeout(
-        &self,
-        peer: &PeerRecord,
-        envelope: Envelope,
-        request_timeout: Duration,
-    ) -> Result<Option<Envelope>> {
-        let connection = self.ensure_connection(peer).await?;
-
-        if envelope.kind.expects_response() {
-            let response = send_request(
-                &connection,
-                envelope,
-                self.local_agent_id.as_str(),
-                request_timeout,
+        let authenticated = AgentId::parse(&derive_peer_id_from_connection(&connection)?)?;
+        if authenticated != peer.agent_id {
+            connection.close(0u32.into(), b"authenticated peer mismatch");
+            bail!(
+                "authenticated peer {authenticated} does not match {}",
+                peer.agent_id
+            );
+        }
+        match self
+            .registry
+            .admit(
+                peer.agent_id.clone(),
+                connection.clone(),
+                Direction::Outbound,
             )
-            .await?;
-            Ok(Some(response))
-        } else {
-            send_unidirectional(&connection, envelope).await?;
-            Ok(None)
+            .await
+        {
+            Admission::Accepted { generation } => {
+                self.spawn_connection_loop(
+                    peer.agent_id.clone(),
+                    generation,
+                    connection.clone(),
+                    permit,
+                );
+                Ok(connection)
+            }
+            Admission::Existing(existing) => Ok(existing),
         }
     }
 
     pub async fn close_all(&self) {
-        for connection in self.connections.read().await.values() {
-            connection.close(0u32.into(), b"shutdown");
+        self.endpoint.close(0u32.into(), b"shutdown");
+        self.registry.close_all().await;
+        self.tasks.close();
+        if tokio::time::timeout(Duration::from_secs(2), self.tasks.wait())
+            .await
+            .is_err()
+        {
+            warn!("timed out waiting for connection tasks to stop");
         }
     }
 
@@ -208,59 +292,19 @@ impl QuicTransport {
     }
 
     fn spawn_accept_loop(&self) {
-        let endpoint = self.endpoint.clone();
-        let inbound_tx = self.inbound_tx.clone();
-        let local_id = self.local_agent_id.clone();
-        let connections = self.connections.clone();
-        let cancel = self.cancel.clone();
-        let max_connections = self.max_connections;
-        let connection_semaphore = self.connection_semaphore.clone();
-        let response_handler = self.response_handler.clone();
-        let inbound_read_timeout = self.inbound_read_timeout;
-
-        tokio::spawn(async move {
+        let manager = self.clone();
+        self.tasks.spawn(async move {
             loop {
                 tokio::select! {
-                    _ = cancel.cancelled() => {
-                        info!("accept loop shutting down");
+                    _ = manager.cancel.cancelled() => {
+                        info!("QUIC accept loop shutting down");
                         break;
                     }
-                    maybe_conn = endpoint.accept() => {
-                        let Some(connecting) = maybe_conn else { break };
+                    incoming = manager.endpoint.accept() => {
+                        let Some(connecting) = incoming else { break };
                         let remote_addr = connecting.remote_address();
                         match with_handshake_remote_addr(remote_addr, connecting.into_future()).await {
-                            Ok(connection) => {
-                                let permit = match connection_semaphore.clone().try_acquire_owned() {
-                                    Ok(permit) => permit,
-                                    Err(_) => {
-                                        warn!(
-                                            max = max_connections,
-                                            "rejecting inbound QUIC connection: connection limit reached"
-                                        );
-                                        connection.close(0u32.into(), b"connection limit reached");
-                                        continue;
-                                    }
-                                };
-                                debug!(remote = ?connection.remote_address(), "accepted inbound QUIC connection");
-                                let inbound_tx = inbound_tx.clone();
-                                let local_id = local_id.clone();
-                                let connections = connections.clone();
-                                let cancel = cancel.clone();
-                                let response_handler = response_handler.clone();
-                                tokio::spawn(async move {
-                                    run_connection(
-                                        connection,
-                                        local_id.to_string(),
-                                        inbound_tx,
-                                        connections,
-                                        cancel,
-                                        response_handler,
-                                        inbound_read_timeout,
-                                        Some(permit),
-                                    )
-                                    .await;
-                                });
-                            }
+                            Ok(connection) => manager.accept_connection(connection).await,
                             Err(err) => warn!(error = %err, "failed to accept QUIC connection"),
                         }
                     }
@@ -269,30 +313,61 @@ impl QuicTransport {
         });
     }
 
+    async fn accept_connection(&self, connection: quinn::Connection) {
+        let permit = match self.connection_semaphore.clone().try_acquire_owned() {
+            Ok(permit) => permit,
+            Err(_) => {
+                warn!(
+                    max = self.max_connections,
+                    "rejecting connection: limit reached"
+                );
+                connection.close(0u32.into(), b"connection limit reached");
+                return;
+            }
+        };
+        let peer =
+            match derive_peer_id_from_connection(&connection).and_then(|id| AgentId::parse(&id)) {
+                Ok(peer) => peer,
+                Err(err) => {
+                    warn!(error = %err, "failed to derive authenticated peer identity");
+                    connection.close(0u32.into(), b"invalid peer identity");
+                    return;
+                }
+            };
+        debug!(peer = %peer, remote = ?connection.remote_address(), "accepted QUIC connection");
+        if let Admission::Accepted { generation } = self
+            .registry
+            .admit(peer.clone(), connection.clone(), Direction::Inbound)
+            .await
+        {
+            self.spawn_connection_loop(peer, generation, connection, permit);
+        }
+    }
+
     fn spawn_connection_loop(
         &self,
+        peer: AgentId,
+        generation: u64,
         connection: quinn::Connection,
-        connection_permit: Option<OwnedSemaphorePermit>,
+        permit: OwnedSemaphorePermit,
     ) {
-        let inbound_tx = self.inbound_tx.clone();
-        let local_id = self.local_agent_id.clone();
-        let connections = self.connections.clone();
-        let cancel = self.cancel.clone();
-        let response_handler = self.response_handler.clone();
-        let inbound_read_timeout = self.inbound_read_timeout;
-
-        tokio::spawn(async move {
+        let manager = self.clone();
+        self.tasks.spawn(async move {
+            let stable_id = connection.stable_id();
             run_connection(
                 connection,
-                local_id.to_string(),
-                inbound_tx,
-                connections,
-                cancel,
-                response_handler,
-                inbound_read_timeout,
-                connection_permit,
+                manager.local_agent_id.clone(),
+                manager.inbound_tx.clone(),
+                manager.cancel.clone(),
+                manager.response_handler.clone(),
+                manager.inbound_read_timeout,
             )
             .await;
+            drop(permit);
+            manager
+                .registry
+                .release_if_current(&peer, generation, stable_id)
+                .await;
         });
     }
 }

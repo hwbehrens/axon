@@ -7,8 +7,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Context, Result};
 use tokio::net::UnixListener;
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::{Mutex, broadcast, mpsc};
 use tokio_util::sync::CancellationToken;
+use tokio_util::task::TaskTracker;
 
 use super::auth;
 use super::client_handler::handle_client;
@@ -54,6 +55,9 @@ pub struct IpcServer {
     owner_uid: u32,
     max_client_queue: usize,
     config: Arc<IpcServerConfig>,
+    disconnected_tx: broadcast::Sender<u64>,
+    cancel: CancellationToken,
+    tasks: TaskTracker,
 }
 
 impl IpcServer {
@@ -109,6 +113,7 @@ impl IpcServer {
         let owner_uid = unsafe { libc::getuid() };
         let max_client_queue = config.max_client_queue;
 
+        let (disconnected_tx, _) = broadcast::channel(256);
         let server = Self {
             socket_path,
             max_clients,
@@ -117,6 +122,9 @@ impl IpcServer {
             owner_uid,
             max_client_queue,
             config: Arc::new(config),
+            disconnected_tx,
+            cancel: CancellationToken::new(),
+            tasks: TaskTracker::new(),
         };
 
         let (cmd_tx, cmd_rx) = mpsc::channel(256);
@@ -159,17 +167,46 @@ impl IpcServer {
         self.broadcast_line(line).await
     }
 
-    pub async fn broadcast_pair_request(
+    pub async fn send_request_event(&self, client_id: u64, envelope: &Envelope) -> Result<()> {
+        let event = DaemonReply::RequestEvent {
+            event: "request",
+            request_id: envelope.id,
+            from: envelope
+                .from
+                .as_ref()
+                .map(ToString::to_string)
+                .unwrap_or_default(),
+            envelope: envelope.clone(),
+        };
+        let line: Arc<str> = Arc::from(serde_json::to_string(&event)?);
+        let client = self.clients.lock().await.get(&client_id).cloned();
+        let Some(client) = client else {
+            anyhow::bail!("IPC request handler disconnected");
+        };
+        if client.tx.try_send(line).is_err() {
+            self.close_client(client_id).await;
+            anyhow::bail!("IPC request handler queue overflowed");
+        }
+        Ok(())
+    }
+
+    pub fn subscribe_disconnects(&self) -> broadcast::Receiver<u64> {
+        self.disconnected_tx.subscribe()
+    }
+
+    pub async fn broadcast_peer_candidate(
         &self,
         agent_id: &str,
-        pubkey: &str,
-        addr: Option<&str>,
+        public_key: &str,
+        locators: Vec<String>,
+        source: &'static str,
     ) -> Result<()> {
-        let event = DaemonReply::PairRequestEvent {
-            event: "pair_request",
+        let event = DaemonReply::PeerCandidateEvent {
+            event: "peer_candidate",
             agent_id: agent_id.to_string(),
-            pubkey: pubkey.to_string(),
-            addr: addr.map(str::to_string),
+            public_key: public_key.to_string(),
+            locators,
+            source,
         };
         let line: Arc<str> = Arc::from(serde_json::to_string(&event)?);
         self.broadcast_line(line).await
@@ -191,7 +228,7 @@ impl IpcServer {
             _ => Ok(DaemonReply::Error {
                 ok: false,
                 error: IpcErrorCode::InternalError,
-                message: IpcErrorCode::InternalError.message(),
+                message: IpcErrorCode::InternalError.message().to_string(),
                 req_id: event.command.req_id().map(|s| s.to_string()),
             }),
         }
@@ -202,6 +239,7 @@ impl IpcServer {
     pub async fn close_client(&self, client_id: u64) {
         if let Some(client) = self.clients.lock().await.remove(&client_id) {
             client.cancel.cancel();
+            let _ = self.disconnected_tx.send(client_id);
         }
     }
 
@@ -225,6 +263,25 @@ impl IpcServer {
         Ok(())
     }
 
+    /// Stop accepting clients, cancel every active handler, wait for owned
+    /// tasks up to the shutdown deadline, and remove the socket path.
+    pub async fn shutdown(&self) -> Result<()> {
+        self.cancel.cancel();
+        let clients = std::mem::take(&mut *self.clients.lock().await);
+        for (client_id, client) in clients {
+            client.cancel.cancel();
+            let _ = self.disconnected_tx.send(client_id);
+        }
+        self.tasks.close();
+        if tokio::time::timeout(std::time::Duration::from_secs(2), self.tasks.wait())
+            .await
+            .is_err()
+        {
+            tracing::warn!("timed out waiting for IPC tasks to stop");
+        }
+        self.cleanup_socket()
+    }
+
     async fn broadcast_line(&self, line: Arc<str>) -> Result<()> {
         let mut clients = self.clients.lock().await;
         let mut disconnected = Vec::new();
@@ -236,6 +293,7 @@ impl IpcServer {
         for client_id in disconnected {
             if let Some(client) = clients.remove(&client_id) {
                 client.cancel.cancel();
+                let _ = self.disconnected_tx.send(client_id);
             }
         }
         Ok(())
@@ -247,16 +305,26 @@ impl IpcServer {
         let max_clients = self.max_clients;
         let owner_uid = self.owner_uid;
         let max_client_queue = self.max_client_queue;
+        let disconnected_tx = self.disconnected_tx.clone();
+        let server_cancel = self.cancel.clone();
+        let tasks = self.tasks.clone();
 
-        tokio::spawn(async move {
+        self.tasks.spawn(async move {
             loop {
-                let (socket, _) = match listener.accept().await {
+                let accepted = tokio::select! {
+                    _ = server_cancel.cancelled() => break,
+                    accepted = listener.accept() => accepted,
+                };
+                let (socket, _) = match accepted {
                     Ok(v) => v,
                     Err(err) => {
                         tracing::warn!(error = %err, "failed to accept IPC connection");
                         continue;
                     }
                 };
+                if server_cancel.is_cancelled() {
+                    break;
+                }
 
                 let client_id = next_client_id.fetch_add(1, Ordering::Relaxed);
 
@@ -302,8 +370,9 @@ impl IpcServer {
 
                 let clients_for_remove = clients.clone();
                 let cmd_tx_for_client = cmd_tx.clone();
+                let disconnected_for_client = disconnected_tx.clone();
 
-                tokio::spawn(async move {
+                tasks.spawn(async move {
                     let _ = handle_client(
                         socket,
                         client_id,
@@ -315,6 +384,7 @@ impl IpcServer {
                     .await;
                     if let Some(client) = clients_for_remove.lock().await.remove(&client_id) {
                         client.cancel.cancel();
+                        let _ = disconnected_for_client.send(client_id);
                     }
                 });
             }

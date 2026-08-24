@@ -1,152 +1,82 @@
-use super::fixtures::{make_transport_pair, peer_record, wait_for_registered_connection};
-use crate::message::{Envelope, MessageKind};
-use crate::transport::connection::run_connection;
+use std::time::{Duration, Instant};
+
 use serde_json::json;
-use std::collections::HashMap;
-use std::sync::Arc;
-use std::time::Duration;
-use tokio::sync::{RwLock, broadcast};
-use tokio_util::sync::CancellationToken;
+
+use super::fixtures::make_transport_pair;
+use crate::message::{AgentId, Envelope, MessageKind};
 
 #[tokio::test]
-async fn simultaneous_dial_both_sides_can_message() {
+async fn simultaneous_cross_dial_converges_to_one_connection() {
     let pair = make_transport_pair().await;
-    let addr_a = pair.transport_a.local_addr().expect("local_addr a");
-    let addr_b = pair.transport_b.local_addr().expect("local_addr b");
-    let peer_b = peer_record(&pair.id_b, addr_b);
-    let peer_a = peer_record(&pair.id_a, addr_a);
-
-    let (conn_a, conn_b) = tokio::join!(
-        pair.transport_a.ensure_connection(&peer_b),
-        pair.transport_b.ensure_connection(&peer_a),
-    );
-    conn_a.expect("A→B connect should succeed");
-    conn_b.expect("B→A connect should succeed");
-
-    assert!(pair.transport_a.has_connection(pair.id_b.agent_id()).await);
-    assert!(pair.transport_b.has_connection(pair.id_a.agent_id()).await);
-
-    let mut rx_b = pair.transport_b.subscribe_inbound();
-    let notify = Envelope::new(
-        pair.id_a.agent_id().to_string(),
-        pair.id_b.agent_id().to_string(),
+    let agent_a = AgentId::parse(pair.id_a.agent_id()).unwrap();
+    let agent_b = AgentId::parse(pair.id_b.agent_id()).unwrap();
+    let message_a = Envelope::new(
+        agent_a.clone(),
+        agent_b.clone(),
         MessageKind::Message,
-        json!({"test": "simultaneous"}),
+        json!({"from": "a"}),
+    );
+    let message_b = Envelope::new(
+        agent_b.clone(),
+        agent_a.clone(),
+        MessageKind::Message,
+        json!({"from": "b"}),
+    );
+
+    let (sent_a, sent_b) = tokio::join!(
+        pair.transport_a.send_to(
+            &pair.directory_a,
+            &agent_b,
+            message_a,
+            Duration::from_secs(5),
+        ),
+        pair.transport_b.send_to(
+            &pair.directory_b,
+            &agent_a,
+            message_b,
+            Duration::from_secs(5),
+        ),
+    );
+    sent_a.expect("A to B");
+    sent_b.expect("B to A");
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while (pair.transport_a.connected_count().await != 1
+        || pair.transport_b.connected_count().await != 1)
+        && Instant::now() < deadline
+    {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(pair.transport_a.connected_count().await, 1);
+    assert_eq!(pair.transport_b.connected_count().await, 1);
+}
+
+#[tokio::test]
+async fn explicit_refresh_advances_slot_and_reconnects() {
+    let pair = make_transport_pair().await;
+    let agent_b = AgentId::parse(pair.id_b.agent_id()).unwrap();
+    let first = Envelope::new(
+        AgentId::parse(pair.id_a.agent_id()).unwrap(),
+        AgentId::parse(pair.id_b.agent_id()).unwrap(),
+        MessageKind::Message,
+        json!({"attempt": 1}),
     );
     pair.transport_a
-        .send(&peer_b, notify)
+        .send_to(&pair.directory_a, &agent_b, first, Duration::from_secs(5))
         .await
-        .expect("send A→B should work after simultaneous dial");
+        .expect("first send");
+    pair.transport_a.close_peer(&agent_b, b"test refresh").await;
+    assert!(!pair.transport_a.has_connection(&agent_b).await);
 
-    let received = tokio::time::timeout(Duration::from_secs(5), rx_b.recv())
-        .await
-        .expect("timeout")
-        .expect("recv");
-    assert_eq!(received.kind, MessageKind::Message);
-}
-
-#[tokio::test]
-async fn ensure_connection_idempotent_after_simultaneous_dial() {
-    let pair = make_transport_pair().await;
-    let addr_a = pair.transport_a.local_addr().expect("local_addr a");
-    let addr_b = pair.transport_b.local_addr().expect("local_addr b");
-    let peer_b = peer_record(&pair.id_b, addr_b);
-    let peer_a = peer_record(&pair.id_a, addr_a);
-
-    let (_, _) = tokio::join!(
-        pair.transport_a.ensure_connection(&peer_b),
-        pair.transport_b.ensure_connection(&peer_a),
+    let second = Envelope::new(
+        AgentId::parse(pair.id_a.agent_id()).unwrap(),
+        AgentId::parse(pair.id_b.agent_id()).unwrap(),
+        MessageKind::Message,
+        json!({"attempt": 2}),
     );
-
-    let conn1 = pair
-        .transport_a
-        .ensure_connection(&peer_b)
+    pair.transport_a
+        .send_to(&pair.directory_a, &agent_b, second, Duration::from_secs(5))
         .await
-        .expect("re-ensure should succeed");
-    let conn2 = pair
-        .transport_a
-        .ensure_connection(&peer_b)
-        .await
-        .expect("re-ensure should succeed again");
-    assert_eq!(
-        conn1.stable_id(),
-        conn2.stable_id(),
-        "repeated ensure_connection should return the same connection"
-    );
-}
-
-#[tokio::test]
-async fn superseded_connection_shutdown_preserves_newer_entry() {
-    let pair = make_transport_pair().await;
-    let addr_b = pair.transport_b.local_addr().expect("local_addr b");
-
-    let conn1 = pair
-        .transport_a
-        .endpoint
-        .connect(addr_b, pair.id_b.agent_id())
-        .expect("begin outbound connect 1")
-        .await
-        .expect("complete outbound connect 1");
-
-    let conn2 = pair
-        .transport_a
-        .endpoint
-        .connect(addr_b, pair.id_b.agent_id())
-        .expect("begin outbound connect 2")
-        .await
-        .expect("complete outbound connect 2");
-
-    let shared_connections = Arc::new(RwLock::new(HashMap::new()));
-    let (inbound_tx, _inbound_rx) = broadcast::channel(16);
-    let cancel1 = CancellationToken::new();
-    let cancel2 = CancellationToken::new();
-
-    let task1 = tokio::spawn(run_connection(
-        conn1.clone(),
-        pair.id_a.agent_id().to_string(),
-        inbound_tx.clone(),
-        shared_connections.clone(),
-        cancel1.clone(),
-        None,
-        Duration::from_secs(10),
-        None,
-    ));
-    wait_for_registered_connection(&shared_connections, pair.id_b.agent_id(), conn1.stable_id())
-        .await;
-
-    let task2 = tokio::spawn(run_connection(
-        conn2.clone(),
-        pair.id_a.agent_id().to_string(),
-        inbound_tx,
-        shared_connections.clone(),
-        cancel2.clone(),
-        None,
-        Duration::from_secs(10),
-        None,
-    ));
-    wait_for_registered_connection(&shared_connections, pair.id_b.agent_id(), conn2.stable_id())
-        .await;
-
-    cancel1.cancel();
-    tokio::time::timeout(Duration::from_secs(5), task1)
-        .await
-        .expect("task1 join timeout")
-        .expect("task1 should exit cleanly");
-
-    let current_stable_id = shared_connections
-        .read()
-        .await
-        .get(pair.id_b.agent_id())
-        .map(|c| c.stable_id());
-    assert_eq!(
-        current_stable_id,
-        Some(conn2.stable_id()),
-        "superseded loop must not remove newer connection entry"
-    );
-
-    cancel2.cancel();
-    tokio::time::timeout(Duration::from_secs(5), task2)
-        .await
-        .expect("task2 join timeout")
-        .expect("task2 should exit cleanly");
+        .expect("send after refresh");
+    assert!(pair.transport_a.has_connection(&agent_b).await);
 }

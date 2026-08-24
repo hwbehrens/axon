@@ -16,7 +16,10 @@ Core entrypoints:
 Primary areas:
 
 - ./spec/ — Protocol specifications (authoritative, normative)
-- ./axon/src/ — Rust implementation (daemon, CLI, IPC, QUIC transport, identity, discovery)
+- ./axon/src/peer_directory/ — sole logical peer authority and atomic enrolled-peer store
+- ./axon/src/transport/ — physical QUIC connection ownership, TLS, framing, reconnect
+- ./axon/src/request_broker/ — single handler lease and exactly-once request completion
+- ./axon/src/ — remaining Rust implementation (daemon, CLI, IPC, identity, discovery)
 - ./rubrics/ — Evaluation rubrics (quality, documentation, alignment, agent-readability)
 - ./evaluations/ — Evaluation artifacts
 - ./docs/ — Operational docs, decision log, open questions
@@ -26,6 +29,8 @@ Operating rules:
 - Authority hierarchy: spec/* > AGENTS.md / CONTRIBUTING.md > README.md > code comments
 - If implementation disagrees with a spec, the spec wins; stop and clarify before proceeding
 - Log architectural decisions in docs/decision-log.md; log ambiguities in docs/open-questions.md
+- Discovery creates candidates only; explicit IPC enrollment is the sole transition into TLS trust
+- PeerDirectory owns logical peer state; ConnectionManager owns physical QUIC state
 - Verification: `cd axon && make verify` (fmt + lint + full test suite)
 - All Rust source files must stay under 500 lines
 - Unit tests live in sibling *_tests.rs files; integration/e2e tests in axon/tests/

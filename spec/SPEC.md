@@ -15,10 +15,10 @@ OpenClaw ←→ [Unix Socket] ←→ AXON Daemon ←→ [QUIC/UDP] ←→ AXON D
 ## Design Principles
 
 1. **Point-to-point, not broadcast.** This is direct messaging between known peers. No pub/sub, no multicast, no fan-out.
-2. **Zero-config on LAN.** Agents discover each other automatically. No IP addresses to configure for the common case.
+2. **Zero-config discovery, intentional trust.** Agents find candidates automatically on a LAN, but a local agent or operator explicitly enrolls each peer before communication.
 3. **Secure by default.** All traffic encrypted with forward secrecy. Agents authenticate cryptographically via mTLS.
 4. **Lightweight.** <5MB RSS, negligible CPU when idle. Runs indefinitely.
-5. **Simple.** Minimal protocol surface. Four message kinds, five IPC commands. No unnecessary abstraction layers.
+5. **Simple.** Minimal protocol surface, one owner for each fact, bounded in-memory state, and small inspectable files instead of service dependencies.
 
 ## 1. Identity
 
@@ -40,44 +40,41 @@ OpenClaw ←→ [Unix Socket] ←→ AXON Daemon ←→ [QUIC/UDP] ←→ AXON D
 - Small keys (32 bytes public, 64 bytes private).
 - Well-supported in Rust (`ed25519-dalek`, `rcgen`).
 
-## 2. Discovery
+## 2. Discovery, Enrollment, and Peer State
 
-### Primary: mDNS/DNS-SD (LAN, zero-config)
-- Service type: `_axon._udp.local.`
-- TXT records: `agent_id=ed25519.<32 hex chars>`, `pubkey=<base64 Ed25519 public key>`
-- Browse continuously for peers; maintain a peer table.
-- Stale peer removal: 60s without mDNS refresh.
-- Re-advertise on startup and periodically.
+### Bonjour/zeroconf discovery
 
-### Fallback: Static Peers (config file)
-```yaml
-# ~/.axon/config.yaml
-port: 7100
-advertise_addr: "my-laptop.tail1234.ts.net:7100" # optional override for `axon identity`
-peers:
-  - agent_id: "ed25519.a1b2c3d4..."
-    addr: "100.64.0.5:7100"                    # IP:port
-    pubkey: "base64..."
-  - agent_id: "ed25519.e5f6a7b8..."
-    addr: "my-laptop.tail1234.ts.net:7100"     # hostname:port
-    pubkey: "base64..."
-```
-- Static peers are always in the peer table; mDNS-discovered peers are added/removed dynamically.
-- Static config enables Tailscale/VPN use immediately without any protocol changes.
-- Hostnames are resolved at config-load time (IPv4 preferred). Unresolvable peers are skipped with warning logs.
+- AXON uses DNS-SD/mDNS service type `_axon._udp.local.` for local-link discovery.
+- DNS-SD SRV data supplies the current hostname and QUIC port.
+- TXT records contain `agent_id=ed25519.<32 hex chars>` and `pubkey=<base64 Ed25519 public key>`.
+- Browsing is continuous. Each service instance/interface observation has its own lifetime; losing one observation MUST NOT erase another observation for the same peer.
+- Before exposing an observation, AXON validates that `agent_id` is derived from `pubkey` exactly as specified in §1.
+- Observations are untrusted candidates. Discovery MUST NOT add a key to the TLS pin set or initiate an authenticated connection.
 
-### Implementation
-Discovery is implemented as plain async functions (`run_mdns_discovery`, `run_static_discovery`) that push `PeerEvent`s to a channel. Both feed the same peer table.
+### Intentional enrollment
 
-```rust
-enum PeerEvent {
-    Discovered { agent_id: AgentId, addr: SocketAddr, pubkey: Ed25519PublicKey },
-    Lost { agent_id: AgentId },
-}
-```
+A local client enrolls a candidate with `add_peer`, either by selecting a currently observed Agent ID or by supplying an `axon://` peer token. Enrollment is the only transition that makes an identity trusted. Once enrolled:
 
-### Future: Rendezvous Server
-- Not in v0.2, but the discovery functions can be extended with additional implementations (e.g., rendezvous + STUN) without touching transport or IPC.
+- the `(Agent ID, public key)` binding is immutable;
+- the same key may acquire and lose locators without changing trust;
+- a conflicting key is rejected and surfaced;
+- replacing the identity key requires removing the old peer and enrolling the new Agent ID.
+
+AXON v1 has no automatic-TOFU admission mode.
+
+### Peer directory ownership
+
+`PeerDirectory` is the sole logical owner of validated enrolled peers, configured locators, and live candidate observations. It derives:
+
+- an immutable `Agent ID → public key` pinning snapshot for TLS;
+- dial targets for enrolled peers;
+- read-only peer/candidate views for IPC.
+
+`ConnectionManager` owns connection state and QUIC resources; it does not own or mutate trust. Discovery adapters only produce observations and cannot mutate trusted state directly.
+
+### Scope
+
+Automatic discovery is local-link only. AXON does not define a rendezvous, STUN, NAT traversal, or WAN discovery protocol. Explicit peer tokens may contain DNS or VPN/Tailscale locators. Configured hostnames are retained as names and resolved on every new connection attempt so endpoint rotation does not affect identity trust.
 
 ## 3. Transport: QUIC
 
@@ -90,14 +87,15 @@ enum PeerEvent {
 ### Crate: `quinn`
 
 ### Connection Lifecycle
-1. Peer discovered (via mDNS or static config).
-2. Either side can initiate a QUIC connection (no deterministic initiator rule).
-3. mTLS handshake: both sides present self-signed certificates with ALPN token `axon/1`. Each side validates the peer's certificate public key against the expected pubkey from discovery. Reject if mismatch (prevents MITM) or ALPN negotiation fails.
-4. Connection stays open. Keepalive pings at 15s, idle timeout 60s.
-5. On disconnect: reconnect with exponential backoff (1s, 2s, 4s, ... max 30s).
+1. A peer is explicitly enrolled and has at least one current or configured locator.
+2. Either side may initiate a QUIC connection. When simultaneous cross-dials race, the lexicographically lower Agent ID is the preferred initiator; this is a tie-breaker, not a restriction on dialing an empty slot.
+3. mTLS handshake: both sides present self-signed certificates with ALPN token `axon/1`. Each side validates the peer certificate against the enrolled pin. Unknown or mismatched peers are rejected during TLS.
+4. Exactly one authoritative connection slot exists per peer. A healthy incumbent wins within its generation and duplicates are closed.
+5. Failure, an unhealthy transition, or a failed/timed-out exchange advances the generation. Retrying the exchange redials rather than reusing suspect state. A replacement must authenticate before it occupies the empty slot.
+6. On disconnect: reconnect with exponential backoff (1s, 2s, 4s, ... max 30s). Outcomes and teardown from an older generation cannot mutate a newer slot.
 
 ### Authentication
-Authentication is solely via mTLS. The `PeerTable` owns a shared `PubkeyMap` that TLS certificate verifiers read directly. A peer must be discovered (mDNS or static config) before a connection is accepted — unknown peers are rejected at the TLS layer.
+Authentication is solely via mTLS. TLS verifiers read an immutable pinning snapshot derived from `PeerDirectory`. A peer must be explicitly enrolled before a connection is accepted; discovery alone is insufficient. Unknown peers are rejected at the TLS layer, though their validated identity may be surfaced as an untrusted candidate for local approval.
 
 ### Stream Mapping
 | Kind | Stream | Purpose |
@@ -160,30 +158,39 @@ Line-delimited JSON over Unix socket. Each line is one complete JSON object. Sin
 {"cmd": "peers"}
 {"cmd": "status"}
 {"cmd": "whoami"}
-{"cmd": "add_peer", "pubkey": "<base64>", "addr": "host:port"}
+{"cmd": "add_peer", "agent_id": "<observed-candidate-id>"}
+{"cmd": "add_peer", "token": "axon://<peer-token>"}
+{"cmd": "remove_peer", "agent_id": "<agent_id>"}
+{"cmd": "serve"}
+{"cmd": "reply", "request_id": "<uuid>", "kind": "response|error", "payload": { ... }}
 ```
 
 - **`send`** — Send a message to a remote peer over IPC. Requires `to`, `kind` (`request` or `message`), and `payload`. Optional `timeout_secs` applies to `kind=request`.
-- **`peers`** — List discovered and connected peers.
+- **`peers`** — List bounded candidate and enrolled peer views.
 - **`status`** — Daemon health: uptime, connections, message counts.
 - **`whoami`** — Daemon identity and metadata (`ok`, `agent_id`, `public_key`, optional `name`, `version`, `uptime_secs`).
-- **`add_peer`** — Enroll a new static peer at runtime from `pubkey` + `addr`.
+- **`add_peer`** — Enroll a currently observed candidate or a peer token and persist it atomically.
+- **`remove_peer`** — Revoke an enrolled peer, cancel its attempts, close its connection, and remove its durable record.
+- **`serve`** — Acquire the daemon's single connection-bound inbound request-handler lease.
+- **`reply`** — Resolve one pending inbound request on its originating QUIC stream.
 
 ### Authentication
 Unix socket permissions (`0600`, user-only) as baseline. Peer UID credential check (`SO_PEERCRED`/`getpeereid`) verifies connecting processes belong to the same user. No token-based auth.
 
 ### Multiple IPC Clients
 - Multiple clients can connect to the socket simultaneously.
-- All connected clients receive inbound messages via broadcast while they keep up with delivery.
+- All connected clients receive ordinary inbound messages via broadcast while they keep up with delivery.
 - Per-client outbound IPC queues are bounded; a lagging client is disconnected on overflow rather than silently skipped.
-- Commands are handled by whichever client sends them.
+- Requests are delivered only to the client holding the handler lease. A competing `serve` is rejected until the holder disconnects.
+- The daemon-owned request broker admits at most one reply per pending request. No handler, handler loss, timeout, duplicate reply, late reply, and bounded-delivery failure are explicit terminal outcomes.
+- AXON does not promise exactly-once application execution or durable request processing.
 
 ## 6. CLI
 
 ```
 axon [-q | -v | -vv] [--state-root <dir>] daemon [--port 7100] [--disable-mdns]
     Start the daemon. Runs in foreground (use systemd/launchd for background).
-    --disable-mdns uses static peers only.
+    --disable-mdns uses enrolled peers' configured locators only.
     --state-root sets the AXON state root (socket/identity/config), enabling multi-agent-per-host layouts.
     Aliases: --state, --root. Env fallback: AXON_ROOT. Default: ~/.axon.
     Verbosity: -q (warn), default (info), -v (debug), -vv (trace).
@@ -201,7 +208,7 @@ axon [--state-root <dir>] notify [--json] <agent_id> <message>
     `--json` parses the message as JSON and fails if invalid.
 
 axon [--state-root <dir>] peers [--json]
-    List discovered and connected peers with RTT.
+    List discovered candidates and enrolled peers with trust and connection state.
     Human-readable table by default.
 
 axon [--state-root <dir>] status [--json]
@@ -214,16 +221,19 @@ axon [--state-root <dir>] identity
     Use `--addr host:port` to override the emitted URI address.
     This command is local/offline; it reads/writes identity files in the selected state root.
 
-axon [--state-root <dir>] connect <axon://token>
-    Enroll a peer from token into config.yaml and hot-load it into a running daemon via IPC.
+axon [--state-root <dir>] connect <axon://token-or-candidate-agent-id>
+    Intentionally enroll a peer through the running daemon and persist it in peers.json.
+
+axon [--state-root <dir>] forget <agent_id>
+    Revoke an enrolled peer through the running daemon.
 
 axon [--state-root <dir>] whoami [--json]
     Query daemon identity and metadata over IPC.
     Human-readable labeled output by default.
 
 axon [--state-root <dir>] doctor [--json] [--fix] [--rekey]
-    Diagnose local AXON state (identity, config, IPC socket, peer-cache hygiene).
-    Detects duplicate peer addresses in known_peers.json.
+    Diagnose local AXON state (identity, config, IPC socket, peer-store hygiene).
+    Reports unsupported legacy peer state and invalid peers.json contents.
     Defaults to check mode. `--fix` applies safe repairs (with timestamped backups),
     and `--rekey` regenerates identity material when paired with `--fix`.
     Human-readable checklist output by default.
@@ -232,7 +242,7 @@ axon [--state-root <dir>] config <KEY> [VALUE]
 axon [--state-root <dir>] config --list [--json]
 axon [--state-root <dir>] config --unset <KEY>
 axon [--state-root <dir>] config --edit
-    Read/write scalar config keys: `name`, `port`, `advertise_addr`.
+    Read/write local daemon settings: `name`, `port`, `advertise_addr`.
     Follows git-style config conventions (get/set/list/unset/edit).
 
 axon [--state-root <dir>] examples
@@ -258,8 +268,8 @@ CLI execution contracts:
 ~/.axon/
 ├── identity.key        # Ed25519 private seed (base64 text, chmod 600)
 ├── identity.pub        # Ed25519 public key (base64)
-├── config.yaml         # Optional: name, port, advertise_addr, static peers
-├── known_peers.json    # Cache of last-seen peer addresses (auto-managed)
+├── config.yaml         # Optional local daemon settings
+├── peers.json          # Canonical enrolled-peer store (daemon-managed)
 └── axon.sock           # Unix domain socket (runtime only)
 ```
 
@@ -268,43 +278,59 @@ CLI execution contracts:
 name: my-agent                         # optional display name
 port: 7100                             # optional, default 7100
 advertise_addr: "my-host.tail:7100"    # optional `axon identity` output override
-peers:
-  - agent_id: "ed25519.abc..."
-    addr: "10.0.0.2:7100"              # or "hostname:7100"
-    pubkey: "base64..."
 ```
 
-Only `name`, `port`, `advertise_addr`, and `peers` are configurable. All tuning values (timeouts, buffer sizes, intervals) are hardcoded as constants.
+Only `name`, `port`, and `advertise_addr` are configurable. Enrolled peers are not configuration; they are managed through IPC and stored in `peers.json`. All tuning values (timeouts, buffer sizes, intervals) are hardcoded as constants.
+
+### Peer Store Format
+
+`peers.json` is a small, versioned JSON document:
+
+```json
+{
+  "version": 1,
+  "peers": [
+    {
+      "agent_id": "ed25519.abc...",
+      "pubkey": "<base64>",
+      "locators": ["peer-host-or-ip:7100"]
+    }
+  ]
+}
+```
+
+The store is bounded to 256 enrolled peers and 8 configured locators per peer. Entries are emitted in Agent ID order. Every load validates the entire document, Agent ID/public-key binding, locator syntax, uniqueness, and bounds; invalid state fails closed rather than partially loading. Writes use a temporary file in the same directory, file sync, atomic rename, and parent-directory sync. The daemon is the sole runtime writer.
+
+`config.yaml` peer entries and `known_peers.json` are unsupported legacy state. AXON reports them with re-enrollment guidance and does not import or silently ignore them.
 
 ## 8. Daemon Lifecycle
 
 ### Startup
 1. Load or generate identity keypair.
 2. Generate ephemeral self-signed X.509 cert from keypair.
-3. Read config.yaml (if exists) for port, name, advertise_addr, and static peers.
-4. Load known_peers.json cache.
-5. Start QUIC endpoint (bind port).
-6. Start mDNS advertisement + browsing.
-7. Start Unix socket listener.
-8. Initiate connections to known/discovered peers.
+3. Read config.yaml (if exists) for port, name, and advertise_addr; reject legacy peer entries.
+4. Load and validate peers.json into PeerDirectory; reject unsupported known_peers.json state.
+5. Start Unix socket listener; clean it up if a later startup step fails.
+6. Start QUIC endpoint (bind port).
+7. Start mDNS advertisement + browsing.
+8. Initiate connections only to enrolled peers with current dial targets.
 
 ### Runtime
-- Accept inbound QUIC connections (mTLS validates peer certs against peer table).
+- Accept inbound QUIC connections (mTLS validates peer certs against the current enrolled-pin snapshot).
 - Accept inbound IPC connections.
-- Route messages: IPC → QUIC (outbound), QUIC → IPC (inbound, broadcast to connected clients; lagging IPC clients are disconnected when their bounded queue overflows).
-- Maintain peer table from mDNS events + static config.
-- Periodically save known_peers.json (every 60s or on peer change).
+- Route messages: IPC → QUIC (outbound), QUIC messages → IPC observers, and QUIC requests → the single IPC handler.
+- Maintain candidate observations and enrolled peer state through PeerDirectory.
+- Persist enrollment changes immediately through the atomic peer-store adapter. Ephemeral discovery and connection state are never persisted.
 
 ### Reconnection
 On disconnect, reconnect attempts run as async tasks with in-flight deduplication (only one reconnect attempt per peer at a time). Exponential backoff: 1s initial, 30s max.
 
 ### Shutdown (SIGTERM/SIGINT)
 1. Stop accepting new connections.
-2. Send QUIC close frames to all peers (graceful).
+2. Cancel, close, and join every owned connection/attempt task.
 3. Close Unix socket.
-4. Save known_peers.json.
-5. Remove socket file.
-6. Exit.
+4. Remove socket file.
+5. Exit.
 
 ## 9. Error Handling
 
@@ -316,8 +342,8 @@ On disconnect, reconnect attempts run as async tasks with in-flight deduplicatio
 ## 10. Security Considerations
 
 - **Forward secrecy:** Provided by QUIC's TLS 1.3. Ephemeral key exchange per connection. Compromising the static Ed25519 key does NOT decrypt past sessions.
-- **MITM on first discovery (TOFU):** mDNS is unauthenticated. First discovery trusts the pubkey advertised. Mitigations: (a) known_peers.json pins pubkeys after first contact, (b) static config with pre-shared pubkeys for high-security setups, (c) future: out-of-band verification (QR code, etc.).
-- **mTLS authentication:** Both sides of every QUIC connection present certificates. The peer's certificate public key must match a known pubkey from the peer table. Unknown peers are rejected at the TLS layer.
+- **Unauthenticated discovery:** mDNS advertisements are untrusted candidates. A same-user local IPC action must explicitly enroll a candidate or peer token before its key enters the TLS pin set. Discovery cannot replace an enrolled pin.
+- **mTLS authentication:** Both sides of every QUIC connection present certificates. The peer's certificate public key must match an enrolled pin derived from PeerDirectory. Unknown peers are rejected at the TLS layer.
 - **Local IPC security:** Unix socket permissions (`0600`, user-only) as baseline. Peer UID credential check (`SO_PEERCRED`/`getpeereid`) ensures only the owning user can connect.
 
 ## 11. Dependencies
@@ -347,11 +373,11 @@ anyhow = "1"
 ## 12. Success Criteria
 
 1. Two daemons on the same LAN discover each other within 5 seconds.
-2. Point-to-point message delivery in <10ms on LAN.
+2. A local agent can inspect and intentionally enroll a discovered candidate without entering an IP address.
 3. All messages encrypted with forward secrecy via mTLS.
 4. Clean reconnect after daemon restart.
 5. Daemon uses <5MB RSS memory.
-6. Static peer config works for Tailscale/VPN without code changes.
+6. Explicit peer tokens with DNS or Tailscale/VPN locators reconnect across address rotation.
 7. `axon request` CLI delivers a message end-to-end.
 8. Graceful shutdown: no data loss, clean QUIC close.
 

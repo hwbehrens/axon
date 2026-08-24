@@ -1,152 +1,107 @@
+use base64::{Engine as _, engine::general_purpose::STANDARD};
+use mdns_sd::ServiceInfo;
+
 use super::*;
-use crate::config::PeerAddr;
 
-#[tokio::test]
-async fn static_discovery_emits_all_peers() {
-    let peers = vec![
-        PersistedStaticPeerConfig {
-            agent_id: "ed25519.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
-            addr: PeerAddr::Socket("127.0.0.1:7100".parse().expect("addr")),
-            pubkey: "Zm9v".to_string(),
-        },
-        PersistedStaticPeerConfig {
-            agent_id: "ed25519.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
-            addr: PeerAddr::Socket("127.0.0.1:7101".parse().expect("addr")),
-            pubkey: "YmFy".to_string(),
-        },
-    ];
-
-    let (tx, mut rx) = mpsc::channel(8);
-    let cancel = CancellationToken::new();
-
-    tokio::spawn(async move {
-        let _ = run_static_discovery(peers, tx, cancel).await;
-    });
-
-    let first = rx.recv().await.expect("first event");
-    let second = rx.recv().await.expect("second event");
-
-    match first {
-        PeerEvent::Discovered { agent_id, .. } => {
-            assert_eq!(agent_id, "ed25519.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
-        }
-        _ => panic!("expected Discovered"),
-    }
-    match second {
-        PeerEvent::Discovered { agent_id, .. } => {
-            assert_eq!(agent_id, "ed25519.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
-        }
-        _ => panic!("expected Discovered"),
-    }
+fn identity(seed: u8) -> (AgentId, String) {
+    let public_key = STANDARD.encode([seed; 32]);
+    let agent_id = AgentId::from_pubkey_base64(&public_key).expect("valid test key");
+    (agent_id, public_key)
 }
 
-#[tokio::test]
-async fn static_discovery_stays_alive() {
-    let peers = vec![PersistedStaticPeerConfig {
-        agent_id: "ed25519.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
-        addr: PeerAddr::Socket("127.0.0.1:7100".parse().expect("addr")),
-        pubkey: "Zm9v".to_string(),
-    }];
-
-    let (tx, mut rx) = mpsc::channel(8);
-    let cancel = CancellationToken::new();
-
-    let handle = tokio::spawn(async move { run_static_discovery(peers, tx, cancel).await });
-
-    rx.recv().await.expect("should receive event");
-    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-    assert!(!handle.is_finished());
-    handle.abort();
-}
-
-#[test]
-fn parse_resolved_ignores_self() {
-    let props = [
-        ("agent_id", "ed25519.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
-        ("pubkey", "Zm9v"),
-    ];
-    let info = ServiceInfo::new(
+fn service(agent_id: &AgentId, public_key: &str) -> ServiceInfo {
+    let properties = [("agent_id", agent_id.as_str()), ("pubkey", public_key)];
+    ServiceInfo::new(
         SERVICE_TYPE,
-        "axon-a",
-        "axon-a.local.",
-        "10.1.1.10",
+        "remote-agent",
+        "remote-agent.local.",
+        "192.168.1.20",
         7100,
-        &props[..],
+        &properties[..],
     )
-    .expect("service info");
-
-    let parsed =
-        parse_resolved_service("ed25519.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", &info).expect("parse");
-    assert!(parsed.is_none());
+    .expect("service info")
 }
 
 #[test]
-fn parse_resolved_extracts_peer() {
-    let props = [
-        ("agent_id", "ed25519.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
-        ("pubkey", "YmFy"),
+fn valid_service_becomes_untrusted_observation() {
+    let (local, _) = identity(1);
+    let (remote, public_key) = identity(2);
+
+    let observations =
+        parse_resolved_service(&local, &service(&remote, &public_key)).expect("valid observation");
+
+    assert_eq!(observations.len(), 1);
+    let observation = &observations[0];
+    assert_eq!(observation.identity.agent_id(), &remote);
+    assert_eq!(observation.identity.public_key(), public_key);
+    assert_eq!(observation.endpoint.expect("endpoint").port(), 7100);
+    assert_eq!(observation.source, ObservationSource::Mdns);
+}
+
+#[test]
+fn self_advertisement_is_ignored() {
+    let (local, public_key) = identity(3);
+
+    let observations = parse_resolved_service(&local, &service(&local, &public_key))
+        .expect("self observation parses");
+
+    assert!(observations.is_empty());
+}
+
+#[test]
+fn advertised_agent_id_must_match_public_key() {
+    let (local, _) = identity(4);
+    let (claimed, _) = identity(5);
+    let (_, other_public_key) = identity(6);
+
+    let result = parse_resolved_service(&local, &service(&claimed, &other_public_key));
+
+    assert!(
+        result.is_err(),
+        "identity mismatch must be rejected at discovery"
+    );
+}
+
+#[test]
+fn service_without_public_key_is_not_a_candidate() {
+    let (local, _) = identity(7);
+    let (remote, _) = identity(8);
+    let properties = [("agent_id", remote.as_str())];
+    let info = ServiceInfo::new(
+        SERVICE_TYPE,
+        "remote-agent",
+        "remote-agent.local.",
+        "192.168.1.21",
+        7100,
+        &properties[..],
+    )
+    .expect("service info");
+
+    let observations = parse_resolved_service(&local, &info).expect("missing key is ignored");
+
+    assert!(observations.is_empty());
+}
+
+#[test]
+fn observation_id_is_endpoint_scoped() {
+    let (local, _) = identity(9);
+    let (remote, public_key) = identity(10);
+    let properties = [
+        ("agent_id", remote.as_str()),
+        ("pubkey", public_key.as_str()),
     ];
     let info = ServiceInfo::new(
         SERVICE_TYPE,
-        "axon-b",
-        "axon-b.local.",
-        "10.1.1.11",
-        7101,
-        &props[..],
-    )
-    .expect("service info");
-
-    let parsed =
-        parse_resolved_service("ed25519.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", &info).expect("parse");
-    let (event, _fullname, agent_id) = parsed.expect("expected discovered peer");
-
-    assert_eq!(agent_id, "ed25519.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
-    match event {
-        PeerEvent::Discovered {
-            agent_id,
-            addr,
-            pubkey,
-        } => {
-            assert_eq!(agent_id, "ed25519.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
-            assert_eq!(addr.to_string(), "10.1.1.11:7101");
-            assert_eq!(pubkey, "YmFy");
-        }
-        _ => panic!("expected Discovered"),
-    }
-}
-
-#[test]
-fn parse_resolved_skips_missing_agent_id() {
-    let props: [(&str, &str); 0] = [];
-    let info = ServiceInfo::new(
-        SERVICE_TYPE,
-        "axon-x",
-        "axon-x.local.",
-        "10.1.1.12",
+        "remote-agent",
+        "remote-agent.local.",
+        "192.168.1.22,192.168.1.23",
         7100,
-        &props[..],
+        &properties[..],
     )
     .expect("service info");
 
-    let parsed =
-        parse_resolved_service("ed25519.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", &info).expect("parse");
-    assert!(parsed.is_none());
-}
+    let observations = parse_resolved_service(&local, &info).expect("valid observations");
 
-#[test]
-fn parse_resolved_skips_missing_pubkey() {
-    let props = [("agent_id", "ed25519.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")];
-    let info = ServiceInfo::new(
-        SERVICE_TYPE,
-        "axon-b",
-        "axon-b.local.",
-        "10.1.1.13",
-        7100,
-        &props[..],
-    )
-    .expect("service info");
-
-    let parsed =
-        parse_resolved_service("ed25519.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", &info).expect("parse");
-    assert!(parsed.is_none());
+    assert_eq!(observations.len(), 2);
+    assert_ne!(observations[0].id, observations[1].id);
 }
