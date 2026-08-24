@@ -56,7 +56,7 @@ impl DirectoryMachine {
 
     fn conflicted_ports(&self) -> BTreeSet<u16> {
         let mut owners: BTreeMap<u16, BTreeSet<u64>> = BTreeMap::new();
-        for (_id, (peer, port)) in &self.live {
+        for (peer, port) in self.live.values() {
             owners.entry(*port).or_default().insert(*peer);
         }
         owners
@@ -105,7 +105,9 @@ impl DirectoryMachine {
     #[rule]
     fn observe(&mut self, tc: TestCase) {
         let peer = tc.draw(gs::integers::<u64>().max_value(5));
-        let slot = tc.draw(gs::integers::<u64>().max_value(11));
+        // Slot range crosses MAX_OBSERVATIONS_PER_PEER so the per-peer
+        // observation capacity limit is exercised, not just admired.
+        let slot = tc.draw(gs::integers::<u64>().max_value(19));
         let port = 7000u16 + tc.draw(gs::integers::<u16>().max_value(31));
         let id = Self::observation_id(slot);
 

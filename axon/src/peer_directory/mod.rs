@@ -10,7 +10,7 @@ use anyhow::{Result, bail};
 use tokio::sync::RwLock;
 
 use crate::message::AgentId;
-use state::{CandidatePeer, DirectoryState, EnrolledPeer, LiveObservation, insert_observation};
+use state::{CandidatePeer, DirectoryState, EnrolledPeer, LiveObservation};
 
 pub use store::{PeerStore, StoredPeer};
 pub use types::{
@@ -44,12 +44,6 @@ impl PeerDirectory {
                 bail!("peer store cannot enroll the local Agent ID {local_agent_id}");
             }
             let locators: BTreeSet<_> = peer.locators.into_iter().collect();
-            if locators.len() > MAX_LOCATORS_PER_PEER {
-                bail!(
-                    "peer {} exceeds the locator bound of {MAX_LOCATORS_PER_PEER}",
-                    peer.agent_id
-                );
-            }
             let record = EnrolledPeer {
                 identity,
                 locators,
@@ -82,9 +76,6 @@ impl PeerDirectory {
         }
 
         let mut state = self.state.write().await;
-        if state.identity_conflicts(&observation.identity) {
-            return ObserveOutcome::IdentityConflict;
-        }
         if state
             .observation_index
             .get(&observation.id)
@@ -114,8 +105,23 @@ impl PeerDirectory {
             conflicted: false,
         };
         let agent_id = observation.identity.agent_id().clone();
-        let inserted = if let Some(peer) = state.enrolled.get_mut(&agent_id) {
-            insert_observation(&mut peer.observations, observation.id.clone(), live)
+        // Capacity is checked before any entry is created or extended so a
+        // rejected observation cannot leave an empty candidate behind.
+        let at_observation_capacity = |peer: Option<&BTreeMap<ObservationId, LiveObservation>>| {
+            peer.is_some_and(|observations| observations.len() >= MAX_OBSERVATIONS_PER_PEER)
+        };
+        if let Some(peer) = state.enrolled.get_mut(&agent_id) {
+            if at_observation_capacity(Some(&peer.observations)) {
+                return ObserveOutcome::CapacityReached;
+            }
+            peer.observations.insert(observation.id.clone(), live);
+        } else if at_observation_capacity(
+            state
+                .candidates
+                .get(&agent_id)
+                .map(|peer| &peer.observations),
+        ) {
+            return ObserveOutcome::CapacityReached;
         } else {
             let peer = state
                 .candidates
@@ -124,10 +130,7 @@ impl PeerDirectory {
                     identity: observation.identity,
                     observations: BTreeMap::new(),
                 });
-            insert_observation(&mut peer.observations, observation.id.clone(), live)
-        };
-        if !inserted {
-            return ObserveOutcome::CapacityReached;
+            peer.observations.insert(observation.id.clone(), live);
         }
         state
             .observation_index
@@ -215,16 +218,7 @@ impl PeerDirectory {
         if identity.agent_id() == &self.local_agent_id {
             bail!("cannot enroll the local Agent ID");
         }
-        if locators.len() > MAX_LOCATORS_PER_PEER {
-            bail!("a peer may have at most {MAX_LOCATORS_PER_PEER} configured locators");
-        }
         let mut current = self.state.write().await;
-        if current.identity_conflicts(&identity) {
-            bail!(
-                "conflicting public key for Agent ID {}",
-                identity.agent_id()
-            );
-        }
         if !current.enrolled.contains_key(identity.agent_id())
             && current.enrolled.len() >= MAX_ENROLLED_PEERS
         {
@@ -244,6 +238,9 @@ impl PeerDirectory {
                     .unwrap_or_default(),
             });
         peer.locators.extend(locators);
+        // The post-extend bound is the single authority: it validates the
+        // peer's final locator set, whether the input came from one call or
+        // accumulated across calls.
         if peer.locators.len() > MAX_LOCATORS_PER_PEER {
             bail!("a peer may have at most {MAX_LOCATORS_PER_PEER} configured locators");
         }

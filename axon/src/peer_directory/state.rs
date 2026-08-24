@@ -6,10 +6,7 @@ use std::time::Instant;
 use crate::message::AgentId;
 
 use super::store::StoredPeer;
-use super::{
-    MAX_OBSERVATIONS_PER_PEER, ObservationId, PeerIdentity, PeerLocator, PeerTrust, PeerView,
-    PinningSnapshot,
-};
+use super::{ObservationId, PeerIdentity, PeerLocator, PeerTrust, PeerView, PinningSnapshot};
 
 #[derive(Debug, Clone, Default)]
 pub(super) struct DirectoryState {
@@ -40,17 +37,10 @@ pub(super) struct LiveObservation {
 }
 
 impl DirectoryState {
-    pub(super) fn identity_conflicts(&self, identity: &PeerIdentity) -> bool {
-        self.enrolled
-            .get(identity.agent_id())
-            .map(|peer| peer.identity.public_key() != identity.public_key())
-            .or_else(|| {
-                self.candidates
-                    .get(identity.agent_id())
-                    .map(|peer| peer.identity.public_key() != identity.public_key())
-            })
-            .unwrap_or(false)
-    }
+    // Identity-conflict checks live at the PeerIdentity constructor: every
+    // construction path derives the Agent ID from the public key, so two
+    // identities sharing an Agent ID necessarily share a key. A runtime
+    // comparison here would be provably constant-false.
 
     pub(super) fn recompute_conflicts(&mut self) {
         let mut owners = HashMap::<SocketAddr, BTreeSet<AgentId>>::new();
@@ -148,18 +138,6 @@ impl DirectoryState {
         });
         enrolled.chain(candidates).collect()
     }
-}
-
-pub(super) fn insert_observation(
-    observations: &mut BTreeMap<ObservationId, LiveObservation>,
-    id: ObservationId,
-    observation: LiveObservation,
-) -> bool {
-    if !observations.contains_key(&id) && observations.len() >= MAX_OBSERVATIONS_PER_PEER {
-        return false;
-    }
-    observations.insert(id, observation);
-    true
 }
 
 fn live_endpoints(observations: &BTreeMap<ObservationId, LiveObservation>) -> Vec<SocketAddr> {
