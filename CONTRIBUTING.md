@@ -189,7 +189,12 @@ In `axon/tests/spec_compliance.rs`. Message envelope round-trip serialization te
 
 ### Property-based tests
 
-Use `proptest` in `*_tests.rs` files. Test invariants over randomly generated inputs (round-trip encode/decode, concurrent operations, config precedence). Commit any `proptest-regressions/` files.
+Two frameworks, selected by property shape (see decision-log DEC-015):
+
+- **`proptest`** is the default for value-level properties — invariants over generated values such as round-trip encode/decode, config precedence, or bound enforcement. Use it in `*_tests.rs` files and commit any `proptest-regressions/` files.
+- **`hegeltest`** (Hegel-rust) for stateful, model-based properties — sequences of rules applied to live state with invariants checked per transition (`#[state_machine]`). Its Hypothesis-style shrinking only pays off when counterexamples are rule sequences.
+
+Do not port existing value-level proptests to Hegel absent one of: Hegel reaches a stable release, or stateful properties become the common case. Keep Hegel call sites few while it is beta.
 
 ### Fuzz targets
 
