@@ -40,7 +40,8 @@ pub async fn run_mdns_discovery(
         port,
         &properties[..],
     )
-    .context("failed to build mDNS service info")?;
+    .context("failed to build mDNS service info")?
+    .enable_addr_auto();
     mdns.register(service)
         .context("failed to register mDNS advertisement")?;
     let receiver = mdns

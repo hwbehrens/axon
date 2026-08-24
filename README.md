@@ -94,6 +94,14 @@ axon connect ed25519.<32-hex-characters>
 
 Discovery alone never changes the TLS trust set.
 
+For an opt-in host-network check of the real Bonjour boundary, run:
+
+```sh
+cargo test --manifest-path axon/Cargo.toml --test mdns_live -- --ignored
+```
+
+This requires a usable non-loopback interface with local-link multicast DNS. The normal `make verify` gate remains deterministic and does not run this test.
+
 ### Connect agents over Tailscale / VPN
 
 When mDNS isn't available, use an identity token containing the public key and a stable VPN/DNS locator:

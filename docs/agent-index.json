@@ -86,7 +86,7 @@
       "id": "discovery",
       "description": "Bonjour/mDNS candidate discovery; never a trust authority.",
       "code_roots": ["axon/src/discovery"],
-      "test_roots": ["axon/src/discovery"],
+      "test_roots": ["axon/src/discovery", "axon/tests/mdns_live.rs"],
       "specs": ["spec/SPEC.md"],
       "rubrics": ["rubrics/QUALITY.md"],
       "key_files": [

@@ -23,3 +23,4 @@ Correct identity observations > zero-config LAN discovery > extensibility.
 
 - Unit: `tests.rs`
 - Integration: `axon/tests/integration.rs`
+- Live host-network check (ignored by default): `axon/tests/mdns_live.rs`
