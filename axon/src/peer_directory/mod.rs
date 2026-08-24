@@ -321,3 +321,7 @@ mod tests;
 #[cfg(test)]
 #[path = "properties.rs"]
 mod properties;
+
+#[cfg(test)]
+#[path = "state_machine.rs"]
+mod state_machine_tests;

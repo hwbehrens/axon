@@ -15,12 +15,27 @@ use tokio_util::sync::CancellationToken;
 mod enrollment;
 mod traffic;
 
+use std::collections::HashSet;
+use std::sync::{Mutex, OnceLock};
+
 fn free_port() -> u16 {
-    std::net::UdpSocket::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
+    // Parallel e2e tests each spawn daemons; a naive bind-and-release probe
+    // can hand the same port to two tests, making one daemon unbindable or
+    // pointing dials at the wrong daemon. Register every handed-out port for
+    // the lifetime of the test binary so in-process allocations are unique.
+    // (Cross-process collisions remain possible but are out of scope here.)
+    static CLAIMED: OnceLock<Mutex<HashSet<u16>>> = OnceLock::new();
+    let claimed = CLAIMED.get_or_init(|| Mutex::new(HashSet::new()));
+    loop {
+        let port = std::net::UdpSocket::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        if claimed.lock().unwrap().insert(port) {
+            return port;
+        }
+    }
 }
 
 struct RunningDaemon {

@@ -21,3 +21,4 @@ evaluations/
 # Secrets / certs (safety net)
 *.pem
 *.key
+axon/.hegel/

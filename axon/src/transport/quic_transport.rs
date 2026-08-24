@@ -161,6 +161,39 @@ impl ConnectionManager {
         envelope: Envelope,
         request_timeout: Duration,
     ) -> Result<Option<Envelope>> {
+        // A send that collides with cross-dial convergence can fail on a
+        // connection that loses the tie-break and is closed moments later
+        // (DEC-014). Q-006: failure invalidates the suspect slot, so the
+        // exchange redials instead of surfacing a transient error for a
+        // reachable peer. One retry against the refreshed authoritative
+        // slot; AXON documents at-most-once application execution, so a
+        // single transport-level retry is safe.
+        match self
+            .send_once(directory, peer, envelope.clone(), request_timeout)
+            .await
+        {
+            Ok(response) => Ok(response),
+            Err(first_error) => {
+                self.close_peer(peer, b"send failed; refresh connection")
+                    .await;
+                debug!(
+                    peer = %peer.as_str(),
+                    error = %first_error,
+                    "send failed on suspect slot; retrying once on a refreshed connection"
+                );
+                self.send_once(directory, peer, envelope, request_timeout)
+                    .await
+            }
+        }
+    }
+
+    async fn send_once(
+        &self,
+        directory: &PeerDirectory,
+        peer: &AgentId,
+        envelope: Envelope,
+        request_timeout: Duration,
+    ) -> Result<Option<Envelope>> {
         let connection = self.connect_peer(directory, peer).await?;
         let result = if envelope.kind.expects_response() {
             send_request(&connection, envelope, &self.local_agent_id, request_timeout)
@@ -172,8 +205,7 @@ impl ConnectionManager {
                 .map(|()| None)
         };
         if result.is_err() {
-            self.close_peer(peer, b"send failed; refresh connection")
-                .await;
+            self.close_peer(peer, b"send failed on suspect slot").await;
         }
         result
     }

@@ -10,6 +10,8 @@ Each entry: ID, date, subsystem, one-paragraph summary covering motivation, deci
 
 | ID | Date | Subsystem | Title |
 |---|---|---|---|
+| DEC-016 | 2026-08-24 | transport | Single retry on a send that fails during cross-dial convergence |
+| DEC-015 | 2026-08-24 | peer directory, testing | Adopt Hegel for stateful property testing of the peer directory |
 | DEC-014 | 2026-08-24 | transport | Generation-safe authoritative connection selection |
 | DEC-013 | 2026-08-24 | ipc, transport | Single connection-bound application request handler |
 | DEC-012 | 2026-08-24 | discovery, peer directory, persistence | Intentional LAN admission with one peer authority |
@@ -28,6 +30,18 @@ Each entry: ID, date, subsystem, one-paragraph summary covering motivation, deci
 ---
 
 ## Entries
+
+### DEC-016: Single retry on a send that fails during cross-dial convergence
+
+Date: 2026-08-24 | Subsystem: transport
+
+When both peers dial during startup, a send can land on the connection that loses DEC-014's tie-break; the winner closes it and the exchange fails with a framing error even though a healthy authoritative slot exists milliseconds later. `send_to` now treats such a failure as Q-006's suspect-slot case: it advances the generation by closing the failed slot, redials, and retries the exchange exactly once against the refreshed slot. One retry only — repeated failures still surface as `peer_unreachable`, and AXON's documented at-most-once application-execution guarantee makes the duplicate-delivery risk of a single transport-level retry acceptable. Genuine outages pay one extra refused dial before erroring.
+
+### DEC-015: Adopt Hegel for stateful property testing of the peer directory
+
+Date: 2026-08-24 | Subsystem: peer directory, testing
+
+Peer-directory trust invariants are stateful properties (rules applied to live state, invariants checked after each transition), and the previous hand-rolled proptest op list shrank counterexamples poorly. The `hegeltest` crate (Hegel-rust, MIT, beta) provides Hypothesis-style rule-based state machines with high-quality shrinking, so `peer_directory/state_machine_tests.rs` now expresses observe/enroll/revoke rules and the four trust/durability invariants declaratively; the proptest store roundtrip and other value-level proptests remain on proptest, which stays the repo default where statefulness does not earn Hegel's cost. Adoption is deliberately narrow (one dev-dependency use site, pinned major version) because Hegel is beta and may make breaking changes; revisit scope only if another subsystem has genuinely stateful property needs. `HEGEL_TEST_CASES` scales coverage without code changes for nightly deep runs.
 
 ### DEC-014: Generation-safe authoritative connection selection
 
