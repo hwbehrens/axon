@@ -105,3 +105,24 @@ fn observation_id_is_endpoint_scoped() {
     assert_eq!(observations.len(), 2);
     assert_ne!(observations[0].id, observations[1].id);
 }
+
+#[test]
+fn service_without_agent_id_is_not_a_candidate() {
+    let (local, _) = identity(11);
+    let (_, public_key) = identity(12);
+    // A valid-looking pubkey with no agent_id property cannot identify a peer.
+    let properties = [("pubkey", public_key.as_str())];
+    let info = ServiceInfo::new(
+        SERVICE_TYPE,
+        "remote-agent",
+        "remote-agent.local.",
+        "192.168.1.24",
+        7100,
+        &properties[..],
+    )
+    .expect("service info");
+
+    let observations = parse_resolved_service(&local, &info).expect("missing id is ignored");
+
+    assert!(observations.is_empty());
+}

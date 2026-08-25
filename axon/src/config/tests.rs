@@ -117,8 +117,6 @@ async fn unreadable_config_fails_closed_instead_of_using_defaults() {
 
 #[test]
 fn ensure_root_exists_creates_and_secures_the_root() {
-    use std::os::unix::fs::PermissionsExt;
-
     let root = tempdir().expect("tempdir");
     let nested = root.path().join("axon-state");
     let paths = AxonPaths::from_root(nested.clone());
@@ -136,8 +134,6 @@ fn ensure_root_exists_creates_and_secures_the_root() {
 
 #[test]
 fn ensure_root_exists_rejects_symlinked_root() {
-    use std::os::unix::fs::PermissionsExt;
-
     let root = tempdir().expect("tempdir");
     let real = root.path().join("real");
     std::fs::create_dir_all(&real).expect("real dir");

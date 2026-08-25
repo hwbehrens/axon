@@ -260,3 +260,7 @@ pub enum DaemonReply {
         source: &'static str,
     },
 }
+
+#[cfg(test)]
+#[path = "protocol_tests.rs"]
+mod protocol_tests;

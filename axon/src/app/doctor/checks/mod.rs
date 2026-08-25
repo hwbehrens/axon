@@ -3,6 +3,10 @@ mod daemon_artifacts;
 mod peer_store;
 mod state_root;
 
+#[cfg(test)]
+#[path = "tests.rs"]
+mod tests;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};

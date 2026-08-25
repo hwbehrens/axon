@@ -7,6 +7,10 @@ use axon::config::AxonPaths;
 mod checks;
 mod identity_check;
 
+#[cfg(test)]
+#[path = "artifacts_machine.rs"]
+mod artifacts_machine_tests;
+
 #[derive(Debug, Clone, Args)]
 pub struct DoctorArgs {
     /// Print machine-readable JSON report.
