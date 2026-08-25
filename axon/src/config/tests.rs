@@ -89,3 +89,91 @@ fn legacy_known_peers_file_is_reported() {
 
     assert!(error.to_string().contains("intentionally re-enroll"));
 }
+
+#[tokio::test]
+async fn unreadable_config_fails_closed_instead_of_using_defaults() {
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = tempdir().expect("tempdir");
+    let path = root.path().join("config.yaml");
+    fs::write(&path, "name: alice\n").expect("seed config");
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o000)).expect("chmod");
+    // Root (and some sandboxes) bypass permission bits; skip when the
+    // property cannot be exercised.
+    if fs::read(&path).is_ok() {
+        let _ = fs::set_permissions(&path, fs::Permissions::from_mode(0o644));
+        return;
+    }
+
+    let result = load_persisted_config(&path).await;
+    let _ = fs::set_permissions(&path, fs::Permissions::from_mode(0o644));
+
+    assert!(
+        result.is_err(),
+        "an unreadable config must fail closed, not silently use defaults"
+    );
+}
+
+#[test]
+fn ensure_root_exists_creates_and_secures_the_root() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = tempdir().expect("tempdir");
+    let nested = root.path().join("axon-state");
+    let paths = AxonPaths::from_root(nested.clone());
+
+    paths.ensure_root_exists().expect("create missing root");
+    assert!(nested.is_dir());
+    let mode = fs::symlink_metadata(&nested).unwrap().permissions().mode();
+    assert_eq!(mode & 0o777, 0o700, "AXON root must be owner-only");
+
+    // Idempotent on an existing directory.
+    paths
+        .ensure_root_exists()
+        .expect("existing root stays acceptable");
+}
+
+#[test]
+fn ensure_root_exists_rejects_symlinked_root() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = tempdir().expect("tempdir");
+    let real = root.path().join("real");
+    std::fs::create_dir_all(&real).expect("real dir");
+    let link = root.path().join("link");
+    std::os::unix::fs::symlink(&real, &link).expect("symlink");
+    AxonPaths::from_root(link.clone())
+        .ensure_root_exists()
+        .expect_err("symlinked AXON root must be rejected");
+}
+
+#[test]
+fn discover_with_override_ignores_blank_axon_root_env() {
+    // Env mutation must be serialized against other env-touching tests.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guard = ENV_LOCK.lock().unwrap();
+
+    // SAFETY: single-threaded access to this process env var is guaranteed
+    // by ENV_LOCK; no other test reads AXON_ROOT concurrently.
+    let previous = std::env::var("AXON_ROOT").ok();
+    unsafe { std::env::set_var("AXON_ROOT", "   \t") };
+    let discovered = AxonPaths::discover_with_override(None).expect("discover falls through");
+    match previous {
+        Some(value) => unsafe { std::env::set_var("AXON_ROOT", value) },
+        None => unsafe { std::env::remove_var("AXON_ROOT") },
+    }
+
+    assert_eq!(
+        discovered.root,
+        std::env::var("HOME")
+            .map(|home| std::path::PathBuf::from(home).join(".axon"))
+            .unwrap_or_default(),
+        "a blank AXON_ROOT must fall through to HOME discovery"
+    );
+
+    let override_root = tempdir().expect("tempdir");
+    let overridden =
+        AxonPaths::discover_with_override(Some(override_root.path())).expect("override wins");
+    assert_eq!(overridden.root, override_root.path());
+}
