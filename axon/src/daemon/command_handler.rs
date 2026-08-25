@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -51,39 +51,40 @@ pub(crate) async fn handle_command(cmd: CommandEvent, ctx: &DaemonContext) -> Re
     let client_id = cmd.client_id;
     let reply = match cmd.command {
         IpcCommand::Send {
-            to: _,
-            kind: _,
-            payload: _,
-            timeout_secs: _,
-            ref_id: _,
-            req_id,
-        } if ctx.inflight_sends.load(Ordering::Relaxed) >= ctx.max_inflight_sends => {
-            // Control commands stay responsive under send pressure: only
-            // excess sends are rejected.
-            error_reply(
-                CommandFailure::new(
-                    IpcErrorCode::SendCapacityExceeded,
-                    IpcErrorCode::SendCapacityExceeded.message(),
-                ),
-                req_id,
-            )
-        }
-        IpcCommand::Send {
             to,
             kind,
             payload,
             timeout_secs,
             ref_id,
             req_id,
-        } => match send(ctx, to, kind, payload, timeout_secs, ref_id).await {
-            Ok((msg_id, response)) => DaemonReply::SendOk {
-                ok: true,
-                msg_id,
-                req_id,
-                response,
-            },
-            Err(failure) => error_reply(failure, req_id),
-        },
+        } => {
+            // Reserve a send slot atomically before executing. The budget
+            // counts exactly the sends being processed, so a limit of N
+            // admits N concurrent sends and rejects the rest.
+            if reserve_send_slot(ctx).is_none() {
+                // Control commands stay responsive under send pressure: only
+                // excess sends are rejected.
+                error_reply(
+                    CommandFailure::new(
+                        IpcErrorCode::SendCapacityExceeded,
+                        IpcErrorCode::SendCapacityExceeded.message(),
+                    ),
+                    req_id,
+                )
+            } else {
+                let outcome = send(ctx, to, kind, payload, timeout_secs, ref_id).await;
+                ctx.inflight_sends.fetch_sub(1, Ordering::Relaxed);
+                match outcome {
+                    Ok((msg_id, response)) => DaemonReply::SendOk {
+                        ok: true,
+                        msg_id,
+                        req_id,
+                        response,
+                    },
+                    Err(failure) => error_reply(failure, req_id),
+                }
+            }
+        }
         IpcCommand::Peers { req_id } => {
             let mut peers = Vec::new();
             for peer in ctx.directory.list().await {
@@ -290,9 +291,10 @@ async fn send(
             Ok((msg_id, response))
         }
         Err(_) if matches!(kind, IpcSendKind::Request) => {
-            ctx.transport
-                .close_peer(&to, b"request timed out; refresh connection")
-                .await;
+            // No wholesale close here: `send_to` already retired exactly the
+            // slot each failed attempt used (including this timed-out one).
+            // Closing whatever slot is currently authoritative could destroy
+            // a healthy concurrent replacement.
             Err(CommandFailure::new(
                 IpcErrorCode::Timeout,
                 IpcErrorCode::Timeout.message(),
@@ -347,3 +349,29 @@ fn error_reply(failure: CommandFailure, req_id: Option<String>) -> DaemonReply {
         req_id,
     }
 }
+
+/// Atomically claim one send-capacity slot. Returns `None` when the budget
+/// is exhausted. Compare-and-swap keeps the count consistent when many IPC
+/// commands race: the limit bounds exactly the sends being processed.
+fn reserve_send_slot(ctx: &DaemonContext) -> Option<()> {
+    reserve_slot(&ctx.inflight_sends, ctx.max_inflight_sends)
+}
+
+pub(crate) fn reserve_slot(counter: &AtomicUsize, max: usize) -> Option<()> {
+    loop {
+        let current = counter.load(Ordering::Relaxed);
+        if current >= max {
+            return None;
+        }
+        if counter
+            .compare_exchange_weak(current, current + 1, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+        {
+            return Some(());
+        }
+    }
+}
+
+#[cfg(test)]
+#[path = "command_handler_tests.rs"]
+mod tests;

@@ -197,6 +197,7 @@ Only the handler that received the request may reply. Exactly one reply is admit
 | `handler_busy` | Another IPC connection owns the handler lease. |
 | `not_handler` | The client attempted a handler-only operation without the lease. |
 | `request_not_found` | Request is unknown, expired, disconnected, or already completed. |
+| `send_capacity_exceeded` | The daemon's outbound send budget is exhausted; only `send` commands are rejected, control commands remain served. Retry shortly. |
 | `internal_error` | Unexpected daemon or persistence failure. |
 
 Errors are instructive and MUST NOT report a timeout as `peer_unreachable`.

@@ -31,8 +31,14 @@ pub(crate) struct ConnectionRegistry {
 }
 
 pub(crate) enum Admission {
-    Accepted { generation: u64 },
+    Accepted {
+        generation: u64,
+    },
     Existing(quinn::Connection),
+    /// The admission gate refused the connection (e.g., the peer was revoked
+    /// while its handshake was in flight). The connection has been closed;
+    /// no slot was created or changed.
+    Rejected,
 }
 
 impl ConnectionRegistry {
@@ -56,13 +62,36 @@ impl ConnectionRegistry {
         state.slots.get(peer).map(|slot| slot.connection.clone())
     }
 
-    pub(crate) async fn admit(
+    /// Admission with an authorization gate consulted atomically against
+    /// slot installation.
+    ///
+    /// The gate future runs while the registry's state lock is held, which
+    /// linearizes it against every mutation that closes slots through this
+    /// registry (notably revocation's `close_peer`): either the gate observes
+    /// the authority change and refuses, or the subsequent slot-closing
+    /// mutation lands after installation and tears the fresh slot down.
+    /// A check performed before acquiring this lock would admit handshakes
+    /// that raced a revocation.
+    ///
+    /// Lock ordering: `state` first, then whatever `gate` acquires. Gates
+    /// MUST NOT acquire a lock whose holders acquire the registry state lock.
+    pub(crate) async fn admit_gated<F, Fut>(
         &self,
         peer: AgentId,
         connection: quinn::Connection,
         direction: Direction,
-    ) -> Admission {
+        gate: F,
+    ) -> Admission
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = bool>,
+    {
         let mut state = self.state.write().await;
+        if !gate().await {
+            drop(state);
+            connection.close(0u32.into(), b"peer not admitted");
+            return Admission::Rejected;
+        }
         if state
             .slots
             .get(&peer)
@@ -86,7 +115,6 @@ impl ConnectionRegistry {
                 return Admission::Existing(incumbent.connection.clone());
             }
         }
-
         let replaced = state.slots.insert(
             peer,
             ConnectionSlot {

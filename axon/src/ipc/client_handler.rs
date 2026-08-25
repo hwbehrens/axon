@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use serde_json::Value;
@@ -8,6 +9,14 @@ use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
 use super::protocol::{CommandEvent, DaemonReply, IpcCommand, IpcErrorCode, MAX_IPC_LINE_LENGTH};
+
+/// Maximum time the handler may spend draining an overlong line before the
+/// client is closed. The drain exists so the queued `command_too_large`
+/// error survives the connection close (an abrupt close with unread inbound
+/// data sends RST and discards it); without a deadline a client that pauses
+/// mid-line would hold one of the bounded IPC client slots indefinitely,
+/// and server shutdown could not interrupt it.
+pub(super) const IPC_OVERLONG_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 
 fn build_error_line(error: IpcErrorCode, req_id: Option<String>) -> Arc<str> {
     Arc::from(
@@ -142,25 +151,35 @@ pub(super) async fn handle_client(
             if try_queue_error(&out_tx, IpcErrorCode::CommandTooLarge, None) {
                 writer_close_mode = WriterCloseMode::FlushQueued;
             }
-            // Drain the remainder of the overlong line (bounded) before
-            // closing: closing with unread inbound data sends RST, which
-            // would discard the queued error reply before the client can
-            // read it.
+            // Drain the remainder of the overlong line (bounded in bytes and
+            // in time, and interruptible by cancellation) before closing:
+            // closing with unread inbound data sends RST, which would
+            // discard the queued error reply before the client can read it.
             let mut drained = 0usize;
+            let deadline =
+                tokio::time::sleep_until(tokio::time::Instant::now() + IPC_OVERLONG_DRAIN_TIMEOUT);
+            tokio::pin!(deadline);
             loop {
-                let available_len = match reader.fill_buf().await {
-                    Ok([]) => break, // EOF
-                    Ok(chunk) => {
-                        let newline = chunk.iter().position(|&b| b == b'\n');
-                        match newline {
-                            Some(pos) => {
-                                reader.consume(pos + 1);
-                                break;
-                            }
-                            None => chunk.len(),
-                        }
+                let available_len = tokio::select! {
+                    _ = cancel.cancelled() => break,
+                    _ = &mut deadline => {
+                        tracing::warn!(client_id, "timed out draining overlong IPC line");
+                        break;
                     }
-                    Err(_) => break,
+                    read_result = reader.fill_buf() => match read_result {
+                        Ok([]) => break, // EOF
+                        Ok(chunk) => {
+                            let newline = chunk.iter().position(|&b| b == b'\n');
+                            match newline {
+                                Some(pos) => {
+                                    reader.consume(pos + 1);
+                                    break;
+                                }
+                                None => chunk.len(),
+                            }
+                        }
+                        Err(_) => break,
+                    }
                 };
                 drained += available_len;
                 reader.consume(available_len);

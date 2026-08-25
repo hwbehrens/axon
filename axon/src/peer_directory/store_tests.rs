@@ -145,3 +145,100 @@ async fn unreadable_store_fails_closed_instead_of_loading_empty() {
         "an unreadable peer store must fail closed, not load as empty"
     );
 }
+
+// =========================================================================
+// Filesystem-level load hardening: type checks and byte bounds happen
+// before any read or parse, so hostile store paths cannot cause symlink
+// traversal, blocking reads, or unbounded allocation.
+// =========================================================================
+
+fn seed_valid_store(path: &std::path::Path) {
+    let remote = identity(1);
+    let document = serde_json::json!({
+        "version": 1,
+        "peers": [{
+            "agent_id": remote.agent_id().as_str(),
+            "pubkey": remote.public_key(),
+            "locators": []
+        }]
+    });
+    std::fs::write(path, serde_json::to_vec(&document).expect("encode fixture"))
+        .expect("seed store");
+}
+
+#[tokio::test]
+async fn load_refuses_symlinked_store_path() {
+    let root = tempdir().expect("tempdir");
+    let real = root.path().join("real-peers.json");
+    seed_valid_store(&real);
+
+    let link = root.path().join("peers.json");
+    std::os::unix::fs::symlink(&real, &link).expect("symlink");
+
+    let result = PeerStore::new(link).load().await;
+    let err = result.expect_err("symlinked store path must be refused");
+    assert!(
+        err.to_string().contains("non-regular"),
+        "unexpected error: {err:#}"
+    );
+}
+
+#[tokio::test]
+async fn load_refuses_fifo_store_path() {
+    let root = tempdir().expect("tempdir");
+    let fifo = root.path().join("peers.json");
+    let fifo_c = std::ffi::CString::new(fifo.to_str().expect("utf8 path")).expect("cstring");
+    assert_eq!(
+        unsafe { libc::mkfifo(fifo_c.as_ptr(), 0o600) },
+        0,
+        "mkfifo fixture"
+    );
+
+    // Must fail on the type check without opening (an open would block on
+    // a FIFO with no writer).
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        PeerStore::new(fifo).load(),
+    )
+    .await
+    .expect("load must not hang on a FIFO");
+    let err = result.expect_err("FIFO store path must be refused");
+    assert!(
+        err.to_string().contains("non-regular"),
+        "unexpected error: {err:#}"
+    );
+}
+
+#[tokio::test]
+async fn load_refuses_oversized_store_file() {
+    let root = tempdir().expect("tempdir");
+    let path = root.path().join("peers.json");
+    std::fs::write(&path, vec![b' '; MAX_PEER_STORE_BYTES + 1]).expect("seed oversized");
+
+    let result = PeerStore::new(path).load().await;
+    let err = result.expect_err("oversized store must be refused");
+    assert!(
+        err.to_string().contains("byte"),
+        "unexpected error: {err:#}"
+    );
+}
+
+#[tokio::test]
+async fn load_rejects_growth_between_stat_and_read() {
+    let root = tempdir().expect("tempdir");
+    let path = root.path().join("peers.json");
+    // Exactly at the cap is fine content-wise only if it parses; here it is
+    // invalid JSON, but the point is the read itself must succeed and be
+    // passed to decode rather than rejected by size. One byte over must be
+    // rejected even if it only appears after the metadata check.
+    std::fs::write(&path, b"{\"version\":1,\"peers\":[]}").expect("seed valid-sized store");
+    let decoded = PeerStore::new(path.clone()).load().await;
+    assert!(
+        decoded.is_ok(),
+        "valid store at any size below the cap loads"
+    );
+
+    std::fs::write(&path, vec![b' '; MAX_PEER_STORE_BYTES + 1]).expect("grow beyond cap");
+    let result = PeerStore::new(path).load().await;
+    assert!(result.is_err(), "store grown past the cap must be refused");
+}

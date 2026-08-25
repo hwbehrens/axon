@@ -156,14 +156,12 @@ pub async fn run_daemon(opts: DaemonOptions) -> Result<()> {
                 let Some(command) = maybe_command else { break };
                 if matches!(&command.command, crate::ipc::IpcCommand::Send { .. }) {
                     // Control commands never consume send capacity: they are
-                    // handled inline even when every send slot is busy.
+                    // handled inline even when every send slot is busy. Send
+                    // capacity is reserved inside `handle_command` itself, so
+                    // the budget counts exactly the sends being processed.
                     let command_ctx = ctx.clone();
-                    let inflight = ctx.inflight_sends.clone();
-                    inflight.fetch_add(1, Ordering::Relaxed);
                     send_tasks.spawn(async move {
-                        let result = handle_command(command, &command_ctx).await;
-                        inflight.fetch_sub(1, Ordering::Relaxed);
-                        result
+                        handle_command(command, &command_ctx).await
                     });
                 } else if let Err(err) = handle_command(command, &ctx).await {
                     error!(error = %err, "failed handling IPC command");

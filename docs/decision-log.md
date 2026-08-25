@@ -10,6 +10,7 @@ Each entry: ID, date, subsystem, one-paragraph summary covering motivation, deci
 
 | ID | Date | Subsystem | Title |
 |---|---|---|---|
+| DEC-017 | 2026-08-24 | transport, daemon, ipc | Revocation-linearized admission, at-most-once retries, bounded drains |
 | DEC-016 | 2026-08-24 | transport | Single retry on a send that fails during cross-dial convergence |
 | DEC-015 | 2026-08-24 | peer directory, testing | Adopt Hegel for stateful property testing of the peer directory |
 | DEC-014 | 2026-08-24 | transport | Generation-safe authoritative connection selection |
@@ -31,11 +32,17 @@ Each entry: ID, date, subsystem, one-paragraph summary covering motivation, deci
 
 ## Entries
 
+### DEC-017: Revocation-linearized admission, at-most-once retries, bounded drains
+
+Date: 2026-08-24 | Subsystem: transport, daemon, ipc
+
+Second-round review of the transport/IPC concurrency surface found three races and two contract gaps. (1) Connection admission now consults `PeerDirectory::is_enrolled` inside a gate run while holding the registry's admission lock (`ConnectionRegistry::admit_gated`), on both inbound and outbound paths. Because revocation's `close_peer` takes that same lock after committing the directory change, a handshake racing `remove_peer` either fails the gate or is closed immediately after installation — it can never land a live slot. Lock ordering is registry-state → directory-state; no reverse path exists. (2) The send retry path retires exactly the failed exchange's slot via `retire_if_current_connection`; the wholesale `close_peer` calls in `send_to` and the IPC request-timeout branch were removed because they could destroy a healthy replacement installed concurrently. Additionally, retry eligibility is now classified by delivery ambiguity: fire-and-forget kinds are retried only when the failure occurred before any payload byte was written (`SendError::ambiguous == false`), preserving at-most-once application delivery; requests keep DEC-016's single retry per their documented at-most-one-reply semantics. (3) The IPC overlong-line drain — needed so the queued `command_too_large` error survives RST — is bounded by `IPC_OVERLONG_DRAIN_TIMEOUT` (2s) and cancellation-aware, so a pausing client cannot hold an IPC client slot indefinitely. Peer-store loading refuses non-regular files (symlinks/FIFOs/devices) via `symlink_metadata` before opening and caps reads at `MAX_PEER_STORE_BYTES` (1 MiB). Send-capacity accounting moved into the command handler as a compare-and-swap reservation, so `MAX_INFLIGHT_SENDS = N` admits exactly N concurrent sends.
+
 ### DEC-016: Single retry on a send that fails during cross-dial convergence
 
 Date: 2026-08-24 | Subsystem: transport
 
-When both peers dial during startup, a send can land on the connection that loses DEC-014's tie-break; the winner closes it and the exchange fails with a framing error even though a healthy authoritative slot exists milliseconds later. `send_to` now treats such a failure as Q-006's suspect-slot case: it advances the generation by closing the failed slot, redials, and retries the exchange exactly once against the refreshed slot. One retry only — repeated failures still surface as `peer_unreachable`, and AXON's documented at-most-once application-execution guarantee makes the duplicate-delivery risk of a single transport-level retry acceptable. Genuine outages pay one extra refused dial before erroring.
+When both peers dial during startup, a send can land on the connection that loses DEC-014's tie-break; the winner closes it and the exchange fails with a framing error even though a healthy authoritative slot exists milliseconds later. `send_to` now treats such a failure as Q-006's suspect-slot case: it advances the generation by closing the failed slot, redials, and retries the exchange exactly once against the refreshed slot. One retry only — repeated failures still surface as `peer_unreachable`, and AXON's documented at-most-once application-execution guarantee makes the duplicate-delivery risk of a single transport-level retry acceptable. Genuine outages pay one extra refused dial before erroring. Refined by DEC-017: the blanket retry violated at-most-once for fire-and-forget kinds; retries are now gated on delivery-ambiguity classification.
 
 ### DEC-015: Adopt Hegel for stateful property testing of the peer directory
 

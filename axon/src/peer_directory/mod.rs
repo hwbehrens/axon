@@ -12,7 +12,7 @@ use tokio::sync::RwLock;
 use crate::message::AgentId;
 use state::{CandidatePeer, DirectoryState, EnrolledPeer, LiveObservation};
 
-pub use store::{PeerStore, StoredPeer};
+pub use store::{MAX_PEER_STORE_BYTES, PeerStore, StoredPeer};
 pub use types::{
     DialTarget, ObservationId, ObservationSource, ObserveOutcome, PeerIdentity, PeerLocator,
     PeerObservation, PeerTrust, PeerView,
@@ -274,6 +274,14 @@ impl PeerDirectory {
             .enrolled
             .get(agent_id)
             .map(|peer| peer.identity.clone())
+    }
+
+    /// Enrollment predicate used as the transport's connection-admission
+    /// gate. It shares the directory state lock with `remove_peer`, so a
+    /// result observed under the registry's admission lock is linearized
+    /// against revocation (see `ConnectionRegistry::admit_gated`).
+    pub async fn is_enrolled(&self, agent_id: &AgentId) -> bool {
+        self.state.read().await.enrolled.contains_key(agent_id)
     }
 
     pub async fn enrolled_agent_ids(&self) -> Vec<AgentId> {

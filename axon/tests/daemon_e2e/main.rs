@@ -4,14 +4,16 @@ use std::time::Duration;
 use axon::config::AxonPaths;
 use axon::daemon::{DaemonOptions, run_daemon};
 use axon::identity::Identity;
+use axon::ipc::MAX_IPC_LINE_LENGTH;
 use axon::message::AgentId;
 use axon::peer_directory::{PeerDirectory, PeerIdentity, PeerLocator, PeerStore};
 use serde_json::{Value, json};
 use tempfile::TempDir;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use tokio_util::sync::CancellationToken;
 
+mod drain;
 mod enrollment;
 mod saturation;
 mod traffic;

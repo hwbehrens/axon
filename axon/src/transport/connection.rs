@@ -42,20 +42,63 @@ pub(crate) async fn read_framed(stream: &mut quinn::RecvStream) -> Result<Vec<u8
     Ok(buf)
 }
 
+/// A transport send failure annotated with delivery ambiguity.
+///
+/// `ambiguous` is true once payload bytes may already have reached the peer:
+/// retrying such a send can duplicate application delivery, which violates
+/// AXON's documented at-most-once guarantee for fire-and-forget messages.
+/// Failures that occur before any payload byte is written are provably
+/// undelivered and safe to refresh-and-retry.
+#[derive(Debug)]
+pub(crate) struct SendError {
+    pub(crate) inner: anyhow::Error,
+    pub(crate) ambiguous: bool,
+}
+
+impl SendError {
+    pub(crate) fn pre_send(inner: anyhow::Error) -> Self {
+        Self {
+            inner,
+            ambiguous: false,
+        }
+    }
+
+    fn ambiguous(inner: anyhow::Error) -> Self {
+        Self {
+            inner,
+            ambiguous: true,
+        }
+    }
+}
+
+/// Whether a failed exchange may be retried on a refreshed connection.
+/// Requests keep the single documented transport-level retry (DEC-016):
+/// their reply correlation is specified as at-most-one-reply, not
+/// exactly-once execution. Fire-and-forget kinds may only be retried when
+/// the failure is provably pre-delivery.
+pub(crate) fn retry_permitted(kind: &MessageKind, error: &SendError) -> bool {
+    kind.expects_response() || !error.ambiguous
+}
+
 pub(crate) async fn send_unidirectional(
     connection: &quinn::Connection,
     envelope: Envelope,
-) -> Result<()> {
+) -> Result<(), SendError> {
     let bytes = envelope
         .wire_encode()
-        .context("failed to serialize envelope for wire")?;
+        .map_err(|err| SendError::pre_send(err.context("failed to serialize envelope for wire")))?;
 
-    let mut stream = connection
-        .open_uni()
+    let mut stream = connection.open_uni().await.map_err(|err| {
+        SendError::pre_send(anyhow::Error::new(err).context("failed to open uni stream"))
+    })?;
+    // Past this point the payload may reach the peer: every failure is
+    // classified ambiguous.
+    write_framed(&mut stream, &bytes)
         .await
-        .context("failed to open uni stream")?;
-    write_framed(&mut stream, &bytes).await?;
-    stream.finish().context("failed to finish uni stream")?;
+        .map_err(|err| SendError::ambiguous(err.context("uni frame write failed")))?;
+    stream.finish().map_err(|err| {
+        SendError::ambiguous(anyhow::Error::new(err).context("failed to finish uni stream"))
+    })?;
     Ok(())
 }
 
@@ -64,17 +107,20 @@ pub(crate) async fn send_request(
     envelope: Envelope,
     local_agent_id: &AgentId,
     request_timeout: Duration,
-) -> Result<Envelope> {
+) -> Result<Envelope, SendError> {
     let bytes = envelope
         .wire_encode()
-        .context("failed to serialize request for wire")?;
+        .map_err(|err| SendError::pre_send(err.context("failed to serialize request for wire")))?;
 
-    let (mut send, mut recv) = connection
-        .open_bi()
+    let (mut send, mut recv) = connection.open_bi().await.map_err(|err| {
+        SendError::pre_send(anyhow::Error::new(err).context("failed to open bidi stream"))
+    })?;
+    write_framed(&mut send, &bytes)
         .await
-        .context("failed to open bidi stream")?;
-    write_framed(&mut send, &bytes).await?;
-    send.finish().context("failed to finish request stream")?;
+        .map_err(|err| SendError::ambiguous(err.context("request frame write failed")))?;
+    send.finish().map_err(|err| {
+        SendError::ambiguous(anyhow::Error::new(err).context("failed to finish request stream"))
+    })?;
 
     let timeout_label = if request_timeout.as_millis() < 1000 {
         format!("{}ms", request_timeout.as_millis())
@@ -83,14 +129,16 @@ pub(crate) async fn send_request(
     };
     let response_bytes = timeout(request_timeout, read_framed(&mut recv))
         .await
-        .with_context(|| format!("request timed out after {timeout_label}"))??;
-    let mut response = serde_json::from_slice::<Envelope>(&response_bytes)
-        .context("failed to decode response envelope")?;
+        .map_err(|_| SendError::ambiguous(anyhow!("request timed out after {timeout_label}")))?
+        .map_err(SendError::ambiguous)?;
+    let mut response = serde_json::from_slice::<Envelope>(&response_bytes).map_err(|err| {
+        SendError::ambiguous(anyhow::Error::new(err).context("failed to decode response envelope"))
+    })?;
     response
         .validate()
-        .context("response envelope failed validation")?;
-    validate_bidi_response(&response, envelope.id)?;
-    let peer_id = derive_peer_id_from_connection(connection)?;
+        .map_err(|err| SendError::ambiguous(err.context("response envelope failed validation")))?;
+    validate_bidi_response(&response, envelope.id).map_err(SendError::ambiguous)?;
+    let peer_id = derive_peer_id_from_connection(connection).map_err(SendError::ambiguous)?;
     overwrite_authenticated_identity(&mut response, &peer_id, local_agent_id);
     Ok(response)
 }

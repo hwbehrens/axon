@@ -17,7 +17,8 @@ use crate::peer_directory::{DialTarget, PeerDirectory};
 use crate::transport::{DialPeer, PairRequest};
 
 use super::connection::{
-    derive_peer_id_from_connection, run_connection, send_request, send_unidirectional,
+    SendError, derive_peer_id_from_connection, retry_permitted, run_connection, send_request,
+    send_unidirectional,
 };
 use super::connection_registry::{Admission, ConnectionRegistry, Direction};
 use super::reconnect::ReconnectBook;
@@ -176,23 +177,33 @@ impl ConnectionManager {
         // (DEC-014). Q-006: failure invalidates the suspect slot, so the
         // exchange redials instead of surfacing a transient error for a
         // reachable peer. One retry against the refreshed authoritative
-        // slot; AXON documents at-most-once application execution, so a
-        // single transport-level retry is safe.
+        // slot.
+        //
+        // Slot teardown is precise: `send_once` retires exactly the slot the
+        // failed exchange used. A wholesale `close_peer` here would destroy
+        // a healthy replacement installed concurrently between retirement
+        // and close.
         match self
             .send_once(directory, peer, envelope.clone(), request_timeout)
             .await
         {
             Ok(response) => Ok(response),
             Err(first_error) => {
-                self.close_peer(peer, b"send failed; refresh connection")
-                    .await;
                 debug!(
                     peer = %peer.as_str(),
-                    error = %first_error,
-                    "send failed on suspect slot; retrying once on a refreshed connection"
+                    error = %first_error.inner,
+                    "send failed on suspect slot"
                 );
+                if !retry_permitted(&envelope.kind, &first_error) {
+                    // Ambiguous fire-and-forget failure: the message may
+                    // already have been delivered and broadcast by the peer,
+                    // so a retry could duplicate application delivery.
+                    // At-most-once wins; surface the error to the caller.
+                    return Err(first_error.inner);
+                }
                 self.send_once(directory, peer, envelope, request_timeout)
                     .await
+                    .map_err(|err| err.inner)
             }
         }
     }
@@ -203,8 +214,11 @@ impl ConnectionManager {
         peer: &AgentId,
         envelope: Envelope,
         request_timeout: Duration,
-    ) -> Result<Option<Envelope>> {
-        let connection = self.connect_peer(directory, peer).await?;
+    ) -> Result<Option<Envelope>, SendError> {
+        let connection = self
+            .connect_peer(directory, peer)
+            .await
+            .map_err(SendError::pre_send)?;
         let result = if envelope.kind.expects_response() {
             send_request(&connection, envelope, &self.local_agent_id, request_timeout)
                 .await
@@ -299,17 +313,17 @@ impl ConnectionManager {
             );
         }
         // Revocation race guard: the handshake may have started before the
-        // peer was revoked; do not admit unless enrollment still exists.
-        if self.directory.get_enrolled(&peer.agent_id).await.is_none() {
-            connection.close(0u32.into(), b"peer revoked");
-            bail!("peer {} was revoked during connection setup", peer.agent_id);
-        }
+        // peer was revoked. The enrollment gate runs under the registry's
+        // admission lock (see `admit_gated`), linearizing it against
+        // `remove_peer`: either the gate sees the revocation, or the
+        // subsequent `close_peer` tears the fresh slot down.
         match self
             .registry
-            .admit(
+            .admit_gated(
                 peer.agent_id.clone(),
                 connection.clone(),
                 Direction::Outbound,
+                || self.directory.is_enrolled(&peer.agent_id),
             )
             .await
         {
@@ -323,6 +337,9 @@ impl ConnectionManager {
                 Ok(connection)
             }
             Admission::Existing(existing) => Ok(existing),
+            Admission::Rejected => {
+                bail!("peer {} was revoked during connection setup", peer.agent_id)
+            }
         }
     }
 
@@ -388,11 +405,19 @@ impl ConnectionManager {
                 }
             };
         debug!(peer = %peer, remote = ?connection.remote_address(), "accepted QUIC connection");
-        if let Admission::Accepted { generation } = self
+        // TLS pinning already rejects unknown peers, but a handshake that
+        // started before revocation committed can still complete. The
+        // enrollment gate below runs under the registry's admission lock,
+        // so it is linearized against `remove_peer`'s `close_peer`: a
+        // handshake racing revocation either fails the gate or is closed
+        // moments later by the revocation itself — never left live.
+        let admission = self
             .registry
-            .admit(peer.clone(), connection.clone(), Direction::Inbound)
-            .await
-        {
+            .admit_gated(peer.clone(), connection.clone(), Direction::Inbound, || {
+                self.directory.is_enrolled(&peer)
+            })
+            .await;
+        if let Admission::Accepted { generation } = admission {
             self.spawn_connection_loop(peer, generation, connection, permit);
         }
     }

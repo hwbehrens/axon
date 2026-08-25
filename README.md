@@ -293,8 +293,10 @@ These are compile-time constants and cannot be changed via configuration.
 | `INBOUND_REQUEST_TIMEOUT` | `30s` | `daemon/mod.rs` | Maximum time an IPC request handler may take to reply. |
 | `MAX_PENDING_REQUESTS` | `1024` | `request_broker/mod.rs` | Maximum inbound requests awaiting the single IPC handler. |
 | `MAX_IPC_CLIENTS` | `64` | `daemon/mod.rs` | Maximum simultaneous IPC client connections. |
+| `IPC_OVERLONG_DRAIN_TIMEOUT` | `2s` | `ipc/client_handler.rs` | Maximum time to drain an overlong IPC line before closing the client so the error reply can be delivered. |
+| `MAX_PEER_STORE_BYTES` | `1 MiB` | `peer_directory/store.rs` | Maximum peer-store file size on load. Non-regular files and larger stores are rejected without unbounded reads. |
 | `MAX_CLIENT_QUEUE` | `1024` | `daemon/mod.rs` | Per-IPC-client outbound message queue depth; overflow disconnects lagging clients. |
-| `MAX_INFLIGHT_SENDS` | `256` | `daemon/mod.rs` | Maximum concurrent outbound IPC send operations; excess commands remain backpressured in the bounded IPC channel. |
+| `MAX_INFLIGHT_SENDS` | `256` | `daemon/mod.rs` | Maximum concurrent outbound IPC send operations; excess `send` commands are rejected with `send_capacity_exceeded`, while control commands remain responsive. |
 | Maximum reconnect backoff | `30s` | `transport/reconnect.rs` | Maximum delay between versioned reconnect attempts. |
 | Stale cleanup interval | `5s` | `daemon/mod.rs` | How often the daemon checks for and removes stale discovered peers. |
 | Reconnect interval | `1s` | `daemon/mod.rs` | How often the daemon checks for peers needing reconnection. |

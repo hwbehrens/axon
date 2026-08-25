@@ -1,5 +1,5 @@
 use std::fs::{self, File, OpenOptions};
-use std::io::{ErrorKind, Write};
+use std::io::{ErrorKind, Read, Write};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
@@ -11,6 +11,12 @@ use super::{MAX_ENROLLED_PEERS, MAX_LOCATORS_PER_PEER, PeerIdentity, PeerLocator
 use crate::message::AgentId;
 
 const PEER_STORE_VERSION: u32 = 1;
+
+/// Hard cap on peer-store file size. The logical bounds (`MAX_ENROLLED_PEERS`,
+/// `MAX_LOCATORS_PER_PEER`) bound a well-formed store to roughly 200 KB, so
+/// 1 MiB leaves generous encoding headroom while refusing unbounded reads:
+/// `fs::read` on hostile or corrupted input must not allocate arbitrarily.
+pub const MAX_PEER_STORE_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug, Clone)]
 pub struct PeerStore {
@@ -81,14 +87,39 @@ impl PeerStore {
 }
 
 fn load_sync(path: &Path) -> Result<Vec<StoredPeer>> {
-    let data = match fs::read(path) {
-        Ok(data) => data,
+    // symlink_metadata inspects the path itself: a symlink pointing anywhere
+    // (even inside the state root) is refused rather than followed.
+    let meta = match fs::symlink_metadata(path) {
+        Ok(meta) => meta,
         Err(err) if err.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
         Err(err) => {
             return Err(err)
                 .with_context(|| format!("failed to read peer store: {}", path.display()));
         }
     };
+    if !meta.file_type().is_file() {
+        bail!(
+            "refusing to load non-regular peer-store file: {}",
+            path.display()
+        );
+    }
+    if meta.len() as usize > MAX_PEER_STORE_BYTES {
+        bail!(
+            "peer store is {} bytes; maximum is {MAX_PEER_STORE_BYTES}",
+            meta.len()
+        );
+    }
+    // Re-check the size at read time via `take`: the file may have grown
+    // between the metadata check and the open.
+    let file = File::open(path)
+        .with_context(|| format!("failed to open peer store: {}", path.display()))?;
+    let mut data = Vec::new();
+    file.take(MAX_PEER_STORE_BYTES as u64 + 1)
+        .read_to_end(&mut data)
+        .with_context(|| format!("failed to read peer store: {}", path.display()))?;
+    if data.len() > MAX_PEER_STORE_BYTES {
+        bail!("peer store exceeds {MAX_PEER_STORE_BYTES} byte limit",);
+    }
     PeerStore::decode(&data).with_context(|| format!("in peer store {}", path.display()))
 }
 

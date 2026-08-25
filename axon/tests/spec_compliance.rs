@@ -10,6 +10,8 @@ use serde_json::{Value, json};
 mod cli_help;
 #[path = "spec_compliance/envelope.rs"]
 mod envelope;
+#[path = "spec_compliance/ipc_errors.rs"]
+mod ipc_errors;
 #[path = "spec_compliance/payloads.rs"]
 mod payloads;
 #[path = "spec_compliance/stream_mapping.rs"]
