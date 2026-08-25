@@ -295,6 +295,7 @@ These are compile-time constants and cannot be changed via configuration.
 | `MAX_COMPLETED_CACHE_ENTRIES` | `256` | `request_broker/mod.rs` | Maximum completed-request responses retained for replay of retried exchanges. |
 | `MAX_COMPLETED_CACHE_BYTES` | `4 MiB` | `request_broker/mod.rs` | Aggregate byte budget for the completed-response replay cache. |
 | `DIAL_TIMEOUT` | `10s` | `transport/mod.rs` | Maximum time for a single outbound QUIC dial including handshake. |
+| `MAX_TRACKED_SERVICES` | `1024` | `discovery/mod.rs` | Maximum mDNS service instances tracked for stale-observation diffing; overflow evicts oldest and emits lost events. |
 | `MAX_IPC_CLIENTS` | `64` | `daemon/mod.rs` | Maximum simultaneous IPC client connections. |
 | `IPC_OVERLONG_DRAIN_TIMEOUT` | `2s` | `ipc/client_handler.rs` | Maximum time to drain an overlong IPC line before closing the client so the error reply can be delivered. |
 | `MAX_PEER_STORE_BYTES` | `1 MiB` | `peer_directory/store.rs` | Maximum peer-store file size on load. Non-regular files and larger stores are rejected without unbounded reads. |

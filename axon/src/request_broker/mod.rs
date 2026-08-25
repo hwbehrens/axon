@@ -6,7 +6,7 @@ use serde_json::{Value, json};
 use tokio::sync::{Mutex, oneshot};
 use uuid::Uuid;
 
-use crate::message::{AgentId, Envelope, MessageKind};
+use crate::message::{AgentId, Envelope, MAX_MESSAGE_SIZE, MessageKind};
 
 pub const MAX_PENDING_REQUESTS: usize = 1024;
 /// Completed-request responses are cached so transport-level retries can be
@@ -167,6 +167,14 @@ impl RequestBroker {
                 let _ = pending.response.send(response);
             }
         }
+        // The sweep above may have just tombstoned an earlier attempt of
+        // THIS request UUID. Without this recheck a same-call retry would
+        // fall through to a fresh delivery that the stale attempt's late
+        // `reply` could satisfy — the exact conflation tombstones exist to
+        // prevent.
+        if let Some(replay) = state.completed.replay(&request.id) {
+            return BeginRequest::Respond(replay);
+        }
         if state.pending.contains_key(&request.id) {
             return BeginRequest::Respond(self.error_response(
                 &request,
@@ -256,6 +264,20 @@ impl RequestBroker {
         }
         let response =
             Envelope::response_to(&pending.request, self.local_agent_id.clone(), kind, payload);
+        // Reject BEFORE consuming the pending entry: transport framing would
+        // silently drop an over-limit response while IPC already reported
+        // success. A rejected reply leaves the request pending so the
+        // handler can send a smaller one.
+        if response
+            .wire_encode()
+            .map(|bytes| bytes.len() > MAX_MESSAGE_SIZE as usize)
+            .unwrap_or(true)
+        {
+            // Leave the request pending so the handler can send a smaller
+            // reply.
+            state.pending.insert(request_id, pending);
+            return Err(BrokerError::InvalidPayload);
+        }
         state.completed.remember(request_id, response.clone());
         pending
             .response

@@ -3,6 +3,7 @@ use tempfile::tempdir;
 
 use super::tests::identity;
 use super::*;
+use crate::peer_directory::PeerLocator;
 
 fn store_document(peers: serde_json::Value) -> Vec<u8> {
     serde_json::to_vec(&serde_json::json!({ "version": 1, "peers": peers }))
@@ -241,4 +242,49 @@ async fn load_rejects_growth_between_stat_and_read() {
     std::fs::write(&path, vec![b' '; MAX_PEER_STORE_BYTES + 1]).expect("grow beyond cap");
     let result = PeerStore::new(path).load().await;
     assert!(result.is_err(), "store grown past the cap must be refused");
+}
+
+#[test]
+fn decode_refuses_oversized_input_before_parsing() {
+    let data = vec![b' '; MAX_PEER_STORE_BYTES + 1];
+    let err = PeerStore::decode(&data).expect_err("oversized input must be refused");
+    assert!(
+        err.to_string().contains("maximum"),
+        "unexpected error: {err:#}"
+    );
+}
+
+#[tokio::test]
+async fn save_refuses_serialized_store_over_the_load_cap() {
+    // Hosts have no per-locator length bound, so enrollment can produce a
+    // document larger than MAX_PEER_STORE_BYTES. The save must fail rather
+    // than write a store the next restart refuses to load.
+    let root = tempdir().expect("tempdir");
+    let path = root.path().join("peers.json");
+    let store = PeerStore::new(path.clone());
+
+    let remote = identity(1);
+    let locators: Vec<PeerLocator> = (0..MAX_LOCATORS_PER_PEER)
+        .map(|index| {
+            PeerLocator::parse(&format!("{}:{}", "x".repeat(200_000), 7000 + index))
+                .expect("long-host locator parses")
+        })
+        .collect();
+
+    let result = store
+        .save(vec![StoredPeer {
+            agent_id: remote.agent_id().clone(),
+            public_key: remote.public_key().to_string(),
+            locators,
+        }])
+        .await;
+    let err = result.expect_err("over-cap store must fail to save");
+    assert!(
+        err.to_string().contains("maximum"),
+        "unexpected error: {err:#}"
+    );
+    assert!(
+        !path.exists(),
+        "failed save must not leave a store file behind"
+    );
 }

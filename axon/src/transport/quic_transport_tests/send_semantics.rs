@@ -225,3 +225,25 @@ async fn stale_retirement_spares_current_slot() {
         .await;
     assert!(!pair.transport_a.has_connection(&agent_b).await);
 }
+
+#[tokio::test]
+async fn close_peer_cancels_in_flight_dial_tokens() {
+    // The IPC revocation contract requires cancelling attempts, not just
+    // refusing their admission: close_peer must retire the per-peer dial
+    // token so handshake awaits and reconnect dials observe cancellation.
+    let pair = make_transport_pair().await;
+    let agent_b = AgentId::parse(pair.id_b.agent_id()).unwrap();
+
+    let token = pair.transport_a.dial_token(&agent_b).await;
+    assert!(!token.is_cancelled());
+
+    pair.transport_a.close_peer(&agent_b, b"peer revoked").await;
+    assert!(
+        token.is_cancelled(),
+        "close_peer must cancel the per-peer dial token"
+    );
+
+    // A subsequent dial installs a fresh, uncancelled token.
+    let fresh = pair.transport_a.dial_token(&agent_b).await;
+    assert!(!fresh.is_cancelled());
+}

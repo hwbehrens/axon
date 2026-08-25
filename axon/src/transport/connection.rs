@@ -122,9 +122,12 @@ pub(crate) async fn send_unidirectional(
         .wire_encode()
         .map_err(|err| SendError::pre_send(err.context("failed to serialize envelope for wire")))?;
 
-    let mut stream = connection.open_uni().await.map_err(|err| {
-        SendError::pre_send(anyhow::Error::new(err).context("failed to open uni stream"))
-    })?;
+    let mut stream = tokio::time::timeout(budget, connection.open_uni())
+        .await
+        .map_err(|_| SendError::timeout(anyhow!("uni stream open exceeded send budget")))?
+        .map_err(|err| {
+            SendError::pre_send(anyhow::Error::new(err).context("failed to open uni stream"))
+        })?;
     // Past this point the payload may reach the peer: every failure is
     // classified ambiguous.
     tokio::time::timeout(budget, write_framed(&mut stream, &bytes))
@@ -147,11 +150,17 @@ pub(crate) async fn send_request(
         .wire_encode()
         .map_err(|err| SendError::pre_send(err.context("failed to serialize request for wire")))?;
 
-    let (mut send, mut recv) = connection.open_bi().await.map_err(|err| {
-        SendError::pre_send(anyhow::Error::new(err).context("failed to open bidi stream"))
-    })?;
-    write_framed(&mut send, &bytes)
+    let (mut send, mut recv) = tokio::time::timeout(request_timeout, connection.open_bi())
         .await
+        .map_err(|_| SendError::timeout(anyhow!("bidi stream open exceeded send budget")))?
+        .map_err(|err| {
+            SendError::pre_send(anyhow::Error::new(err).context("failed to open bidi stream"))
+        })?;
+    // Stream credits are peer-controlled: an unbounded write here would let
+    // a trusted peer stall the exchange past its deadline.
+    tokio::time::timeout(request_timeout, write_framed(&mut send, &bytes))
+        .await
+        .map_err(|_| SendError::timeout(anyhow!("request frame write exceeded send budget")))?
         .map_err(|err| SendError::ambiguous(err.context("request frame write failed")))?;
     send.finish().map_err(|err| {
         SendError::ambiguous(anyhow::Error::new(err).context("failed to finish request stream"))

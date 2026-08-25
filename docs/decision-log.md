@@ -10,6 +10,7 @@ Each entry: ID, date, subsystem, one-paragraph summary covering motivation, deci
 
 | ID | Date | Subsystem | Title |
 |---|---|---|---|
+| DEC-019 | 2026-08-24 | transport, broker, discovery, persistence | Whole-exchange deadlines, same-call tombstones, bounded tracking |
 | DEC-018 | 2026-08-24 | transport, request broker, ipc | Deadline-owned sends, tombstoned terminal outcomes, shutdown liveness |
 | DEC-017 | 2026-08-24 | transport, daemon, ipc | Revocation-linearized admission, at-most-once retries, bounded drains |
 | DEC-016 | 2026-08-24 | transport | Single retry on a send that fails during cross-dial convergence |
@@ -32,6 +33,12 @@ Each entry: ID, date, subsystem, one-paragraph summary covering motivation, deci
 ---
 
 ## Entries
+
+### DEC-019: Whole-exchange deadlines, same-call tombstones, bounded tracking
+
+Date: 2026-08-24 | Subsystem: transport, request broker, discovery, persistence
+
+Fourth-round review closed five residual gaps. The send deadline now covers every phase of an exchange: DNS resolution, `open_uni`/`open_bi` stream opens (peer-controlled stream credits could otherwise stall a send past `timeout_secs`), and request frame writes are each bounded by the remaining budget, alongside the existing handshake, response-wait, and uni-write bounds. `begin()` rechecks the completed cache after its lazy sweep, so a retry arriving in the same call that sweeps its own prior attempt replays the tombstoned terminal outcome instead of becoming a fresh delivery the stale attempt's late reply could satisfy. `reply` validates the encoded envelope against the 65,536-byte wire limit BEFORE consuming the pending request, so oversized replies are rejected at IPC (`invalid_command`) instead of being acknowledged locally and silently dropped by transport framing. Peer-store saves enforce the same byte cap loads enforce (and `decode` rejects oversize input before parsing), so enrollment can no longer produce a store the next restart refuses to load. `close_peer` cancels a per-peer dial token observed by handshakes, address iteration, and reconnect tasks, satisfying the IPC revocation contract's requirement to cancel in-flight attempts rather than merely refuse their admission. mDNS service tracking is bounded at `MAX_TRACKED_SERVICES` (1024) with oldest-entry eviction that emits lost events, independent of peer-directory limits.
 
 ### DEC-018: Deadline-owned sends, tombstoned terminal outcomes, shutdown liveness
 

@@ -242,14 +242,80 @@ async fn cancelled_deliveries_are_swept_once_the_ttl_expires() {
     };
     assert!(early.payload.get().contains("in-flight"));
 
-    // ...and once the TTL lapses, the lazy sweep frees the slot: the same
-    // request can be delivered to the handler again.
+    // ...and once the TTL lapses, the lazy sweep frees the slot and
+    // tombstones the terminal timeout: redelivery of the same UUID replays
+    // that outcome instead of opening a fresh delivery (a stale handler's
+    // late reply must never satisfy a new exchange).
     tokio::time::sleep(Duration::from_millis(5)).await;
-    let BeginRequest::Deliver(redelivered) = broker.begin(original.clone(), Duration::ZERO).await
+    let BeginRequest::Respond(replayed) = broker.begin(original.clone(), Duration::ZERO).await
     else {
-        panic!("swept request must be deliverable again");
+        panic!("swept request must replay its tombstoned terminal outcome");
     };
-    assert_eq!(redelivered.request_id, original.id);
+    assert_eq!(replayed.payload_value().unwrap()["code"], "timeout");
+}
+
+#[tokio::test]
+async fn same_call_retry_after_sweep_replays_tombstone_not_fresh_delivery() {
+    // Regression: a single begin() call both sweeps the expired prior
+    // attempt of THIS UUID and then inserts. Without the post-sweep tombstone
+    // recheck, that call produced a fresh delivery whose pending entry the
+    // stale attempt's late reply could satisfy.
+    let broker = RequestBroker::new(agent('a'));
+    broker.register(1).await.unwrap();
+    let original = request();
+    let tiny_ttl = Duration::from_millis(50);
+    let BeginRequest::Deliver(first) = broker.begin(original.clone(), tiny_ttl).await else {
+        panic!("delivery expected");
+    };
+    drop(first); // cancelled before any reply
+
+    tokio::time::sleep(tiny_ttl + Duration::from_millis(100)).await;
+    // SAME call sweeps the expired entry and evaluates this UUID:
+    let outcome = broker.begin(original.clone(), tiny_ttl).await;
+    let BeginRequest::Respond(replayed) = outcome else {
+        panic!("same-call retry must not become a fresh delivery");
+    };
+    assert_eq!(replayed.payload_value().unwrap()["code"], "timeout");
+    // The late reply can only hit RequestNotFound: nothing is pending.
+    assert_eq!(
+        broker
+            .reply(1, original.id, MessageKind::Response, json!({"late": true}))
+            .await,
+        Err(BrokerError::RequestNotFound)
+    );
+}
+
+#[tokio::test]
+async fn oversized_reply_is_rejected_without_consuming_the_request() {
+    let broker = RequestBroker::new(agent('a'));
+    broker.register(1).await.unwrap();
+    let original = request();
+    let BeginRequest::Deliver(delivery) = broker.begin(original.clone(), REQUEST_TTL).await else {
+        panic!("delivery expected");
+    };
+
+    // A payload object that encodes past the 65,536-byte wire limit.
+    let oversized = json!({"blob": "x".repeat(MAX_MESSAGE_SIZE as usize)});
+    assert_eq!(
+        broker
+            .reply(1, original.id, MessageKind::Response, oversized)
+            .await,
+        Err(BrokerError::InvalidPayload),
+        "over-limit reply must be rejected at IPC, not dropped on QUIC"
+    );
+
+    // The request is still pending: a smaller reply succeeds.
+    broker
+        .reply(
+            1,
+            original.id,
+            MessageKind::Response,
+            json!({"answer": "fits"}),
+        )
+        .await
+        .expect("reply within the wire limit must be accepted");
+    let response = delivery.response.await.expect("terminal response");
+    assert_eq!(response.payload_value().unwrap()["answer"], "fits");
 }
 
 #[tokio::test]

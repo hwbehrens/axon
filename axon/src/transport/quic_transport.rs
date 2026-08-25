@@ -5,7 +5,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result};
 use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore, broadcast};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
@@ -13,8 +13,8 @@ use tracing::{debug, info, warn};
 
 use crate::identity::Identity;
 use crate::message::{AgentId, Envelope};
-use crate::peer_directory::{DialTarget, PeerDirectory};
-use crate::transport::{DialPeer, PairRequest};
+use crate::peer_directory::PeerDirectory;
+use crate::transport::PairRequest;
 
 use super::DIAL_TIMEOUT;
 use super::connection::{
@@ -36,6 +36,9 @@ pub struct ConnectionManager {
     max_connections: usize,
     registry: ConnectionRegistry,
     connecting_locks: Arc<Mutex<HashMap<AgentId, Arc<Mutex<()>>>>>,
+    /// Per-peer dial cancellation: revoked on close_peer so in-flight dials
+    /// for a removed peer are cancelled, not left running to completion.
+    dial_cancels: Arc<Mutex<HashMap<AgentId, CancellationToken>>>,
     inbound_tx: broadcast::Sender<Arc<Envelope>>,
     pair_request_tx: broadcast::Sender<PairRequest>,
     connection_semaphore: Arc<Semaphore>,
@@ -98,6 +101,7 @@ impl ConnectionManager {
             max_connections,
             registry: ConnectionRegistry::new(local_agent_id),
             connecting_locks: Arc::new(Mutex::new(HashMap::new())),
+            dial_cancels: Arc::new(Mutex::new(HashMap::new())),
             inbound_tx,
             pair_request_tx,
             connection_semaphore: Arc::new(Semaphore::new(max_connections)),
@@ -129,6 +133,13 @@ impl ConnectionManager {
     }
 
     pub async fn close_peer(&self, agent_id: &AgentId, reason: &'static [u8]) {
+        // Cancel and retire any in-flight dials for this peer first: the
+        // IPC revocation contract requires cancelling attempts, not merely
+        // refusing their admission when they finish.
+        let dial_cancel = self.dial_cancels.lock().await.remove(agent_id);
+        if let Some(token) = dial_cancel {
+            token.cancel();
+        }
         self.registry.close_peer(agent_id, reason).await;
         self.connecting_locks.lock().await.remove(agent_id);
     }
@@ -149,11 +160,14 @@ impl ConnectionManager {
             };
             let manager = self.clone();
             let directory = directory.clone();
+            let dial_cancel = manager.dial_token(&peer).await;
             self.tasks.spawn(async move {
-                // Observe shutdown: a dial stuck in a handshake must not
-                // outlive close_all's join window as a detached task.
+                // Observe shutdown AND per-peer revocation: a dial stuck in
+                // a handshake must not outlive close_all's join window as a
+                // detached task, nor keep dialing after removal.
                 tokio::select! {
                     _ = manager.cancel.cancelled() => {}
+                    _ = dial_cancel.cancelled() => {}
                     result = manager.connect_peer(&directory, &peer, Instant::now() + DIAL_TIMEOUT) => {
                         match result {
                             Ok(_) => manager.reconnect.succeeded(&peer, ticket).await,
@@ -247,136 +261,10 @@ impl ConnectionManager {
         result
     }
 
-    async fn connect_peer(
-        &self,
-        directory: &PeerDirectory,
-        peer: &AgentId,
-        deadline: Instant,
-    ) -> Result<quinn::Connection, SendError> {
-        if let Some(existing) = self.registry.current(peer).await {
-            return Ok(existing);
-        }
-        let targets = directory.dial_targets(peer).await;
-        let mut addresses = Vec::new();
-        let mut last_error = None;
-        for target in targets {
-            match target {
-                DialTarget::Observed(address) => addresses.push(address),
-                DialTarget::Configured(locator) => match locator.resolve().await {
-                    Ok(resolved) => addresses.extend(resolved),
-                    Err(err) => last_error = Some(SendError::pre_send(err)),
-                },
-            }
-        }
-        addresses.sort();
-        addresses.dedup();
-        for addr in addresses {
-            let Some(budget) = deadline.checked_duration_since(Instant::now()) else {
-                last_error = Some(SendError::pre_send_timeout(anyhow!(
-                    "send budget exhausted before dialing {addr}"
-                )));
-                break;
-            };
-            match self
-                .dial(
-                    &DialPeer {
-                        agent_id: peer.clone(),
-                        addr,
-                    },
-                    budget.min(DIAL_TIMEOUT),
-                )
-                .await
-            {
-                Ok(connection) => return Ok(connection),
-                Err(err) => last_error = Some(SendError::pre_send(err)),
-            }
-        }
-        Err(last_error.unwrap_or_else(|| {
-            SendError::pre_send(anyhow!("peer {peer} has no usable dial target"))
-        }))
-    }
-
-    pub async fn ensure_connection(&self, peer: &DialPeer) -> Result<quinn::Connection> {
-        self.dial(peer, DIAL_TIMEOUT).await
-    }
-
     /// Dial with a bounded handshake. All awaits before slot installation
     /// are either quick lock operations or this bounded handshake, so no
     /// cancellation point exists between the admission gate and slot
     /// installation that could leave a half-registered slot.
-    async fn dial(&self, peer: &DialPeer, handshake_budget: Duration) -> Result<quinn::Connection> {
-        if let Some(existing) = self.registry.current(&peer.agent_id).await {
-            return Ok(existing);
-        }
-        let peer_lock = {
-            let mut locks = self.connecting_locks.lock().await;
-            locks
-                .entry(peer.agent_id.clone())
-                .or_insert_with(|| Arc::new(Mutex::new(())))
-                .clone()
-        };
-        let _guard = peer_lock.lock().await;
-        if let Some(existing) = self.registry.current(&peer.agent_id).await {
-            return Ok(existing);
-        }
-        let permit = self
-            .connection_semaphore
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| anyhow!("connection limit reached"))?;
-        let connecting = self
-            .endpoint
-            .connect(peer.addr, peer.agent_id.as_str())
-            .with_context(|| format!("failed to begin QUIC connect to {}", peer.addr))?;
-        let remote_addr = connecting.remote_address();
-        // The handshake is the only long await before slot installation; it
-        // is bounded so a stalled dial cannot outlive the caller's budget.
-        let connection = tokio::time::timeout(
-            handshake_budget,
-            with_handshake_remote_addr(remote_addr, connecting),
-        )
-        .await
-        .map_err(|_| anyhow!("QUIC handshake timed out with {}", peer.addr))?
-        .with_context(|| format!("QUIC handshake failed with {}", peer.addr))?;
-        let authenticated = AgentId::parse(&derive_peer_id_from_connection(&connection)?)?;
-        if authenticated != peer.agent_id {
-            connection.close(0u32.into(), b"authenticated peer mismatch");
-            bail!(
-                "authenticated peer {authenticated} does not match {}",
-                peer.agent_id
-            );
-        }
-        // Revocation race guard: the handshake may have started before the
-        // peer was revoked. The enrollment gate runs under the registry's
-        // admission lock (see `admit_gated`), linearizing it against
-        // `remove_peer`: either the gate sees the revocation, or the
-        // subsequent `close_peer` tears the fresh slot down.
-        match self
-            .registry
-            .admit_gated(
-                peer.agent_id.clone(),
-                connection.clone(),
-                Direction::Outbound,
-                || self.directory.is_enrolled(&peer.agent_id),
-            )
-            .await
-        {
-            Admission::Accepted { generation } => {
-                self.spawn_connection_loop(
-                    peer.agent_id.clone(),
-                    generation,
-                    connection.clone(),
-                    permit,
-                );
-                Ok(connection)
-            }
-            Admission::Existing(existing) => Ok(existing),
-            Admission::Rejected => {
-                bail!("peer {} was revoked during connection setup", peer.agent_id)
-            }
-        }
-    }
-
     pub async fn close_all(&self) {
         self.endpoint.close(0u32.into(), b"shutdown");
         self.registry.close_all().await;
@@ -489,6 +377,9 @@ impl ConnectionManager {
         });
     }
 }
+
+#[path = "quic_transport_dial.rs"]
+mod dial;
 
 #[cfg(test)]
 #[path = "quic_transport_tests/mod.rs"]

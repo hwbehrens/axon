@@ -174,7 +174,7 @@ Resolve one pending request delivered to the current handler.
 {"ok":true,"request_id":"<uuid>"}
 ```
 
-Only the handler that received the request may reply. Exactly one reply is admitted. Duplicate, late, unknown, and non-owner replies are rejected explicitly.
+Only the handler that received the request may reply. Exactly one reply is admitted. Duplicate, late, unknown, and non-owner replies are rejected explicitly. A reply whose encoded envelope would exceed the 65,536-byte wire limit is rejected with `invalid_command` before the request is consumed; the handler may retry with a smaller payload.
 
 ---
 

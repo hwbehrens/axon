@@ -12,6 +12,13 @@ use crate::peer_directory::{ObservationId, ObservationSource, PeerObservation};
 
 pub const SERVICE_TYPE: &str = "_axon._udp.local.";
 
+/// Maximum number of mDNS service instances tracked for stale-observation
+/// diffing. Hostile or misbehaving networks could otherwise grow this map
+/// indefinitely by announcing unique instance names that never emit
+/// `ServiceRemoved`. Eviction is oldest-entry and emits `Lost` so the peer
+/// directory expires the corresponding candidates.
+pub const MAX_TRACKED_SERVICES: usize = 1024;
+
 #[derive(Debug, Clone)]
 pub enum DiscoveryEvent {
     Observed(PeerObservation),
@@ -69,6 +76,28 @@ pub async fn run_mdns_discovery(
                                     .iter()
                                     .map(|observation| observation.id.clone())
                                     .collect();
+                                // Bound the tracking map independently of
+                                // peer-directory limits: evict an arbitrary
+                                // tracked service when a NEW name arrives at
+                                // capacity, surfacing Lost for its ids.
+                                if !observations_by_service.contains_key(&fullname)
+                                    && observations_by_service.len() >= MAX_TRACKED_SERVICES
+                                    && let Some(evicted) =
+                                        observations_by_service.keys().next().cloned()
+                                {
+                                    warn!(
+                                        service = %evicted,
+                                        capacity = MAX_TRACKED_SERVICES,
+                                        "mDNS service tracking at capacity; evicting"
+                                    );
+                                    if let Some(ids) = observations_by_service.remove(&evicted) {
+                                        for id in ids {
+                                            if tx.send(DiscoveryEvent::Lost(id)).await.is_err() {
+                                                return Ok(());
+                                            }
+                                        }
+                                    }
+                                }
                                 let previous = observations_by_service
                                     .insert(fullname, next_ids.clone())
                                     .unwrap_or_default();

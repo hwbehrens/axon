@@ -66,6 +66,15 @@ impl PeerStore {
     /// content: file loads and the fuzz harness share it, so no caller can
     /// bypass version, bound, identity-binding, or duplicate checks.
     pub fn decode(data: &[u8]) -> Result<Vec<StoredPeer>> {
+        // The shared entrypoint for untrusted content: refuse oversized
+        // input before parsing so no caller (file load, fuzz harness) can
+        // force large allocations.
+        if data.len() > MAX_PEER_STORE_BYTES {
+            bail!(
+                "peer store content is {} bytes; maximum is {MAX_PEER_STORE_BYTES}",
+                data.len()
+            );
+        }
         let document: PeerStoreDocument = serde_json::from_slice(data)
             .with_context(|| "failed to parse peer store".to_string())?;
         if document.version != PEER_STORE_VERSION {
@@ -147,6 +156,15 @@ fn save_sync(path: &Path, peers: Vec<StoredPeer>) -> Result<()> {
     };
     let mut data = serde_json::to_vec_pretty(&document).context("failed to encode peer store")?;
     data.push(b'\n');
+    // Enforce the same cap `load_sync` enforces on read: a save that
+    // produced an over-cap store would be refused at the next restart,
+    // bricking the state root. Fail here, before anything is written.
+    if data.len() > MAX_PEER_STORE_BYTES {
+        bail!(
+            "serialized peer store is {} bytes; maximum is {MAX_PEER_STORE_BYTES}",
+            data.len()
+        );
+    }
 
     let file_name = path
         .file_name()
