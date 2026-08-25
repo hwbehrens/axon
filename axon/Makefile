@@ -32,7 +32,7 @@ fmt:
 
 # Lint (must be warning-free)
 lint:
-	cargo clippy -- -D warnings
+	cargo clippy --all-targets -- -D warnings
 
 # Type check only (fast)
 check:

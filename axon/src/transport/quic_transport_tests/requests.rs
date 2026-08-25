@@ -101,7 +101,10 @@ async fn send_with_timeout_honors_custom_request_timeout() {
         )
         .await
         .expect_err("custom request timeout should be enforced");
-    assert!(err.to_string().contains("request timed out after 50ms"));
+    // The whole exchange (including the refresh-and-retry dial) is bounded
+    // by the one budget, so exhaustion may surface either as the response
+    // wait timing out or as a refused redial — both are timeout failures.
+    assert!(err.timed_out, "expected a timeout failure, got: {err}");
     assert!(
         !pair.transport_a.has_connection(&peer_b).await,
         "timed-out exchange must invalidate the connection slot"

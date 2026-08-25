@@ -270,3 +270,85 @@ async fn reconcile_clients_revokes_leases_and_pending_for_gone_clients() {
     let response = delivery.response.await.expect("orphaned request resolves");
     assert_eq!(response.kind, MessageKind::Error);
 }
+
+// =========================================================================
+// Round-three review regressions: terminal-outcome tombstones and
+// replay-before-handler-lookup.
+// =========================================================================
+
+#[tokio::test]
+async fn swept_request_uuid_is_tombstoned_and_never_redelivered() {
+    let broker = RequestBroker::new(agent('b'));
+    broker.register(1).await.expect("handler");
+    let original = request();
+    let tiny_ttl = Duration::from_millis(50);
+    let BeginRequest::Deliver(first) = broker.begin(original.clone(), tiny_ttl).await else {
+        panic!("request should be delivered");
+    };
+
+    // Force the lazy sweep to expire the pending entry while handler 1 is
+    // still connected (simulates a cancelled awaiter).
+    tokio::time::sleep(tiny_ttl + Duration::from_millis(100)).await;
+    let other = Arc::new(Envelope::new(
+        agent('a'),
+        agent('b'),
+        MessageKind::Request,
+        json!({"question":"other"}),
+    ));
+    // Any begin() runs the lazy sweep; its own outcome is irrelevant here.
+    // Any begin() runs the lazy sweep; its own outcome is irrelevant here.
+    // It must pass the same tiny TTL for the expiry comparison.
+    let outcome_other = broker.begin(other, tiny_ttl).await;
+    drop(outcome_other);
+    // Observing the swept entry's terminal response keeps the sender side
+    // of the oneshot from being reported dropped.
+    let _ = first.response.await;
+
+    // Redelivery of the SAME envelope id must replay the tombstoned
+    // timeout, not open a new delivery that the old handler's late reply
+    // could satisfy.
+    let outcome = broker.begin(original.clone(), REQUEST_TTL).await;
+    let BeginRequest::Respond(replayed) = outcome else {
+        panic!("tombstoned request must not be redelivered");
+    };
+    assert_eq!(replayed.payload_value().unwrap()["code"], "timeout");
+
+    // The stale handler's late reply can only hit RequestNotFound.
+    assert_eq!(
+        broker
+            .reply(1, original.id, MessageKind::Response, json!({"late": true}))
+            .await,
+        Err(BrokerError::RequestNotFound)
+    );
+}
+
+#[tokio::test]
+async fn completed_response_replays_without_a_registered_handler() {
+    let broker = RequestBroker::new(agent('b'));
+    broker.register(1).await.expect("handler");
+    let original = request();
+    let BeginRequest::Deliver(delivery) = broker.begin(original.clone(), REQUEST_TTL).await else {
+        panic!("request should be delivered");
+    };
+    broker
+        .reply(
+            1,
+            original.id,
+            MessageKind::Response,
+            json!({"answer":"cached"}),
+        )
+        .await
+        .expect("reply");
+    let _ = broker
+        .await_response(delivery, Duration::from_secs(1))
+        .await;
+
+    // Handler disconnects (client gone), then the peer retries the same
+    // request: the cached response must win over `unhandled`.
+    broker.disconnect(1).await;
+    let BeginRequest::Respond(replayed) = broker.begin(original.clone(), REQUEST_TTL).await else {
+        panic!("completed exchange must not be re-delivered after handler loss");
+    };
+    assert_eq!(replayed.kind, MessageKind::Response);
+    assert_eq!(replayed.payload_value().unwrap()["answer"], json!("cached"));
+}

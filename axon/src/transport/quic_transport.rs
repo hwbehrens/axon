@@ -16,6 +16,7 @@ use crate::message::{AgentId, Envelope};
 use crate::peer_directory::{DialTarget, PeerDirectory};
 use crate::transport::{DialPeer, PairRequest};
 
+use super::DIAL_TIMEOUT;
 use super::connection::{
     SendError, derive_peer_id_from_connection, retry_permitted, run_connection, send_request,
     send_unidirectional,
@@ -149,15 +150,22 @@ impl ConnectionManager {
             let manager = self.clone();
             let directory = directory.clone();
             self.tasks.spawn(async move {
-                match manager.connect_peer(&directory, &peer).await {
-                    Ok(_) => manager.reconnect.succeeded(&peer, ticket).await,
-                    Err(err) => {
-                        if let Some(wait) = manager
-                            .reconnect
-                            .failed(&peer, ticket, Instant::now())
-                            .await
-                        {
-                            warn!(peer = %peer, error = %err, retry_in = ?wait, "reconnect attempt failed");
+                // Observe shutdown: a dial stuck in a handshake must not
+                // outlive close_all's join window as a detached task.
+                tokio::select! {
+                    _ = manager.cancel.cancelled() => {}
+                    result = manager.connect_peer(&directory, &peer, Instant::now() + DIAL_TIMEOUT) => {
+                        match result {
+                            Ok(_) => manager.reconnect.succeeded(&peer, ticket).await,
+                            Err(err) => {
+                                if let Some(wait) = manager
+                                    .reconnect
+                                    .failed(&peer, ticket, Instant::now())
+                                    .await
+                                {
+                                    warn!(peer = %peer, error = %err.inner, retry_in = ?wait, "reconnect attempt failed");
+                                }
+                            }
                         }
                     }
                 }
@@ -171,7 +179,7 @@ impl ConnectionManager {
         peer: &AgentId,
         envelope: Envelope,
         request_timeout: Duration,
-    ) -> Result<Option<Envelope>> {
+    ) -> Result<Option<Envelope>, SendError> {
         // A send that collides with cross-dial convergence can fail on a
         // connection that loses the tie-break and is closed moments later
         // (DEC-014). Q-006: failure invalidates the suspect slot, so the
@@ -179,12 +187,14 @@ impl ConnectionManager {
         // reachable peer. One retry against the refreshed authoritative
         // slot.
         //
-        // Slot teardown is precise: `send_once` retires exactly the slot the
-        // failed exchange used. A wholesale `close_peer` here would destroy
-        // a healthy replacement installed concurrently between retirement
-        // and close.
+        // The deadline covers the whole exchange (dial + write + response)
+        // and is enforced INSIDE this call, never by an external canceller:
+        // a dropped future could skip `send_once`'s retirement of the exact
+        // failed connection. Every failure here flows through normal error
+        // returns, so retirement is unconditional on failure.
+        let deadline = Instant::now() + request_timeout;
         match self
-            .send_once(directory, peer, envelope.clone(), request_timeout)
+            .send_once(directory, peer, envelope.clone(), deadline)
             .await
         {
             Ok(response) => Ok(response),
@@ -199,11 +209,9 @@ impl ConnectionManager {
                     // already have been delivered and broadcast by the peer,
                     // so a retry could duplicate application delivery.
                     // At-most-once wins; surface the error to the caller.
-                    return Err(first_error.inner);
+                    return Err(first_error);
                 }
-                self.send_once(directory, peer, envelope, request_timeout)
-                    .await
-                    .map_err(|err| err.inner)
+                self.send_once(directory, peer, envelope, deadline).await
             }
         }
     }
@@ -213,18 +221,18 @@ impl ConnectionManager {
         directory: &PeerDirectory,
         peer: &AgentId,
         envelope: Envelope,
-        request_timeout: Duration,
+        deadline: Instant,
     ) -> Result<Option<Envelope>, SendError> {
-        let connection = self
-            .connect_peer(directory, peer)
-            .await
-            .map_err(SendError::pre_send)?;
+        let connection = self.connect_peer(directory, peer, deadline).await?;
+        let remaining = deadline
+            .checked_duration_since(Instant::now())
+            .unwrap_or_default();
         let result = if envelope.kind.expects_response() {
-            send_request(&connection, envelope, &self.local_agent_id, request_timeout)
+            send_request(&connection, envelope, &self.local_agent_id, remaining)
                 .await
                 .map(Some)
         } else {
-            send_unidirectional(&connection, envelope)
+            send_unidirectional(&connection, envelope, remaining)
                 .await
                 .map(|()| None)
         };
@@ -243,7 +251,8 @@ impl ConnectionManager {
         &self,
         directory: &PeerDirectory,
         peer: &AgentId,
-    ) -> Result<quinn::Connection> {
+        deadline: Instant,
+    ) -> Result<quinn::Connection, SendError> {
         if let Some(existing) = self.registry.current(peer).await {
             return Ok(existing);
         }
@@ -255,28 +264,47 @@ impl ConnectionManager {
                 DialTarget::Observed(address) => addresses.push(address),
                 DialTarget::Configured(locator) => match locator.resolve().await {
                     Ok(resolved) => addresses.extend(resolved),
-                    Err(err) => last_error = Some(err),
+                    Err(err) => last_error = Some(SendError::pre_send(err)),
                 },
             }
         }
         addresses.sort();
         addresses.dedup();
         for addr in addresses {
+            let Some(budget) = deadline.checked_duration_since(Instant::now()) else {
+                last_error = Some(SendError::pre_send_timeout(anyhow!(
+                    "send budget exhausted before dialing {addr}"
+                )));
+                break;
+            };
             match self
-                .ensure_connection(&DialPeer {
-                    agent_id: peer.clone(),
-                    addr,
-                })
+                .dial(
+                    &DialPeer {
+                        agent_id: peer.clone(),
+                        addr,
+                    },
+                    budget.min(DIAL_TIMEOUT),
+                )
                 .await
             {
                 Ok(connection) => return Ok(connection),
-                Err(err) => last_error = Some(err),
+                Err(err) => last_error = Some(SendError::pre_send(err)),
             }
         }
-        Err(last_error.unwrap_or_else(|| anyhow!("peer {peer} has no usable dial target")))
+        Err(last_error.unwrap_or_else(|| {
+            SendError::pre_send(anyhow!("peer {peer} has no usable dial target"))
+        }))
     }
 
     pub async fn ensure_connection(&self, peer: &DialPeer) -> Result<quinn::Connection> {
+        self.dial(peer, DIAL_TIMEOUT).await
+    }
+
+    /// Dial with a bounded handshake. All awaits before slot installation
+    /// are either quick lock operations or this bounded handshake, so no
+    /// cancellation point exists between the admission gate and slot
+    /// installation that could leave a half-registered slot.
+    async fn dial(&self, peer: &DialPeer, handshake_budget: Duration) -> Result<quinn::Connection> {
         if let Some(existing) = self.registry.current(&peer.agent_id).await {
             return Ok(existing);
         }
@@ -301,9 +329,15 @@ impl ConnectionManager {
             .connect(peer.addr, peer.agent_id.as_str())
             .with_context(|| format!("failed to begin QUIC connect to {}", peer.addr))?;
         let remote_addr = connecting.remote_address();
-        let connection = with_handshake_remote_addr(remote_addr, connecting)
-            .await
-            .with_context(|| format!("QUIC handshake failed with {}", peer.addr))?;
+        // The handshake is the only long await before slot installation; it
+        // is bounded so a stalled dial cannot outlive the caller's budget.
+        let connection = tokio::time::timeout(
+            handshake_budget,
+            with_handshake_remote_addr(remote_addr, connecting),
+        )
+        .await
+        .map_err(|_| anyhow!("QUIC handshake timed out with {}", peer.addr))?
+        .with_context(|| format!("QUIC handshake failed with {}", peer.addr))?;
         let authenticated = AgentId::parse(&derive_peer_id_from_connection(&connection)?)?;
         if authenticated != peer.agent_id {
             connection.close(0u32.into(), b"authenticated peer mismatch");
@@ -346,12 +380,18 @@ impl ConnectionManager {
     pub async fn close_all(&self) {
         self.endpoint.close(0u32.into(), b"shutdown");
         self.registry.close_all().await;
+        // Every tracked task observes `cancel` (accept loop, connection
+        // loops via run_connection, reconnect dials above), so this join is
+        // bounded in practice; the timeout only guards pathological stalls.
         self.tasks.close();
         if tokio::time::timeout(Duration::from_secs(2), self.tasks.wait())
             .await
             .is_err()
         {
-            warn!("timed out waiting for connection tasks to stop");
+            warn!(
+                "timed out waiting for connection tasks to stop; \
+                 residual tasks observe cancellation and will exit"
+            );
         }
     }
 

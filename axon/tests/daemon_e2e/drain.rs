@@ -27,9 +27,14 @@ async fn paused_overlong_line_client_is_replied_then_closed_within_bound() {
 
     let started = std::time::Instant::now();
     let mut line = String::new();
-    tokio::time::timeout(Duration::from_secs(10), reader.read_line(&mut line))
+    let reply = tokio::time::timeout(Duration::from_secs(10), reader.read_line(&mut line))
         .await
-        .expect("server must reply within the bound instead of hanging on the drain");
+        .expect("server must reply within the bound instead of hanging on the drain")
+        .expect("reply read must not fail");
+    assert!(
+        reply > 0,
+        "expected the command_too_large reply line before EOF"
+    );
     assert!(
         line.contains("command_too_large"),
         "expected command_too_large reply, got: {line}"

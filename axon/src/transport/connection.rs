@@ -49,10 +49,17 @@ pub(crate) async fn read_framed(stream: &mut quinn::RecvStream) -> Result<Vec<u8
 /// AXON's documented at-most-once guarantee for fire-and-forget messages.
 /// Failures that occur before any payload byte is written are provably
 /// undelivered and safe to refresh-and-retry.
+///
+/// `timed_out` marks budget exhaustion so callers can surface the distinct
+/// `timeout` contract instead of `peer_unreachable` (spec/IPC.md §5).
 #[derive(Debug)]
-pub(crate) struct SendError {
-    pub(crate) inner: anyhow::Error,
-    pub(crate) ambiguous: bool,
+pub struct SendError {
+    /// Underlying failure.
+    pub inner: anyhow::Error,
+    /// True once payload bytes may already have reached the peer.
+    pub ambiguous: bool,
+    /// True when the failure was budget exhaustion rather than an error.
+    pub timed_out: bool,
 }
 
 impl SendError {
@@ -60,6 +67,7 @@ impl SendError {
         Self {
             inner,
             ambiguous: false,
+            timed_out: false,
         }
     }
 
@@ -67,7 +75,32 @@ impl SendError {
         Self {
             inner,
             ambiguous: true,
+            timed_out: false,
         }
+    }
+
+    /// Budget exhaustion before delivery (dial/handshake/write deadlines).
+    pub(crate) fn pre_send_timeout(inner: anyhow::Error) -> Self {
+        Self {
+            inner,
+            ambiguous: false,
+            timed_out: true,
+        }
+    }
+
+    /// Budget exhaustion after bytes may have been written.
+    fn timeout(inner: anyhow::Error) -> Self {
+        Self {
+            inner,
+            ambiguous: true,
+            timed_out: true,
+        }
+    }
+}
+
+impl std::fmt::Display for SendError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.inner)
     }
 }
 
@@ -83,6 +116,7 @@ pub(crate) fn retry_permitted(kind: &MessageKind, error: &SendError) -> bool {
 pub(crate) async fn send_unidirectional(
     connection: &quinn::Connection,
     envelope: Envelope,
+    budget: Duration,
 ) -> Result<(), SendError> {
     let bytes = envelope
         .wire_encode()
@@ -93,8 +127,9 @@ pub(crate) async fn send_unidirectional(
     })?;
     // Past this point the payload may reach the peer: every failure is
     // classified ambiguous.
-    write_framed(&mut stream, &bytes)
+    tokio::time::timeout(budget, write_framed(&mut stream, &bytes))
         .await
+        .map_err(|_| SendError::timeout(anyhow!("uni frame write exceeded send budget")))?
         .map_err(|err| SendError::ambiguous(err.context("uni frame write failed")))?;
     stream.finish().map_err(|err| {
         SendError::ambiguous(anyhow::Error::new(err).context("failed to finish uni stream"))
@@ -129,7 +164,7 @@ pub(crate) async fn send_request(
     };
     let response_bytes = timeout(request_timeout, read_framed(&mut recv))
         .await
-        .map_err(|_| SendError::ambiguous(anyhow!("request timed out after {timeout_label}")))?
+        .map_err(|_| SendError::timeout(anyhow!("request timed out after {timeout_label}")))?
         .map_err(SendError::ambiguous)?;
     let mut response = serde_json::from_slice::<Envelope>(&response_bytes).map_err(|err| {
         SendError::ambiguous(anyhow::Error::new(err).context("failed to decode response envelope"))

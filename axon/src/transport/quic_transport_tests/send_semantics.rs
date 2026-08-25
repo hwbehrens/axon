@@ -22,10 +22,12 @@ fn retry_permitted_allows_only_at_most_once_safe_combinations() {
     let pre_send = crate::transport::connection::SendError {
         inner: anyhow::anyhow!("dial failed"),
         ambiguous: false,
+        timed_out: false,
     };
     let ambiguous = crate::transport::connection::SendError {
         inner: anyhow::anyhow!("stream died mid-exchange"),
         ambiguous: true,
+        timed_out: false,
     };
 
     // Requests keep DEC-016's single transport-level retry: reply
@@ -72,9 +74,13 @@ async fn uni_failure_before_any_write_is_classified_pre_send() {
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     let envelope = Envelope::new(agent_a, agent_b, MessageKind::Message, json!({}));
-    let err = crate::transport::connection::send_unidirectional(&connection, envelope)
-        .await
-        .expect_err("send on closed endpoint must fail");
+    let err = crate::transport::connection::send_unidirectional(
+        &connection,
+        envelope,
+        Duration::from_secs(5),
+    )
+    .await
+    .expect_err("send on closed endpoint must fail");
     assert!(
         !err.ambiguous,
         "open-stream failure happens before any payload byte is written"

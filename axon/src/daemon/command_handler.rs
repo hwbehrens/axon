@@ -276,37 +276,35 @@ async fn send(
         .map_err(|err| CommandFailure::new(IpcErrorCode::InvalidCommand, err.to_string()))?;
     let msg_id = envelope.id;
 
-    let attempt = async {
-        ctx.transport
-            .send_to(&ctx.directory, &to, envelope, timeout)
-            .await
-    };
-
-    match tokio::time::timeout(timeout, attempt).await {
-        Ok(Ok(response)) => {
+    // No outer tokio::time::timeout here: dropping the send future on a
+    // deadline would skip `send_to`'s retirement of the exact failed
+    // connection and leave a stale slot registered. The budget is enforced
+    // inside the transport (dial, write, and response waits are all
+    // deadline-bounded), so every failure returns normally through the
+    // retirement path.
+    match ctx
+        .transport
+        .send_to(&ctx.directory, &to, envelope, timeout)
+        .await
+    {
+        Ok(response) => {
             ctx.counters.sent.fetch_add(1, Ordering::Relaxed);
             if response.is_some() {
                 ctx.counters.received.fetch_add(1, Ordering::Relaxed);
             }
             Ok((msg_id, response))
         }
-        Err(_) if matches!(kind, IpcSendKind::Request) => {
-            // No wholesale close here: `send_to` already retired exactly the
-            // slot each failed attempt used (including this timed-out one).
-            // Closing whatever slot is currently authoritative could destroy
-            // a healthy concurrent replacement.
+        Err(err) if err.timed_out && matches!(kind, IpcSendKind::Request) => {
+            // Spec: timeouts must surface as `timeout`, never
+            // `peer_unreachable`.
             Err(CommandFailure::new(
                 IpcErrorCode::Timeout,
                 IpcErrorCode::Timeout.message(),
             ))
         }
-        Ok(Err(err)) => Err(CommandFailure::new(
+        Err(err) => Err(CommandFailure::new(
             IpcErrorCode::PeerUnreachable,
-            err.to_string(),
-        )),
-        Err(_) => Err(CommandFailure::new(
-            IpcErrorCode::PeerUnreachable,
-            IpcErrorCode::PeerUnreachable.message(),
+            err.inner.to_string(),
         )),
     }
 }

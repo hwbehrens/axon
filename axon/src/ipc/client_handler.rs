@@ -205,10 +205,16 @@ pub(super) async fn handle_client(
         };
         match serde_json::from_str::<IpcCommand>(line) {
             Ok(command) => {
-                cmd_tx
-                    .send(CommandEvent { client_id, command })
-                    .await
-                    .map_err(|_| anyhow::anyhow!("daemon command channel closed"))?;
+                // Cancellation-aware: shutdown (or eviction) must be able to
+                // interrupt a handler blocked on a full command channel,
+                // otherwise the daemon's receiver can stop draining while
+                // this task stays parked past IPC shutdown.
+                tokio::select! {
+                    _ = cancel.cancelled() => break,
+                    result = cmd_tx.send(CommandEvent { client_id, command }) => {
+                        result.map_err(|_| anyhow::anyhow!("daemon command channel closed"))?;
+                    }
+                }
             }
             Err(_err) => {
                 if !try_queue_error(&out_tx, IpcErrorCode::InvalidCommand, extract_req_id(line)) {

@@ -10,6 +10,7 @@ Each entry: ID, date, subsystem, one-paragraph summary covering motivation, deci
 
 | ID | Date | Subsystem | Title |
 |---|---|---|---|
+| DEC-018 | 2026-08-24 | transport, request broker, ipc | Deadline-owned sends, tombstoned terminal outcomes, shutdown liveness |
 | DEC-017 | 2026-08-24 | transport, daemon, ipc | Revocation-linearized admission, at-most-once retries, bounded drains |
 | DEC-016 | 2026-08-24 | transport | Single retry on a send that fails during cross-dial convergence |
 | DEC-015 | 2026-08-24 | peer directory, testing | Adopt Hegel for stateful property testing of the peer directory |
@@ -31,6 +32,12 @@ Each entry: ID, date, subsystem, one-paragraph summary covering motivation, deci
 ---
 
 ## Entries
+
+### DEC-018: Deadline-owned sends, tombstoned terminal outcomes, shutdown liveness
+
+Date: 2026-08-24 | Subsystem: transport, request broker, ipc
+
+Third-round review found that the IPC layer's outer `tokio::time::timeout` around `send_to` could drop the send future mid-flight, skipping the precise connection retirement and leaving a stale slot registered. The budget is now owned entirely inside the transport: `send_to` derives a deadline and bounds every phase (per-dial handshake via `DIAL_TIMEOUT`, frame writes, response wait), so no external canceller exists and every failure returns normally through retirement; `SendError::timed_out` preserves the spec contract that request timeouts surface as `timeout`, never `peer_unreachable`. In `RequestBroker`, the completed-response replay check moved before the handler lookup, and every terminal outcome (lazy-sweep expiry, `fail`, handler disconnect, reconcile) is tombstoned into the bounded completed cache: a retried exchange after handler loss replays its recorded outcome instead of reporting `unhandled`, and a swept request UUID can never be redelivered for a stale handler's late reply to satisfy. Shutdown liveness: IPC client handlers use cancellation-aware command-channel sends so shutdown cannot strand a task blocked on a full channel, and reconnect dial tasks observe the transport's cancel token so `close_all`'s join window covers every tracked task. The Makefile lint gate now runs clippy over all targets so test-only lints fail locally exactly as they would in review.
 
 ### DEC-017: Revocation-linearized admission, at-most-once retries, bounded drains
 

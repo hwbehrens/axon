@@ -7,7 +7,6 @@
 //! serde rendering clients actually receive.
 
 use axon::ipc::IpcErrorCode;
-use serde_json;
 
 /// Every error code the daemon can emit on the wire.
 const ALL_CODES: &[IpcErrorCode] = &[

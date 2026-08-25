@@ -126,6 +126,16 @@ impl RequestBroker {
 
     pub async fn begin(&self, request: Arc<Envelope>, pending_ttl: Duration) -> BeginRequest {
         let mut state = self.state.lock().await;
+        // A cached terminal response answers any redelivery of the same
+        // request UUID. This runs BEFORE the handler lookup so that (a) a
+        // retried exchange after handler loss replays the recorded outcome
+        // instead of reporting `unhandled`, and (b) a swept-orphaned request
+        // is never re-delivered — its UUID is tombstoned, so a stale
+        // handler's late `reply` can only ever hit RequestNotFound and can
+        // never satisfy a newer delivery.
+        if let Some(replay) = state.completed.replay(&request.id) {
+            return BeginRequest::Respond(replay);
+        }
         let Some(client_id) = state.handler else {
             return BeginRequest::Respond(self.error_response(
                 &request,
@@ -134,14 +144,11 @@ impl RequestBroker {
                 false,
             ));
         };
-        // A cached completion answers a retried exchange without re-running
-        // the application handler.
-        if let Some(replay) = state.completed.replay(&request.id) {
-            return BeginRequest::Respond(replay);
-        }
         // Awaited tasks can be cancelled mid-flight (QUIC connection loss),
         // orphaning their entries: nothing is left to observe the deadline.
-        // Sweep expired orphans lazily so cancellation cannot exhaust the map.
+        // Sweep expired orphans lazily so cancellation cannot exhaust the
+        // map; their terminal timeout is tombstoned so a peer-level retry of
+        // the same envelope receives it rather than a fresh delivery.
         let expired: Vec<_> = state
             .pending
             .iter()
@@ -150,12 +157,14 @@ impl RequestBroker {
             .collect();
         for id in expired {
             if let Some(pending) = state.pending.remove(&id) {
-                let _ = pending.response.send(self.error_response(
+                let response = self.error_response(
                     &pending.request,
                     "timeout",
                     "request timed out waiting for a response",
                     true,
-                ));
+                );
+                state.completed.remember(id, response.clone());
+                let _ = pending.response.send(response);
             }
         }
         if state.pending.contains_key(&request.id) {
@@ -261,9 +270,11 @@ impl RequestBroker {
         message: &'static str,
         retryable: bool,
     ) {
-        let pending = self.state.lock().await.pending.remove(&request_id);
-        if let Some(pending) = pending {
+        let mut state = self.state.lock().await;
+        if let Some(pending) = state.pending.remove(&request_id) {
             let response = self.error_response(&pending.request, code, message, retryable);
+            state.completed.remember(request_id, response.clone());
+            drop(state);
             let _ = pending.response.send(response);
         }
     }
@@ -287,6 +298,7 @@ impl RequestBroker {
                     "application handler disconnected before replying",
                     true,
                 );
+                state.completed.remember(id, response.clone());
                 let _ = pending.response.send(response);
             }
         }
@@ -309,12 +321,14 @@ impl RequestBroker {
             .collect();
         for id in orphans {
             if let Some(pending) = state.pending.remove(&id) {
-                let _ = pending.response.send(self.error_response(
+                let response = self.error_response(
                     &pending.request,
                     "unhandled",
                     "application handler disconnected before replying",
                     true,
-                ));
+                );
+                state.completed.remember(id, response.clone());
+                let _ = pending.response.send(response);
             }
         }
     }
