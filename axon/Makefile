@@ -45,6 +45,7 @@ fuzz:
 	cargo +nightly fuzz run fuzz_wire_decode -- -max_total_time=30
 	cargo +nightly fuzz run fuzz_ipc_command -- -max_total_time=30
 	cargo +nightly fuzz run fuzz_config_yaml -- -max_total_time=30
+	cargo +nightly fuzz run fuzz_peer_store -- -max_total_time=30
 	cargo +nightly fuzz run fuzz_envelope_roundtrip -- -max_total_time=30
 	cargo +nightly fuzz run fuzz_ipc_session -- -max_total_time=30
 	@echo "=== All fuzz targets passed ==="

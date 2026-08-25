@@ -57,9 +57,16 @@ fuzz_target!(|data: &[u8]| {
             return;
         };
 
+        // Typed Agent IDs: parse failures are impossible for these fixed
+        // literals, and an unreachable! keeps the target panic-free by
+        // construction only if parsing stays infallible here.
+        let from = axon::message::AgentId::parse("ed25519.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+            .expect("fixed literal parses");
+        let to = axon::message::AgentId::parse("ed25519.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+            .expect("fixed literal parses");
         let envelope = Envelope::new(
-            "ed25519.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-            "ed25519.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            from,
+            to,
             MessageKind::Message,
             serde_json::json!({"topic": "fuzz", "data": {}}),
         );
