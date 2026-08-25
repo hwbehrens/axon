@@ -360,7 +360,7 @@ async fn enrolled_count_is_surfaced_for_valid_store() {
         "version": 1,
         "peers": [{
             "agent_id": agent_id.as_str(),
-            "public_key": key,
+            "pubkey": key,
             "locators": [],
         }],
     });
@@ -419,4 +419,36 @@ async fn unreadable_pid_file_fails_the_check_with_context() {
         );
     }
     let _ = fs::set_permissions(&pid_path, fs::Permissions::from_mode(0o644));
+}
+
+#[tokio::test]
+async fn symlinked_root_aborts_doctor_before_other_checks_touch_it() {
+    let root = tempdir().expect("tempdir");
+    let real = root.path().join("victim");
+    fs::create_dir_all(&real).expect("victim dir");
+    let link = root.path().join("link");
+    std::os::unix::fs::symlink(&real, &link).expect("symlink");
+    let paths = AxonPaths::from_root(link);
+
+    let report = crate::app::doctor::run(&paths, &args(true))
+        .await
+        .expect("doctor runs");
+
+    // Only state_root may report; --fix must not write key material or any
+    // other artifact through the attacker-controlled directory.
+    assert!(!report.ok);
+    let non_root_findings: Vec<_> = report
+        .checks
+        .iter()
+        .filter(|check| check.name != "state_root")
+        .collect();
+    assert!(
+        non_root_findings.is_empty(),
+        "doctor must stop at a rejected symlinked root, found {non_root_findings:?}"
+    );
+    assert!(report.fixes_applied.is_empty());
+    assert!(
+        fs::read_dir(&real).expect("victim dir").count() == 0,
+        "nothing may be written through the symlink"
+    );
 }

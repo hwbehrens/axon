@@ -65,7 +65,7 @@ pub(super) async fn make_transport_pair_with_options(
         Duration::from_secs(60),
         response_handler_b,
         Duration::from_secs(10),
-        directory_b.pinning_snapshot(),
+        directory_b.clone(),
     )
     .await
     .expect("bind b");
@@ -78,7 +78,7 @@ pub(super) async fn make_transport_pair_with_options(
         Duration::from_secs(60),
         None,
         Duration::from_secs(10),
-        directory_a.pinning_snapshot(),
+        directory_a.clone(),
     )
     .await
     .expect("bind a");

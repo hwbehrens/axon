@@ -246,7 +246,10 @@ async fn handle_authenticated_bidi(
             MessageKind::Error,
             json!({
                 "code": "unsupported_kind",
-                "message": format!("unsupported message kind '{kind}' on bidirectional stream"),
+                "message": format!(
+                    "unsupported message kind '{}' on bidirectional stream",
+                    kind.chars().take(64).collect::<String>()
+                ),
                 "retryable": false,
             }),
         );
@@ -374,6 +377,15 @@ pub(crate) async fn run_connection(
                         });
                     }
                     Err(_) => break,
+                }
+            }
+            finished = streams.join_next(), if !streams.is_empty() => {
+                // Reap completed stream tasks so handles cannot accumulate
+                // over a long-lived connection's lifetime.
+                match finished {
+                    Some(Ok(())) => {}
+                    Some(Err(err)) => warn!(error = %err, "stream task failed"),
+                    None => {}
                 }
             }
         }

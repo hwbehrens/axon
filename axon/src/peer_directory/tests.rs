@@ -148,7 +148,7 @@ async fn malformed_store_fails_closed_without_partial_load() {
         "peers": [
             {
                 "agent_id": valid.agent_id(),
-                "public_key": wrong.public_key(),
+                "pubkey": wrong.public_key(),
                 "locators": []
             }
         ]
@@ -186,7 +186,7 @@ async fn duplicate_store_locators_fail_closed() {
         "version": 1,
         "peers": [{
             "agent_id": remote.agent_id(),
-            "public_key": remote.public_key(),
+            "pubkey": remote.public_key(),
             "locators": ["peer.local:7100", "peer.local:7100"]
         }]
     });
@@ -226,5 +226,76 @@ async fn revocation_removes_observation_index_entries() {
             .await,
         ObserveOutcome::CandidateAdded,
         "revocation must not leave a stale observation owner"
+    );
+}
+
+#[tokio::test]
+async fn store_accepts_spec_pubkey_field_and_legacy_alias() {
+    let root = tempdir().expect("tempdir");
+    let remote = identity(40);
+    // Canonical spec spelling (spec/SPEC.md "Peer Store Format").
+    let canonical = serde_json::json!({
+        "version": 1,
+        "peers": [{
+            "agent_id": remote.agent_id().as_str(),
+            "pubkey": remote.public_key(),
+            "locators": []
+        }]
+    });
+    std::fs::write(
+        root.path().join("canonical.json"),
+        serde_json::to_vec(&canonical).expect("encode"),
+    )
+    .expect("write canonical");
+    let canonical_store = PeerStore::new(root.path().join("canonical.json"));
+    assert_eq!(canonical_store.validate().await.expect("spec form"), 1);
+
+    // The pre-release field name keeps loading so early files do not strand.
+    let legacy = serde_json::json!({
+        "version": 1,
+        "peers": [{
+            "agent_id": remote.agent_id().as_str(),
+            "public_key": remote.public_key(),
+            "locators": []
+        }]
+    });
+    std::fs::write(
+        root.path().join("legacy.json"),
+        serde_json::to_vec(&legacy).expect("encode"),
+    )
+    .expect("write legacy");
+    let legacy_store = PeerStore::new(root.path().join("legacy.json"));
+    assert_eq!(legacy_store.validate().await.expect("alias form"), 1);
+}
+
+#[tokio::test]
+async fn revocation_unquarantines_survivors_of_conflicting_endpoints() {
+    let (_root, directory) = directory().await;
+    let first = identity(41);
+    let second = identity(42);
+    directory
+        .observe(observation(41, "mdns:first", "127.0.0.1:7171"))
+        .await;
+    directory
+        .enroll_candidate(first.agent_id())
+        .await
+        .expect("enroll first");
+    // Second peer claims the same endpoint: both sides quarantine.
+    assert_eq!(
+        directory
+            .observe(observation(42, "mdns:second", "127.0.0.1:7171"))
+            .await,
+        ObserveOutcome::LocatorConflict
+    );
+    assert!(directory.dial_targets(first.agent_id()).await.is_empty());
+
+    // Enroll the conflicting peer so both sides hold trusted claims.
+    directory.enroll_candidate(second.agent_id()).await.unwrap();
+
+    // Revoking the conflicting claim must release the survivor's endpoint.
+    directory.remove_peer(second.agent_id()).await.unwrap();
+    assert!(
+        !directory.dial_targets(first.agent_id()).await.is_empty(),
+        "surviving peer must become dialable once the conflict is gone"
     );
 }

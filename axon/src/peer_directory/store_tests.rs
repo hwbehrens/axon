@@ -16,7 +16,7 @@ fn store_decode_rejects_oversized_enrolled_set() {
             let peer = identity(index as u8);
             serde_json::json!({
                 "agent_id": peer.agent_id().as_str(),
-                "public_key": peer.public_key(),
+                "pubkey": peer.public_key(),
                 "locators": []
             })
         })
@@ -36,7 +36,7 @@ fn store_decode_rejects_oversized_locator_set() {
         .collect();
     let document = store_document(serde_json::json!([{
         "agent_id": remote.agent_id().as_str(),
-        "public_key": remote.public_key(),
+        "pubkey": remote.public_key(),
         "locators": locators
     }]));
 
@@ -53,7 +53,7 @@ fn store_decode_rejects_wrong_version() {
         "version": 999,
         "peers": [{
             "agent_id": remote.agent_id().as_str(),
-            "public_key": remote.public_key(),
+            "pubkey": remote.public_key(),
             "locators": []
         }]
     }))
@@ -93,7 +93,7 @@ fn store_decode_accepts_exactly_max_enrolled_peers() {
             let (agent_id, key) = store_key(index as u16);
             serde_json::json!({
                 "agent_id": agent_id.as_str(),
-                "public_key": key,
+                "pubkey": key,
                 "locators": []
             })
         })
@@ -112,7 +112,7 @@ fn store_decode_accepts_exactly_max_locators_per_peer() {
         .collect();
     let document = store_document(serde_json::json!([{
         "agent_id": agent_id.as_str(),
-        "public_key": key,
+        "pubkey": key,
         "locators": locators
     }]));
 

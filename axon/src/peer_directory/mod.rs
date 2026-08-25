@@ -259,6 +259,9 @@ impl PeerDirectory {
         for observation_id in removed.observations.keys() {
             next.observation_index.remove(observation_id);
         }
+        // The revoked peer's endpoint claims die with it; survivors that were
+        // quarantined against those claims must become dialable again.
+        next.recompute_conflicts();
         self.store.save(next.stored_peers()).await?;
         self.commit(&mut current, next);
         Ok(removed.identity)

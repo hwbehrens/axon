@@ -247,6 +247,12 @@ impl IpcServer {
         self.clients.lock().await.len()
     }
 
+    /// Ids of currently connected clients, for reconciling state that is
+    /// keyed by client when disconnect notifications are lost.
+    pub async fn connected_client_ids(&self) -> std::collections::HashSet<u64> {
+        self.clients.lock().await.keys().copied().collect()
+    }
+
     pub fn socket_path(&self) -> &Path {
         &self.socket_path
     }

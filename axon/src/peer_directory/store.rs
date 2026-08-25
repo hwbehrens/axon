@@ -20,6 +20,9 @@ pub struct PeerStore {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StoredPeer {
     pub agent_id: AgentId,
+    /// Canonical field name per spec/SPEC.md "Peer Store Format". The alias
+    /// accepts the pre-release `public_key` spelling on read only.
+    #[serde(rename = "pubkey", alias = "public_key")]
     pub public_key: String,
     pub locators: Vec<PeerLocator>,
 }

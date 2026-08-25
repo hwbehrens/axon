@@ -22,14 +22,10 @@ async fn endpoint_binds_and_reports_addr() {
     )
     .await
     .unwrap();
-    let transport = ConnectionManager::bind(
-        "127.0.0.1:0".parse().unwrap(),
-        &identity,
-        128,
-        directory.pinning_snapshot(),
-    )
-    .await
-    .expect("bind");
+    let transport =
+        ConnectionManager::bind("127.0.0.1:0".parse().unwrap(), &identity, 128, directory)
+            .await
+            .expect("bind");
     assert_eq!(
         transport.local_addr().unwrap().ip(),
         "127.0.0.1".parse::<std::net::IpAddr>().unwrap()

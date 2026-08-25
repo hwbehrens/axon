@@ -7,11 +7,13 @@ use axon::config::AxonPaths;
 
 use crate::app::doctor::{DoctorArgs, DoctorReport};
 
+/// Returns `Ok(false)` when later checks must not run (symlinked root:
+/// continuing would operate inside an attacker-controlled directory).
 pub(in crate::app::doctor) fn check_state_root(
     paths: &AxonPaths,
     args: &DoctorArgs,
     report: &mut DoctorReport,
-) -> Result<()> {
+) -> Result<bool> {
     if !paths.root.exists() {
         if args.fix {
             paths.ensure_root_exists()?;
@@ -36,7 +38,7 @@ pub(in crate::app::doctor) fn check_state_root(
                 ),
             );
         }
-        return Ok(());
+        return Ok(true);
     }
 
     let meta = fs::symlink_metadata(&paths.root)
@@ -51,7 +53,7 @@ pub(in crate::app::doctor) fn check_state_root(
                 paths.root.display()
             ),
         );
-        return Ok(());
+        return Ok(false);
     }
 
     let mode = meta.permissions().mode() & 0o777;
@@ -99,5 +101,5 @@ pub(in crate::app::doctor) fn check_state_root(
         );
     }
 
-    Ok(())
+    Ok(true)
 }

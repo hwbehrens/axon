@@ -78,7 +78,11 @@ impl DoctorReport {
 pub async fn run(paths: &AxonPaths, args: &DoctorArgs) -> Result<DoctorReport> {
     let mut report = DoctorReport::new(paths, args.fix);
 
-    checks::check_state_root(paths, args, &mut report)?;
+    // A rejected symlinked state root means every later check would operate
+    // through an attacker-controlled directory: stop before touching it.
+    if !checks::check_state_root(paths, args, &mut report)? {
+        return Ok(report);
+    }
     identity_check::check_identity(paths, args, &mut report)?;
     checks::check_daemon_artifacts(paths, args, &mut report)?;
     checks::check_peer_store(paths, args, &mut report).await?;

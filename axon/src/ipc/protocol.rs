@@ -161,6 +161,7 @@ pub enum IpcErrorCode {
     HandlerBusy,
     NotHandler,
     RequestNotFound,
+    SendCapacityExceeded,
     InternalError,
 }
 
@@ -178,6 +179,7 @@ impl IpcErrorCode {
             Self::HandlerBusy => "another IPC connection owns the request-handler lease",
             Self::NotHandler => "this IPC connection does not own the request-handler lease",
             Self::RequestNotFound => "request is unknown, expired, or already completed",
+            Self::SendCapacityExceeded => "too many concurrent sends; retry shortly",
             Self::InternalError => "unexpected daemon or persistence failure",
         }
     }

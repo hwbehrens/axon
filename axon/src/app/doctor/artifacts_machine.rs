@@ -67,7 +67,10 @@ impl DoctorArtifactsMachine {
     fn sweep(&self, fix: bool) -> DoctorReport {
         let mut report = DoctorReport::new(&self.paths, fix);
         let args = args(fix);
-        check_state_root(&self.paths, &args, &mut report).expect("state root check runs");
+        check_state_root(&self.paths, &args, &mut report)
+            .expect("state root check runs")
+            .then_some(())
+            .expect("provisioned root must never be a symlink");
         check_daemon_artifacts(&self.paths, &args, &mut report).expect("artifact check runs");
         self.rt
             .block_on(check_peer_store(&self.paths, &args, &mut report))
@@ -188,7 +191,7 @@ impl DoctorArtifactsMachine {
             "version": 1,
             "peers": [{
                 "agent_id": agent_id.as_str(),
-                "public_key": key,
+                "pubkey": key,
                 "locators": [],
             }],
         });

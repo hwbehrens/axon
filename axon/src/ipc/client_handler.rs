@@ -114,7 +114,8 @@ pub(super) async fn handle_client(
 
             if let Some(pos) = available.iter().position(|&b| b == b'\n') {
                 let needed = pos;
-                if buf.len() + needed > MAX_IPC_LINE_LENGTH {
+                // Spec counts the trailing newline in the 65,536-byte bound.
+                if buf.len() + needed + 1 > MAX_IPC_LINE_LENGTH {
                     exceeded = true;
                     reader.consume(pos + 1);
                     break;
@@ -125,7 +126,9 @@ pub(super) async fn handle_client(
                 break;
             } else {
                 let len = available.len();
-                if buf.len() + len > MAX_IPC_LINE_LENGTH {
+                // Reserve one byte for the newline that must eventually end
+                // the line (spec: 65,536 bytes including the newline).
+                if buf.len() + len + 1 > MAX_IPC_LINE_LENGTH {
                     exceeded = true;
                     reader.consume(len);
                     break;

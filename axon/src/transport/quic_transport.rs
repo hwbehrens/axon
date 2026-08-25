@@ -13,7 +13,7 @@ use tracing::{debug, info, warn};
 
 use crate::identity::Identity;
 use crate::message::{AgentId, Envelope};
-use crate::peer_directory::{DialTarget, PeerDirectory, PinningSnapshotHandle};
+use crate::peer_directory::{DialTarget, PeerDirectory};
 use crate::transport::{DialPeer, PairRequest};
 
 use super::connection::{
@@ -42,6 +42,10 @@ pub struct ConnectionManager {
     inbound_read_timeout: Duration,
     tasks: TaskTracker,
     reconnect: ReconnectBook,
+    /// Enrollment authority: consulted immediately before admitting any
+    /// connection so a revocation that races an in-flight handshake cannot
+    /// land a slot.
+    directory: PeerDirectory,
 }
 
 impl ConnectionManager {
@@ -49,7 +53,7 @@ impl ConnectionManager {
         bind_addr: SocketAddr,
         identity: &Identity,
         max_connections: usize,
-        pubkey_map: PinningSnapshotHandle,
+        directory: PeerDirectory,
     ) -> Result<Self> {
         Self::bind_cancellable(
             bind_addr,
@@ -60,7 +64,7 @@ impl ConnectionManager {
             Duration::from_secs(60),
             None,
             Duration::from_secs(10),
-            pubkey_map,
+            directory,
         )
         .await
     }
@@ -75,12 +79,17 @@ impl ConnectionManager {
         idle_timeout: Duration,
         response_handler: Option<ResponseHandlerFn>,
         inbound_read_timeout: Duration,
-        pubkey_map: PinningSnapshotHandle,
+        directory: PeerDirectory,
     ) -> Result<Self> {
         let local_agent_id = AgentId::parse(identity.agent_id())?;
         let cert = identity.make_quic_certificate()?;
-        let (endpoint, inbound_tx, pair_request_tx) =
-            build_endpoint(bind_addr, &cert, pubkey_map, keepalive, idle_timeout)?;
+        let (endpoint, inbound_tx, pair_request_tx) = build_endpoint(
+            bind_addr,
+            &cert,
+            directory.pinning_snapshot(),
+            keepalive,
+            idle_timeout,
+        )?;
         let manager = Self {
             endpoint,
             local_agent_id: local_agent_id.clone(),
@@ -95,6 +104,7 @@ impl ConnectionManager {
             inbound_read_timeout,
             tasks: TaskTracker::new(),
             reconnect: ReconnectBook::default(),
+            directory,
         };
         manager.spawn_accept_loop();
         Ok(manager)
@@ -205,7 +215,12 @@ impl ConnectionManager {
                 .map(|()| None)
         };
         if result.is_err() {
-            self.close_peer(peer, b"send failed on suspect slot").await;
+            // Retire only the slot this failed exchange used, telling the
+            // peer so its mirror slot clears too. A newer, authoritative
+            // replacement (cross-dial winner) must survive untouched.
+            self.registry
+                .retire_if_current_connection(peer, &connection, b"send failed on suspect slot")
+                .await;
         }
         result
     }
@@ -282,6 +297,12 @@ impl ConnectionManager {
                 "authenticated peer {authenticated} does not match {}",
                 peer.agent_id
             );
+        }
+        // Revocation race guard: the handshake may have started before the
+        // peer was revoked; do not admit unless enrollment still exists.
+        if self.directory.get_enrolled(&peer.agent_id).await.is_none() {
+            connection.close(0u32.into(), b"peer revoked");
+            bail!("peer {} was revoked during connection setup", peer.agent_id);
         }
         match self
             .registry

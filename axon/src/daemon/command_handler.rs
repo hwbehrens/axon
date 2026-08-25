@@ -41,12 +41,33 @@ pub(crate) struct DaemonContext {
     pub(crate) broker: RequestBroker,
     pub(crate) local_agent_id: AgentId,
     pub(crate) counters: std::sync::Arc<Counters>,
+    /// In-flight `send` tasks; control commands never consume this budget.
+    pub(crate) inflight_sends: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    pub(crate) max_inflight_sends: usize,
     pub(crate) start: Instant,
 }
 
 pub(crate) async fn handle_command(cmd: CommandEvent, ctx: &DaemonContext) -> Result<()> {
     let client_id = cmd.client_id;
     let reply = match cmd.command {
+        IpcCommand::Send {
+            to: _,
+            kind: _,
+            payload: _,
+            timeout_secs: _,
+            ref_id: _,
+            req_id,
+        } if ctx.inflight_sends.load(Ordering::Relaxed) >= ctx.max_inflight_sends => {
+            // Control commands stay responsive under send pressure: only
+            // excess sends are rejected.
+            error_reply(
+                CommandFailure::new(
+                    IpcErrorCode::SendCapacityExceeded,
+                    IpcErrorCode::SendCapacityExceeded.message(),
+                ),
+                req_id,
+            )
+        }
         IpcCommand::Send {
             to,
             kind,
@@ -313,6 +334,7 @@ fn broker_failure(error: BrokerError) -> CommandFailure {
         BrokerError::HandlerBusy => IpcErrorCode::HandlerBusy,
         BrokerError::NotHandler => IpcErrorCode::NotHandler,
         BrokerError::RequestNotFound => IpcErrorCode::RequestNotFound,
+        BrokerError::InvalidPayload => IpcErrorCode::InvalidCommand,
     };
     CommandFailure::new(code, code.message())
 }

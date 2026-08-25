@@ -59,6 +59,7 @@ async fn send_request_rejects_invalid_bidirectional_reply() {
         .send_to(&pair.directory_a, &peer_b, request, Duration::from_secs(5))
         .await
         .expect_err("invalid bidirectional reply should be rejected");
+    eprintln!("DEBUG err: {err:#}");
     assert!(
         err.to_string()
             .contains("bidirectional reply must use response|error kind")

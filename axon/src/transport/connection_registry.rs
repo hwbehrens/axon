@@ -120,6 +120,37 @@ impl ConnectionRegistry {
         }
     }
 
+    /// Retire the peer's slot only when it still refers to `connection`,
+    /// closing that connection so the peer learns its slot is gone. A stale
+    /// failure from a superseded exchange must neither tear down the
+    /// authoritative replacement nor leave the retired connection silently
+    /// open on the peer.
+    pub(crate) async fn retire_if_current_connection(
+        &self,
+        peer: &AgentId,
+        connection: &quinn::Connection,
+        reason: &'static [u8],
+    ) {
+        let retired = {
+            let mut state = self.state.write().await;
+            let is_current = state
+                .slots
+                .get(peer)
+                .is_some_and(|slot| slot.connection.stable_id() == connection.stable_id());
+            if is_current {
+                let slot = state.slots.remove(peer).expect("checked above");
+                *state.generations.entry(peer.clone()).or_default() += 1;
+                Some(slot.connection)
+            } else {
+                None
+            }
+        };
+        // Close outside the lock: the close frame flushes asynchronously.
+        if let Some(retired) = retired {
+            retired.close(0u32.into(), reason);
+        }
+    }
+
     pub(crate) async fn close_peer(&self, peer: &AgentId, reason: &'static [u8]) {
         let mut state = self.state.write().await;
         if let Some(slot) = state.slots.remove(peer) {

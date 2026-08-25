@@ -93,7 +93,7 @@ pub async fn run_daemon(opts: DaemonOptions) -> Result<()> {
         IDLE_TIMEOUT,
         Some(response_handler),
         INBOUND_READ_TIMEOUT,
-        directory.pinning_snapshot(),
+        directory.clone(),
     )
     .await
     {
@@ -138,6 +138,8 @@ pub async fn run_daemon(opts: DaemonOptions) -> Result<()> {
         broker: broker.clone(),
         local_agent_id: local_agent_id.clone(),
         counters: counters.clone(),
+        inflight_sends: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        max_inflight_sends: MAX_INFLIGHT_SENDS,
         start,
     };
 
@@ -147,11 +149,19 @@ pub async fn run_daemon(opts: DaemonOptions) -> Result<()> {
                 info!("shutdown signal received");
                 break;
             }
-            maybe_command = command_rx.recv(), if send_tasks.len() < MAX_INFLIGHT_SENDS => {
+            maybe_command = command_rx.recv() => {
                 let Some(command) = maybe_command else { break };
                 if matches!(&command.command, crate::ipc::IpcCommand::Send { .. }) {
+                    // Control commands never consume send capacity: they are
+                    // handled inline even when every send slot is busy.
                     let command_ctx = ctx.clone();
-                    send_tasks.spawn(async move { handle_command(command, &command_ctx).await });
+                    let inflight = ctx.inflight_sends.clone();
+                    inflight.fetch_add(1, Ordering::Relaxed);
+                    send_tasks.spawn(async move {
+                        let result = handle_command(command, &command_ctx).await;
+                        inflight.fetch_sub(1, Ordering::Relaxed);
+                        result
+                    });
                 } else if let Err(err) = handle_command(command, &ctx).await {
                     error!(error = %err, "failed handling IPC command");
                 }
@@ -178,16 +188,27 @@ pub async fn run_daemon(opts: DaemonOptions) -> Result<()> {
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             },
-            event = discovery_rx.recv() => {
-                if let Some(event) = event {
-                    handle_discovery_event(&directory, &ipc, event).await;
+            event = discovery_rx.recv() => match event {
+                Some(event) => handle_discovery_event(&directory, &ipc, event).await,
+                // A closed channel would otherwise be ready-forever and spin.
+                None => {
+                    warn!("discovery event channel closed; stopping discovery handling");
+                    break;
                 }
-            }
-            disconnected = disconnect_rx.recv() => {
-                if let Ok(client_id) = disconnected {
-                    broker.disconnect(client_id).await;
+            },
+            disconnected = disconnect_rx.recv() => match disconnected {
+                Ok(client_id) => broker.disconnect(client_id).await,
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(count)) => {
+                    // Lagged deliveries lose specific client ids; reconcile
+                    // lease and pending-request state against live clients so
+                    // a disconnected handler cannot retain its lease.
+                    warn!(count, "IPC disconnect notifications lagged; reconciling");
+                    let live: std::collections::HashSet<_> =
+                        ipc.connected_client_ids().await.into_iter().collect();
+                    broker.reconcile_clients(&live).await;
                 }
-            }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            },
             _ = stale_interval.tick() => {
                 let removed = directory
                     .expire_observations(Instant::now(), OBSERVATION_STALE_TIMEOUT)
@@ -239,7 +260,7 @@ fn make_response_handler(ipc: IpcServer, broker: RequestBroker) -> ResponseHandl
         let ipc = ipc.clone();
         let broker = broker.clone();
         Box::pin(async move {
-            match broker.begin(request.clone()).await {
+            match broker.begin(request.clone(), INBOUND_REQUEST_TIMEOUT).await {
                 BeginRequest::Respond(response) => Some(response),
                 BeginRequest::Deliver(delivery) => {
                     let request_id = delivery.request_id;
