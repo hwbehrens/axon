@@ -42,6 +42,9 @@ pub struct DaemonOptions {
     pub disable_mdns: bool,
     pub axon_root: Option<PathBuf>,
     pub cancel: Option<CancellationToken>,
+    /// Overrides MAX_INFLIGHT_SENDS; intended for tests that need a small,
+    /// deterministic saturation budget.
+    pub max_inflight_sends: Option<usize>,
 }
 
 pub async fn run_daemon(opts: DaemonOptions) -> Result<()> {
@@ -139,7 +142,7 @@ pub async fn run_daemon(opts: DaemonOptions) -> Result<()> {
         local_agent_id: local_agent_id.clone(),
         counters: counters.clone(),
         inflight_sends: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-        max_inflight_sends: MAX_INFLIGHT_SENDS,
+        max_inflight_sends: opts.max_inflight_sends.unwrap_or(MAX_INFLIGHT_SENDS),
         start,
     };
 

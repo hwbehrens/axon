@@ -196,6 +196,22 @@ Two frameworks, selected by property shape (see decision-log DEC-015):
 
 Do not port existing value-level proptests to Hegel absent one of: Hegel reaches a stable release, or stateful properties become the common case. Keep Hegel call sites few while it is beta.
 
+### Testing for known failure classes
+
+Review of the ownership redesign found bugs that conventional coverage and
+mutation gates missed. Each maps to a recurring class with a required test
+shape; treat this table as a checklist when touching the matching surface.
+
+| Class | Required test shape |
+| --- | --- |
+| Self-referential fixtures | Persistence/wire formats need at least one fixture transcribed literally from `spec/` text; serde round-trips alone cannot catch field-name drift from the spec. |
+| Cancellation safety | Any state inserted before an `.await` whose future can be dropped (select! arms, task aborts, timeouts) needs a test that drops the awaiting task and asserts cleanup. Deadline-guarded state also needs lazy-expiry sweep coverage. |
+| Lossy notification channels | A broadcast/laggy channel carrying state-changing notifications (disconnects, losses) needs a reconciliation path plus a test that forces lag and asserts state converges. |
+| Resource saturation liveness | Every bounded resource (queues, budgets, leases) needs a test that saturates it and asserts control-plane operations still respond promptly and overflow is rejected with a typed error. Inject small bounds via options rather than choreographing full-scale loads. |
+| Half-invariants in stateful tests | Stateful/property suites must assert both directions: forbidden states never occur AND required recoveries/releases do occur (e.g., quarantines release when their cause disappears). |
+| Retry semantics | Any automatic retry requires receiver-side idempotency or deduplication for non-idempotent operations, with a test replaying the same request id. |
+| Cross-owner race windows | Security- or trust-relevant decisions must re-validate against current authority at the single chokepoint immediately before committing (e.g., enrollment recheck before admitting a connection), with an interleaving test if practical. |
+
 ### Fuzz targets
 
 In `axon/fuzz/fuzz_targets/`. When adding a new deserialization entry point, add a corresponding fuzz target.

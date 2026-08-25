@@ -274,7 +274,9 @@ impl DirectoryMachine {
     }
 
     /// Conflicted endpoints are undialable and hidden from views while the
-    /// conflicting identities survive.
+    /// conflicting identities survive — and quarantines RELEASE when the
+    /// conflicting claim disappears. Safety alone misses release bugs: a
+    /// missing conflict recompute left survivors undialable forever.
     #[invariant]
     fn conflicted_endpoints_are_quarantined_not_evicting(&self, _tc: TestCase) {
         let conflicted = self.conflicted_ports();
@@ -287,10 +289,32 @@ impl DirectoryMachine {
             }
         }
         for seed in self.enrolled.keys() {
+            // Every live, unconflicted endpoint this enrolled peer observed
+            // must be dialable: quarantine is per-endpoint, never per-peer.
+            let expected: BTreeSet<u16> = self
+                .live
+                .values()
+                .filter(|(owner, port)| *owner == *seed && !conflicted.contains(port))
+                .map(|(_, port)| *port)
+                .collect();
             let targets = self
                 .rt
                 .block_on(self.directory.dial_targets(prop_identity(*seed).agent_id()));
-            for target in targets {
+            let observed_targets: BTreeSet<u16> = targets
+                .iter()
+                .filter_map(|target| match target {
+                    DialTarget::Observed(addr) => Some(addr.port()),
+                    DialTarget::Configured(_) => None,
+                })
+                .collect();
+            for port in &expected {
+                assert!(
+                    observed_targets.contains(port),
+                    "unconflicted endpoint {port} of {} must be dialable; got {observed_targets:?}",
+                    prop_identity(*seed).agent_id()
+                );
+            }
+            for target in &targets {
                 if let DialTarget::Observed(addr) = target {
                     assert!(
                         !conflicted.contains(&addr.port()),
@@ -341,7 +365,7 @@ impl DirectoryMachine {
 /// 20 cases x up to 50 steps keeps the in-crate suite fast while still
 /// exploring thousands of rule sequences; `HEGEL_TEST_CASES` scales it
 /// without code changes for deeper local or nightly runs.
-#[hegel::test(test_cases = 20)]
+#[hegel::test(test_cases = 80)]
 fn directory_state_machine_preserves_trust_invariants(tc: TestCase) {
     stateful::run(DirectoryMachine::new(), tc);
 }

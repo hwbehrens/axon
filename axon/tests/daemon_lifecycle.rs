@@ -52,6 +52,7 @@ async fn daemon_starts_serves_ipc_and_shuts_down_cleanly() {
             disable_mdns: true,
             axon_root: Some(root_path),
             cancel: Some(task_cancel),
+            max_inflight_sends: None,
         })
         .await
     });
@@ -80,6 +81,7 @@ async fn daemon_rejects_legacy_peer_cache_without_importing_it() {
         disable_mdns: true,
         axon_root: Some(root.path().to_path_buf()),
         cancel: Some(CancellationToken::new()),
+        max_inflight_sends: None,
     })
     .await
     .expect_err("legacy state must fail closed");
@@ -99,6 +101,7 @@ async fn transport_bind_failure_cleans_up_ipc_and_lock() {
         disable_mdns: true,
         axon_root: Some(root.path().to_path_buf()),
         cancel: Some(CancellationToken::new()),
+        max_inflight_sends: None,
     })
     .await
     .expect_err("occupied QUIC port must fail startup");

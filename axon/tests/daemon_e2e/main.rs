@@ -13,6 +13,7 @@ use tokio::net::UnixStream;
 use tokio_util::sync::CancellationToken;
 
 mod enrollment;
+mod saturation;
 mod traffic;
 
 use std::collections::HashSet;
@@ -168,6 +169,7 @@ fn spawn(root: TempDir, paths: AxonPaths, identity: Identity, port: u16) -> Runn
             disable_mdns: true,
             axon_root: Some(root_path),
             cancel: Some(task_cancel),
+            max_inflight_sends: None,
         })
         .await
     });

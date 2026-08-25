@@ -149,6 +149,7 @@ pub(crate) async fn run(cli: Cli) -> Result<ExitCode> {
                 disable_mdns,
                 axon_root: Some(paths.root.clone()),
                 cancel: None,
+                max_inflight_sends: None,
             })
             .await?;
         }
