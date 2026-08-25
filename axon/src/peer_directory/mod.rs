@@ -316,6 +316,14 @@ impl PeerDirectory {
 mod tests;
 
 #[cfg(test)]
+#[path = "store_tests.rs"]
+mod store_tests;
+
+#[cfg(test)]
+#[path = "limits_tests.rs"]
+mod limits_tests;
+
+#[cfg(test)]
 #[path = "properties.rs"]
 mod properties;
 
