@@ -142,7 +142,34 @@ pub(super) async fn handle_client(
             if try_queue_error(&out_tx, IpcErrorCode::CommandTooLarge, None) {
                 writer_close_mode = WriterCloseMode::FlushQueued;
             }
-            break; // Close connection — can't reliably find next command boundary
+            // Drain the remainder of the overlong line (bounded) before
+            // closing: closing with unread inbound data sends RST, which
+            // would discard the queued error reply before the client can
+            // read it.
+            let mut drained = 0usize;
+            loop {
+                let available_len = match reader.fill_buf().await {
+                    Ok([]) => break, // EOF
+                    Ok(chunk) => {
+                        let newline = chunk.iter().position(|&b| b == b'\n');
+                        match newline {
+                            Some(pos) => {
+                                reader.consume(pos + 1);
+                                break;
+                            }
+                            None => chunk.len(),
+                        }
+                    }
+                    Err(_) => break,
+                };
+                drained += available_len;
+                reader.consume(available_len);
+                if drained > MAX_IPC_LINE_LENGTH {
+                    // Hostile never-terminated stream: stop reading.
+                    break;
+                }
+            }
+            break; // Close connection — command boundary was restored above
         }
 
         if !found_newline {
