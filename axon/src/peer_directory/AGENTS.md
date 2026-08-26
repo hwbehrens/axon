@@ -29,6 +29,6 @@ Identity and trust invariants > one authoritative owner > availability.
 ## Test targets
 
 - Unit: `tests.rs` plus module-local tests where needed
-- Property: `properties.rs` (store roundtrip/bounds, proptest) and `state_machine_tests.rs` (Hegel stateful rules + trust invariants; see DEC-015)
+- Property: `properties.rs` (store roundtrip/bounds, proptest) and `state_machine.rs` (Hegel stateful rules + trust invariants; see DEC-015)
 - Integration/adversarial: `axon/tests/integration.rs`, `axon/tests/adversarial.rs`
 - Fuzz: `axon/fuzz/fuzz_targets/fuzz_peer_store.rs` exercises the untrusted `peers.json` decode path

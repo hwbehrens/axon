@@ -1,7 +1,7 @@
 {
   "schema_version": "1.0.0",
   "status": "normative",
-  "last_updated": "2026-08-24",
+  "last_updated": "2026-08-26",
   "description": "Canonical machine-readable map for agent task routing and subsystem boundaries. Key files list only architecturally significant entry points — use code_roots directories for full file discovery.",
   "authoritative_order": [
     "spec/*",

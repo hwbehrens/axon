@@ -27,9 +27,9 @@ pub enum DirectoryError {
     LocatorCapacity,
     /// The local Agent ID cannot be enrolled or targeted.
     LocalAgentId(AgentId),
-    /// Peer-store persistence failed, or persistent edits lost too many
-    /// generation races to quiesce. Live memory remains the authority; the
-    /// caller may retry the edit.
+    /// Peer-store persistence failed (I/O error or a transaction-invariant
+    /// violation). Live memory remains the authority; the caller may retry
+    /// the edit.
     Persist(anyhow::Error),
 }
 

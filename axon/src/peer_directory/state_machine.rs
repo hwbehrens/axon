@@ -364,6 +364,14 @@ impl DirectoryMachine {
     /// counts. Capacity rejection (not silent overflow) is what keeps these
     /// true; the invariant pins it so a future edit cannot regress the
     /// bound without the state machine shrinking to a failing sequence.
+    ///
+    /// Scope note: the per-peer observation and locator bounds are
+    /// REACHABLE by the generator (slots cross 16, locator seeds cross 8).
+    /// The global 256-peer bounds are deliberately NOT reachable here —
+    /// hundreds of distinct identities per case would make the in-crate
+    /// suite disk-bound — so their rejection behavior is pinned by
+    /// `limits_tests.rs` instead; this invariant remains as a tripwire
+    /// that catches any regression that lets a bound be exceeded at all.
     #[invariant]
     fn directory_bounds_hold(&self, _tc: TestCase) {
         let state = self.rt.block_on(self.directory.state.read());

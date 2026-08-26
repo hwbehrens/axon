@@ -35,8 +35,11 @@ pub struct PeerDirectory {
     state: Arc<RwLock<DirectoryState>>,
     pins: PinningSnapshotHandle,
     store: PeerStore,
-    /// Serializes peer-store writes (see `persistence`); never held while
-    /// the directory state lock is held.
+    /// Transaction gate for persistent edits (see `persistence.rs`): held
+    /// across build, save, and apply so save-plus-commit pairs are totally
+    /// ordered. Lock ordering is strictly gate -> state lock; no path takes
+    /// a state lock and then the gate. Disk I/O still never runs under the
+    /// state lock itself.
     save_lock: Arc<SaveMutex<()>>,
 }
 
