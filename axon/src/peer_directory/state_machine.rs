@@ -106,7 +106,9 @@ impl DirectoryMachine {
     fn observe(&mut self, tc: TestCase) {
         let peer = tc.draw(gs::integers::<u64>().max_value(5));
         // Slot range crosses MAX_OBSERVATIONS_PER_PEER so the per-peer
-        // observation capacity limit is exercised, not just admired.
+        // observation capacity limit is exercised, not just admired: the
+        // model below EXPECTS CapacityReached once a peer holds the bound
+        // and a genuinely new slot is drawn.
         let slot = tc.draw(gs::integers::<u64>().max_value(19));
         let port = 7000u16 + tc.draw(gs::integers::<u16>().max_value(31));
         let id = Self::observation_id(slot);
@@ -123,6 +125,29 @@ impl DirectoryMachine {
                 outcome,
                 ObserveOutcome::IdentityConflict,
                 "cross-identity reuse of an observation ID must be rejected"
+            );
+            return;
+        }
+
+        // Capacity model: a genuinely NEW slot for a peer already holding
+        // MAX_OBSERVATIONS_PER_PEER live observations is rejected without
+        // any state change; refreshing a slot the peer already owns
+        // replaces its own entry and must succeed.
+        let owned_slots = self
+            .live
+            .values()
+            .filter(|(owner, _)| *owner == peer)
+            .count();
+        let refresh_of_own = self.live.get(&id).is_some_and(|(owner, _)| *owner == peer);
+        if owned_slots >= MAX_OBSERVATIONS_PER_PEER && !refresh_of_own {
+            let outcome = self.rt.block_on(
+                self.directory
+                    .observe(self.observation_for(peer, slot, port)),
+            );
+            assert_eq!(
+                outcome,
+                ObserveOutcome::CapacityReached,
+                "a genuinely new observation at the per-peer bound must be rejected"
             );
             return;
         }
@@ -167,11 +192,6 @@ impl DirectoryMachine {
             ObserveOutcome::IgnoredSelf,
             "generated seeds never collide with the local identity"
         );
-        assert_ne!(
-            outcome,
-            ObserveOutcome::CapacityReached,
-            "the generator stays within candidate and observation bounds"
-        );
     }
 
     #[rule]
@@ -214,10 +234,12 @@ impl DirectoryMachine {
     #[rule]
     fn enroll_with_locators(&mut self, tc: TestCase) {
         let peer = tc.draw(gs::integers::<u64>().max_value(5));
+        // Nine distinct locator seeds cross MAX_LOCATORS_PER_PEER (8), so
+        // the locator bound's rejection branch is reachable, not vacuous.
         let locator_count = tc.draw(gs::integers::<u64>().max_value(2)) as usize;
         let mut incoming = BTreeSet::new();
         for _index in 0..locator_count {
-            let seed = tc.draw(gs::integers::<u64>().max_value(3));
+            let seed = tc.draw(gs::integers::<u64>().max_value(8));
             incoming.insert(format!("svc-{seed}.internal:{}", 7000 + seed));
         }
 

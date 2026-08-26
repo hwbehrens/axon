@@ -198,6 +198,8 @@ fn ipc_error_codes_match_spec_table() {
         "handler_busy",
         "not_handler",
         "request_not_found",
+        "send_capacity_exceeded",
+        "message_too_large",
         "internal_error",
     ];
     let actual: Vec<String> = vec![
@@ -212,6 +214,8 @@ fn ipc_error_codes_match_spec_table() {
         axon::ipc::IpcErrorCode::HandlerBusy,
         axon::ipc::IpcErrorCode::NotHandler,
         axon::ipc::IpcErrorCode::RequestNotFound,
+        axon::ipc::IpcErrorCode::SendCapacityExceeded,
+        axon::ipc::IpcErrorCode::MessageTooLarge,
         axon::ipc::IpcErrorCode::InternalError,
     ]
     .into_iter()

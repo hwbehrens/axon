@@ -252,3 +252,31 @@ async fn oversized_request_event_fails_delivery_explicitly() {
     );
     assert!(rx.try_recv().is_err(), "nothing may be delivered");
 }
+
+#[tokio::test]
+async fn oversized_reply_fallback_never_panics_even_with_pathological_req_id() {
+    let (server, mut rx) = single_client_server();
+
+    // A reply whose req_id alone would overflow the line limit. The
+    // message_too_large fallback must never itself be oversized: it drops
+    // the echo instead of panicking (round-eight P1).
+    let pathological = DaemonReply::Error {
+        ok: false,
+        error: IpcErrorCode::InternalError,
+        message: "x".repeat(200),
+        req_id: Some("r".repeat(70_000)),
+    };
+    server
+        .send_reply(1, &pathological)
+        .await
+        .expect("reply delivery must not panic");
+
+    let line = rx.recv().await.expect("a fitting error line is delivered");
+    assert!(line.len() < crate::ipc::MAX_IPC_LINE_LENGTH);
+    let decoded: serde_json::Value = serde_json::from_str(&line).expect("json");
+    assert_eq!(decoded["error"], "message_too_large");
+    assert!(
+        decoded.get("req_id").is_none(),
+        "the overbound echo is dropped, never truncated"
+    );
+}

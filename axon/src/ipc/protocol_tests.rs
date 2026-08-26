@@ -100,6 +100,8 @@ fn error_code_messages_are_distinct_and_nonempty() {
         IpcErrorCode::HandlerBusy,
         IpcErrorCode::NotHandler,
         IpcErrorCode::RequestNotFound,
+        IpcErrorCode::SendCapacityExceeded,
+        IpcErrorCode::MessageTooLarge,
         IpcErrorCode::InternalError,
     ];
     let mut seen = std::collections::HashSet::new();
@@ -177,4 +179,28 @@ fn daemon_reply_req_id_extracts_correlation_ids() {
         inbound_event_with_payload(&serde_json::json!({})).req_id(),
         None
     );
+}
+
+#[test]
+fn error_reply_line_drops_an_overbound_echo_instead_of_panicking() {
+    // A pathological req_id (bounded at ingress; defended here) must never
+    // make a terminal error reply unframeable: the echo is dropped, the
+    // static error body always fits. This pins the round-eight P1 where the
+    // message_too_large fallback could itself exceed the limit and panic.
+    let line = error_reply_line(IpcErrorCode::MessageTooLarge, Some("r".repeat(70_000)))
+        .expect("must encode");
+    assert!(line.len() < MAX_IPC_LINE_LENGTH);
+    let decoded: serde_json::Value = serde_json::from_str(&line).expect("json");
+    assert_eq!(decoded["error"], "message_too_large");
+    assert!(
+        decoded.get("req_id").is_none(),
+        "the overbound echo must be dropped, never truncated"
+    );
+
+    // An in-bound req_id is preserved verbatim.
+    let echoed = "r".repeat(MAX_REQ_ID_BYTES);
+    let line =
+        error_reply_line(IpcErrorCode::MessageTooLarge, Some(echoed.clone())).expect("must encode");
+    let decoded: serde_json::Value = serde_json::from_str(&line).expect("json");
+    assert_eq!(decoded["req_id"], serde_json::json!(echoed));
 }

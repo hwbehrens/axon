@@ -33,7 +33,7 @@ Ordinary inbound messages are broadcast to connected clients with deliver-or-dis
 
 ## 3. Common Command Rules
 
-Every command is a JSON object with a `cmd` string. An optional `req_id` string may be included on any command and is echoed in its response.
+Every command is a JSON object with a `cmd` string. An optional `req_id` string may be included on any command and is echoed in its response. `req_id` is at most 1,024 bytes; a command carrying a longer `req_id` is rejected with `invalid_command` and the offending value is not echoed.
 
 Unknown IPC command names are rejected immediately with `invalid_command`. They are not retained or replayed after upgrades.
 

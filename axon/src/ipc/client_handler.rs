@@ -8,7 +8,9 @@ use tokio::net::UnixStream;
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
-use super::protocol::{CommandEvent, DaemonReply, IpcCommand, IpcErrorCode, MAX_IPC_LINE_LENGTH};
+use super::protocol::{
+    CommandEvent, IpcCommand, IpcErrorCode, MAX_IPC_LINE_LENGTH, MAX_REQ_ID_BYTES, error_reply_line,
+};
 
 /// Maximum time the handler may spend draining an overlong line before the
 /// client is closed. The drain exists so the queued `command_too_large`
@@ -18,23 +20,23 @@ use super::protocol::{CommandEvent, DaemonReply, IpcCommand, IpcErrorCode, MAX_I
 /// and server shutdown could not interrupt it.
 pub(super) const IPC_OVERLONG_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 
-fn build_error_line(error: IpcErrorCode, req_id: Option<String>) -> Arc<str> {
-    Arc::from(
-        serde_json::to_string(&DaemonReply::Error {
-            ok: false,
-            message: error.message().to_string(),
-            error,
-            req_id,
-        })
-        .expect("IPC error serialization"),
-    )
+/// Encode a terminal error line through the shared outbound encoder so
+/// even malformed-command replies respect the framed limit (spec/IPC.md
+/// §2). The req_id echo is dropped (not truncated) if it would overflow —
+/// it is bounded at ingress anyway; this is defense in depth.
+fn build_error_line(error: IpcErrorCode, req_id: Option<String>) -> Option<Arc<str>> {
+    error_reply_line(error, req_id).ok()
 }
 
+/// Extract the req_id to echo from an UNPARSEABLE line. Only in-bound
+/// req_ids are echoed: the line already failed validation, and an
+/// unbounded echo could produce an oversized error frame.
 fn extract_req_id(line: &str) -> Option<String> {
     let parsed = serde_json::from_str::<Value>(line).ok()?;
     parsed
         .get("req_id")
         .and_then(Value::as_str)
+        .filter(|req_id| req_id.len() <= MAX_REQ_ID_BYTES)
         .map(str::to_string)
 }
 
@@ -43,7 +45,13 @@ fn try_queue_error(
     error: IpcErrorCode,
     req_id: Option<String>,
 ) -> bool {
-    out_tx.try_send(build_error_line(error, req_id)).is_ok()
+    match build_error_line(error, req_id) {
+        Some(line) => out_tx.try_send(line).is_ok(),
+        None => {
+            tracing::warn!("failed to encode IPC error line; dropping it");
+            false
+        }
+    }
 }
 
 pub(super) async fn handle_client(
@@ -205,6 +213,19 @@ pub(super) async fn handle_client(
         };
         match serde_json::from_str::<IpcCommand>(line) {
             Ok(command) => {
+                // Ingress bound on the echoed correlation id: an overlong
+                // req_id would make the reply frame exceed the line limit
+                // (spec/IPC.md §3). Rejected as a field constraint, without
+                // echoing the offending value.
+                if command
+                    .req_id()
+                    .is_some_and(|req_id| req_id.len() > MAX_REQ_ID_BYTES)
+                {
+                    if !try_queue_error(&out_tx, IpcErrorCode::InvalidCommand, None) {
+                        break;
+                    }
+                    continue;
+                }
                 // Cancellation-aware: shutdown (or eviction) must be able to
                 // interrupt a handler blocked on a full command channel,
                 // otherwise the daemon's receiver can stop draining while

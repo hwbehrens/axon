@@ -115,7 +115,8 @@
         "axon/src/peer_directory/mod.rs",
         "axon/src/peer_directory/state.rs",
         "axon/src/peer_directory/types.rs",
-        "axon/src/peer_directory/store.rs"
+        "axon/src/peer_directory/store.rs",
+        "axon/src/peer_directory/persistence.rs"
       ]
     },
     {

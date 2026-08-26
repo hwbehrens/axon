@@ -15,7 +15,7 @@ use super::auth;
 use super::client_handler::handle_client;
 use super::protocol::{
     CommandEvent, DaemonReply, EncodeLineError, IpcCommand, IpcErrorCode, WhoamiInfo,
-    encode_reply_line,
+    encode_reply_line, error_reply_line,
 };
 use crate::message::Envelope;
 
@@ -140,7 +140,7 @@ impl IpcServer {
         // Every outbound line passes one encoder that enforces the framed
         // limit (newline included). An oversized reply fails EXPLICITLY:
         // the client receives a `message_too_large` error carrying the same
-        // req_id — never a truncated payload.
+        // req_id — never a truncated payload, never a panic.
         let line = match encode_reply_line(reply) {
             Ok(line) => line,
             Err(EncodeLineError::TooLarge(bytes)) => {
@@ -149,14 +149,15 @@ impl IpcServer {
                     bytes,
                     "IPC reply exceeds the line limit; delivering message_too_large instead"
                 );
-                let fallback = DaemonReply::Error {
-                    ok: false,
-                    error: IpcErrorCode::MessageTooLarge,
-                    message: IpcErrorCode::MessageTooLarge.message().to_string(),
-                    req_id: reply.req_id().map(str::to_string),
-                };
-                encode_reply_line(&fallback)
-                    .expect("error replies are far below the IPC line limit")
+                // `error_reply_line` drops the req_id echo rather than
+                // exceed the limit: a pathological req_id (bounded at
+                // ingress, but defended here anyway) can never make the
+                // fallback itself unframeable.
+                error_reply_line(
+                    IpcErrorCode::MessageTooLarge,
+                    reply.req_id().map(str::to_string),
+                )
+                .map_err(|err| anyhow::anyhow!("failed to encode error reply: {err:?}"))?
             }
             Err(EncodeLineError::Serialize(err)) => {
                 anyhow::bail!("failed to serialize daemon reply: {err}")

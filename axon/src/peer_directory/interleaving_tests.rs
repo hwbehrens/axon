@@ -177,3 +177,61 @@ async fn save_failure_leaves_memory_and_disk_consistent() {
     );
     directory.state.read().await.assert_no_ghost_observations();
 }
+
+#[tokio::test]
+async fn concurrent_edits_leave_disk_equal_to_memory() {
+    let (root, directory) = directory().await;
+    let mut tasks = Vec::new();
+    for seed in 62..70u8 {
+        let directory = directory.clone();
+        tasks.push(tokio::spawn(async move {
+            let identity = identity(seed);
+            let agent_id = identity.agent_id().clone();
+            for round in 0..4u32 {
+                directory
+                    .enroll(
+                        identity.clone(),
+                        vec![
+                            PeerLocator::parse(&format!("127.0.0.1:{}", 8100 + seed as u16))
+                                .expect("locator"),
+                        ],
+                    )
+                    .await
+                    .expect("enroll");
+                if round % 2 == 1 {
+                    directory.remove_peer(&agent_id).await.expect("revoke");
+                }
+            }
+        }));
+    }
+    for task in tasks {
+        task.await.expect("edit task");
+    }
+
+    // After quiescence the durable store must equal live memory. The
+    // transaction gate (save lock held across save PLUS generation-checked
+    // apply) totally orders every save+commit pair, so no interleaving —
+    // including heal racing a paused committer — can leave disk older than
+    // memory.
+    let mut live: Vec<String> = directory
+        .enrolled_agent_ids()
+        .await
+        .into_iter()
+        .map(|agent| agent.to_string())
+        .collect();
+    live.sort();
+    let mut stored: Vec<String> = PeerStore::new(root.path().join("peers.json"))
+        .load()
+        .await
+        .expect("durable store stays readable")
+        .into_iter()
+        .map(|peer| peer.agent_id.to_string())
+        .collect();
+    stored.sort();
+    assert_eq!(
+        live, stored,
+        "durable peer set must equal the live authority after concurrent edits"
+    );
+
+    directory.state.read().await.assert_no_ghost_observations();
+}

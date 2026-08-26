@@ -8,6 +8,13 @@ use crate::message::{AgentId, Envelope, MessageKind};
 
 pub const MAX_IPC_LINE_LENGTH: usize = 64 * 1024;
 
+/// Upper bound on the echoed `req_id` string (spec/IPC.md §3). Commands
+/// carrying a longer `req_id` are rejected with `invalid_command` before
+/// dispatch: an unbounded echo would let a legal (under the line limit)
+/// command produce error and reply frames that exceed the limit — including
+/// the `message_too_large` fallback itself, which must never be oversized.
+pub const MAX_REQ_ID_BYTES: usize = 1024;
+
 /// Failure to encode an outbound daemon reply/event as one spec-conformant
 /// IPC line.
 #[derive(Debug)]
@@ -34,6 +41,30 @@ pub fn encode_reply_line(reply: &DaemonReply) -> Result<Arc<str>, EncodeLineErro
         return Err(EncodeLineError::TooLarge(serialized.len() + 1));
     }
     Ok(Arc::from(serialized))
+}
+
+/// Encode a terminal error reply, guaranteed to fit the framed limit.
+///
+/// If the echoed `req_id` would push the line past the limit (only possible
+/// for callers that bypass the ingress bound, e.g. in-process tests), the
+/// correlation echo is DROPPED and the minimal error line is encoded —
+/// never truncated, never a panic. Error bodies are static text, so the
+/// no-echo form always fits.
+pub fn error_reply_line(
+    code: IpcErrorCode,
+    req_id: Option<String>,
+) -> Result<Arc<str>, EncodeLineError> {
+    let reply = |req_id: Option<String>| DaemonReply::Error {
+        ok: false,
+        error: code,
+        message: code.message().to_string(),
+        req_id,
+    };
+    match encode_reply_line(&reply(req_id)) {
+        Ok(line) => Ok(line),
+        Err(EncodeLineError::TooLarge(_)) => encode_reply_line(&reply(None)),
+        Err(err) => Err(err),
+    }
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]

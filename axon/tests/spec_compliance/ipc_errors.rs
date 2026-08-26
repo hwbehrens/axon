@@ -22,6 +22,7 @@ const ALL_CODES: &[IpcErrorCode] = &[
     IpcErrorCode::NotHandler,
     IpcErrorCode::RequestNotFound,
     IpcErrorCode::SendCapacityExceeded,
+    IpcErrorCode::MessageTooLarge,
     IpcErrorCode::InternalError,
 ];
 
