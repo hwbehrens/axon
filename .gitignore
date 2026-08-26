@@ -2,6 +2,13 @@
 target/
 mutants.out/
 
+# Fuzzing run output (cargo-fuzz regenerates these locally; never commit)
+axon/fuzz/corpus/
+axon/fuzz/artifacts/
+axon/fuzz/coverage/
+coverage/
+*.profraw
+
 # macOS
 .DS_Store
 
