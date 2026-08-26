@@ -16,6 +16,7 @@ Exactly one terminal outcome > bounded state > handler convenience.
 - A request is completed exactly once by its owning handler or an explicit timeout/disconnect/unhandled error.
 - Responses return on the original QUIC bidirectional stream; do not create a second outbound message.
 - Pending state and handler queues must remain bounded.
+- Request correlation is scoped to `(authenticated remote AgentId, request UUID)`; outcomes are never replayed across peers. A reply whose UUID matches several peer-scoped pending requests without a `peer` fails as ambiguous.
 - Unknown or duplicate replies fail explicitly and never mutate unrelated requests.
 
 ## Test targets

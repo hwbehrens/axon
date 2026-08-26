@@ -12,6 +12,12 @@ use crate::peer_token;
 use crate::request_broker::{BrokerError, RequestBroker};
 use crate::transport::{ConnectionManager, REQUEST_TIMEOUT};
 
+/// Upper bound for caller-supplied `timeout_secs`. Without it, `u64::MAX`
+/// would overflow `Instant::now() + timeout` into a panic that leaks the
+/// sender's reserved send-slot budget. One hour comfortably exceeds any
+/// legitimate interactive request while keeping the arithmetic safe.
+const MAX_REQUEST_TIMEOUT_SECS: u64 = 3600;
+
 #[derive(Default)]
 pub(crate) struct Counters {
     pub(crate) sent: AtomicU64,
@@ -72,8 +78,11 @@ pub(crate) async fn handle_command(cmd: CommandEvent, ctx: &DaemonContext) -> Re
                     req_id,
                 )
             } else {
+                // Panic-safe permit: the guard decrements the counter on scope
+                // exit AND on unwind, so a panicking handler task cannot leak
+                // slots until the budget is permanently exhausted.
+                let _slot_guard = SendSlotGuard(ctx.inflight_sends.clone());
                 let outcome = send(ctx, to, kind, payload, timeout_secs, ref_id).await;
-                ctx.inflight_sends.fetch_sub(1, Ordering::Relaxed);
                 match outcome {
                     Ok((msg_id, response)) => DaemonReply::SendOk {
                         ok: true,
@@ -176,12 +185,13 @@ pub(crate) async fn handle_command(cmd: CommandEvent, ctx: &DaemonContext) -> Re
         },
         IpcCommand::Reply {
             request_id,
+            peer,
             kind,
             payload,
             req_id,
         } => match ctx
             .broker
-            .reply(client_id, request_id, kind.as_message_kind(), payload)
+            .reply(client_id, request_id, kind.as_message_kind(), payload, peer)
             .await
         {
             Ok(()) => DaemonReply::Replied {
@@ -318,6 +328,14 @@ fn send_timeout(
             IpcErrorCode::InvalidCommand,
             "timeout_secs must be at least 1",
         )),
+        // Bound before any Instant arithmetic: u64::MAX seconds would panic
+        // on `Instant::now() + timeout` inside the transport.
+        (IpcSendKind::Request, Some(secs)) if secs > MAX_REQUEST_TIMEOUT_SECS => {
+            Err(CommandFailure::new(
+                IpcErrorCode::InvalidCommand,
+                "timeout_secs exceeds the maximum allowed value",
+            ))
+        }
         (IpcSendKind::Request, seconds) => Ok(Duration::from_secs(
             seconds.unwrap_or(REQUEST_TIMEOUT.as_secs()),
         )),
@@ -334,6 +352,7 @@ fn broker_failure(error: BrokerError) -> CommandFailure {
         BrokerError::HandlerBusy => IpcErrorCode::HandlerBusy,
         BrokerError::NotHandler => IpcErrorCode::NotHandler,
         BrokerError::RequestNotFound => IpcErrorCode::RequestNotFound,
+        BrokerError::AmbiguousRequest => IpcErrorCode::InvalidCommand,
         BrokerError::InvalidPayload => IpcErrorCode::InvalidCommand,
     };
     CommandFailure::new(code, code.message())
@@ -345,6 +364,17 @@ fn error_reply(failure: CommandFailure, req_id: Option<String>) -> DaemonReply {
         error: failure.code,
         message: failure.message,
         req_id,
+    }
+}
+
+/// RAII holder for one reserved send-capacity slot. Dropping the guard —
+/// normally or during unwinding — releases the slot, so a panic in the send
+/// path can no longer permanently leak capacity.
+struct SendSlotGuard(std::sync::Arc<AtomicUsize>);
+
+impl Drop for SendSlotGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
     }
 }
 

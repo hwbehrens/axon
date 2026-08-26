@@ -19,12 +19,38 @@ pub struct RequestDelivery {
     pub client_id: u64,
     pub request_id: Uuid,
     request: Arc<Envelope>,
+    /// Peer-scoped correlation key matching the pending entry for this
+    /// delivery; used to remove exactly this request on timeout.
+    key: RequestKey,
     response: oneshot::Receiver<Envelope>,
+}
+
+/// Correlation key scoped to the authenticated remote peer.
+///
+/// A request UUID is chosen by the remote side, so two peers can present
+/// the same UUID. Pending entries and cached terminal responses are keyed
+/// by `(peer, uuid)` so one peer's cached outcome can never be replayed to
+/// — or satisfied by a stale reply for — another peer's exchange.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct RequestKey {
+    peer: AgentId,
+    id: Uuid,
+}
+
+impl RequestKey {
+    /// Derive the key from an inbound envelope. `from` is overwritten with
+    /// TLS-derived identity before broker entry, so it is authoritative.
+    fn of(envelope: &Envelope) -> Option<Self> {
+        envelope.from.as_ref().map(|peer| Self {
+            peer: peer.clone(),
+            id: envelope.id,
+        })
+    }
 }
 
 #[derive(Debug)]
 struct CompletedResponse {
-    request_id: Uuid,
+    key: RequestKey,
     response: Envelope,
     wire_bytes: usize,
 }
@@ -36,7 +62,7 @@ struct CompletedCache {
 }
 
 impl CompletedCache {
-    fn remember(&mut self, request_id: Uuid, response: Envelope) {
+    fn remember(&mut self, key: RequestKey, response: Envelope) {
         let wire_bytes = serde_json::to_vec(&response)
             .map(|bytes| bytes.len())
             .unwrap_or(0);
@@ -55,16 +81,16 @@ impl CompletedCache {
         }
         self.total_bytes += wire_bytes;
         self.queue.push_back(CompletedResponse {
-            request_id,
+            key,
             response,
             wire_bytes,
         });
     }
 
-    fn replay(&self, request_id: &Uuid) -> Option<Envelope> {
+    fn replay(&self, key: &RequestKey) -> Option<Envelope> {
         self.queue
             .iter()
-            .find(|entry| entry.request_id == *request_id)
+            .find(|entry| &entry.key == key)
             .map(|entry| entry.response.clone())
     }
 }
@@ -80,6 +106,9 @@ pub enum BrokerError {
     HandlerBusy,
     NotHandler,
     RequestNotFound,
+    /// The request ID matches more than one peer-scoped pending request and
+    /// no `peer` was supplied to disambiguate.
+    AmbiguousRequest,
     InvalidPayload,
 }
 
@@ -92,7 +121,7 @@ pub struct RequestBroker {
 #[derive(Debug, Default)]
 struct BrokerState {
     handler: Option<u64>,
-    pending: HashMap<Uuid, PendingRequest>,
+    pending: HashMap<RequestKey, PendingRequest>,
     completed: CompletedCache,
 }
 
@@ -126,14 +155,22 @@ impl RequestBroker {
 
     pub async fn begin(&self, request: Arc<Envelope>, pending_ttl: Duration) -> BeginRequest {
         let mut state = self.state.lock().await;
+        let Some(key) = RequestKey::of(&request) else {
+            return BeginRequest::Respond(self.error_response(
+                &request,
+                "invalid_envelope",
+                "request lacks an authenticated origin identity",
+                false,
+            ));
+        };
         // A cached terminal response answers any redelivery of the same
-        // request UUID. This runs BEFORE the handler lookup so that (a) a
-        // retried exchange after handler loss replays the recorded outcome
-        // instead of reporting `unhandled`, and (b) a swept-orphaned request
-        // is never re-delivered — its UUID is tombstoned, so a stale
+        // (peer, request UUID) pair. This runs BEFORE the handler lookup so
+        // that (a) a retried exchange after handler loss replays the recorded
+        // outcome instead of reporting `unhandled`, and (b) a swept-orphaned
+        // request is never re-delivered — its key is tombstoned, so a stale
         // handler's late `reply` can only ever hit RequestNotFound and can
         // never satisfy a newer delivery.
-        if let Some(replay) = state.completed.replay(&request.id) {
+        if let Some(replay) = state.completed.replay(&key) {
             return BeginRequest::Respond(replay);
         }
         let Some(client_id) = state.handler else {
@@ -153,29 +190,29 @@ impl RequestBroker {
             .pending
             .iter()
             .filter(|(_, pending)| pending.inserted_at.elapsed() > pending_ttl)
-            .map(|(id, _)| *id)
+            .map(|(key, _)| key.clone())
             .collect();
-        for id in expired {
-            if let Some(pending) = state.pending.remove(&id) {
+        for key in expired {
+            if let Some(pending) = state.pending.remove(&key) {
                 let response = self.error_response(
                     &pending.request,
                     "timeout",
                     "request timed out waiting for a response",
                     true,
                 );
-                state.completed.remember(id, response.clone());
+                state.completed.remember(key, response.clone());
                 let _ = pending.response.send(response);
             }
         }
         // The sweep above may have just tombstoned an earlier attempt of
-        // THIS request UUID. Without this recheck a same-call retry would
+        // THIS request key. Without this recheck a same-call retry would
         // fall through to a fresh delivery that the stale attempt's late
         // `reply` could satisfy — the exact conflation tombstones exist to
         // prevent.
-        if let Some(replay) = state.completed.replay(&request.id) {
+        if let Some(replay) = state.completed.replay(&key) {
             return BeginRequest::Respond(replay);
         }
-        if state.pending.contains_key(&request.id) {
+        if state.pending.contains_key(&key) {
             return BeginRequest::Respond(self.error_response(
                 &request,
                 "overloaded",
@@ -194,7 +231,7 @@ impl RequestBroker {
         }
         let (response, receiver) = oneshot::channel();
         state.pending.insert(
-            request.id,
+            key.clone(),
             PendingRequest {
                 owner: client_id,
                 inserted_at: Instant::now(),
@@ -205,6 +242,7 @@ impl RequestBroker {
         BeginRequest::Deliver(RequestDelivery {
             client_id,
             request_id: request.id,
+            key,
             request,
             response: receiver,
         })
@@ -231,22 +269,31 @@ impl RequestBroker {
                     true,
                 );
                 let mut state = self.state.lock().await;
-                if state.pending.remove(&delivery.request_id).is_some() {
+                if state.pending.remove(&delivery.key).is_some() {
                     state
                         .completed
-                        .remember(delivery.request_id, timeout_response.clone());
+                        .remember(delivery.key.clone(), timeout_response.clone());
                 }
                 timeout_response
             }
         }
     }
 
+    /// Resolve a pending inbound request on behalf of the handler.
+    ///
+    /// Requests are correlated per authenticated remote peer, so
+    /// `request_id` alone can be ambiguous when two peers present the same
+    /// UUID. Supply `peer` (the `from` identity delivered with the request)
+    /// whenever the caller knows it; without it, an ID matching multiple
+    /// pending requests fails with [`BrokerError::AmbiguousRequest`] rather
+    /// than replying to an arbitrarily chosen peer.
     pub async fn reply(
         &self,
         client_id: u64,
         request_id: Uuid,
         kind: MessageKind,
         payload: Value,
+        peer: Option<AgentId>,
     ) -> Result<(), BrokerError> {
         let mut state = self.state.lock().await;
         if state.handler != Some(client_id) {
@@ -255,13 +302,27 @@ impl RequestBroker {
         if !payload.is_object() {
             return Err(BrokerError::InvalidPayload);
         }
-        let Some(pending) = state.pending.remove(&request_id) else {
+        // Resolve candidates scoped by owning handler and (when supplied) the
+        // requesting peer; UUID collisions across peers must never conflate
+        // exchanges.
+        let mut candidates: Vec<RequestKey> = state
+            .pending
+            .iter()
+            .filter(|(key, pending)| {
+                key.id == request_id
+                    && pending.owner == client_id
+                    && peer.as_ref().is_none_or(|peer| &key.peer == peer)
+            })
+            .map(|(key, _)| key.clone())
+            .collect();
+        let key = match candidates.len() {
+            0 => return Err(BrokerError::RequestNotFound),
+            1 => candidates.pop().expect("exactly one candidate"),
+            _ => return Err(BrokerError::AmbiguousRequest),
+        };
+        let Some(pending) = state.pending.remove(&key) else {
             return Err(BrokerError::RequestNotFound);
         };
-        if pending.owner != client_id {
-            state.pending.insert(request_id, pending);
-            return Err(BrokerError::NotHandler);
-        }
         let response =
             Envelope::response_to(&pending.request, self.local_agent_id.clone(), kind, payload);
         // Reject BEFORE consuming the pending entry: transport framing would
@@ -275,10 +336,10 @@ impl RequestBroker {
         {
             // Leave the request pending so the handler can send a smaller
             // reply.
-            state.pending.insert(request_id, pending);
+            state.pending.insert(key, pending);
             return Err(BrokerError::InvalidPayload);
         }
-        state.completed.remember(request_id, response.clone());
+        state.completed.remember(key, response.clone());
         pending
             .response
             .send(response)
@@ -287,15 +348,20 @@ impl RequestBroker {
 
     pub async fn fail(
         &self,
+        peer: &AgentId,
         request_id: Uuid,
         code: &'static str,
         message: &'static str,
         retryable: bool,
     ) {
+        let key = RequestKey {
+            peer: peer.clone(),
+            id: request_id,
+        };
         let mut state = self.state.lock().await;
-        if let Some(pending) = state.pending.remove(&request_id) {
+        if let Some(pending) = state.pending.remove(&key) {
             let response = self.error_response(&pending.request, code, message, retryable);
-            state.completed.remember(request_id, response.clone());
+            state.completed.remember(key, response.clone());
             drop(state);
             let _ = pending.response.send(response);
         }
@@ -307,20 +373,20 @@ impl RequestBroker {
             return;
         }
         state.handler = None;
-        let pending_ids: Vec<_> = state
+        let pending_keys: Vec<_> = state
             .pending
             .iter()
-            .filter_map(|(id, pending)| (pending.owner == client_id).then_some(*id))
+            .filter_map(|(key, pending)| (pending.owner == client_id).then_some(key.clone()))
             .collect();
-        for id in pending_ids {
-            if let Some(pending) = state.pending.remove(&id) {
+        for key in pending_keys {
+            if let Some(pending) = state.pending.remove(&key) {
                 let response = self.error_response(
                     &pending.request,
                     "unhandled",
                     "application handler disconnected before replying",
                     true,
                 );
-                state.completed.remember(id, response.clone());
+                state.completed.remember(key, response.clone());
                 let _ = pending.response.send(response);
             }
         }
@@ -339,17 +405,19 @@ impl RequestBroker {
         let orphans: Vec<_> = state
             .pending
             .iter()
-            .filter_map(|(id, pending)| (!live_clients.contains(&pending.owner)).then_some(*id))
+            .filter_map(|(key, pending)| {
+                (!live_clients.contains(&pending.owner)).then_some(key.clone())
+            })
             .collect();
-        for id in orphans {
-            if let Some(pending) = state.pending.remove(&id) {
+        for key in orphans {
+            if let Some(pending) = state.pending.remove(&key) {
                 let response = self.error_response(
                     &pending.request,
                     "unhandled",
                     "application handler disconnected before replying",
                     true,
                 );
-                state.completed.remember(id, response.clone());
+                state.completed.remember(key, response.clone());
                 let _ = pending.response.send(response);
             }
         }

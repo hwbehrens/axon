@@ -77,7 +77,7 @@ async fn uni_failure_before_any_write_is_classified_pre_send() {
     let err = crate::transport::connection::send_unidirectional(
         &connection,
         envelope,
-        Duration::from_secs(5),
+        std::time::Instant::now() + Duration::from_secs(5),
     )
     .await
     .expect_err("send on closed endpoint must fail");

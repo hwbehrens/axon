@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -113,27 +113,48 @@ pub(crate) fn retry_permitted(kind: &MessageKind, error: &SendError) -> bool {
     kind.expects_response() || !error.ambiguous
 }
 
+/// Remaining budget before an absolute exchange deadline.
+///
+/// Recomputed immediately before EVERY await so no phase receives a fresh
+/// full budget: dialing, stream open, frame write, and response read all
+/// share one whole-exchange deadline. A caller asking for a 1-second
+/// exchange must never wait longer than 1 second in total.
+pub(crate) fn remaining_budget(
+    deadline: Instant,
+    phase: &'static str,
+) -> Result<Duration, SendError> {
+    deadline
+        .checked_duration_since(Instant::now())
+        .ok_or_else(|| SendError::pre_send_timeout(anyhow!("send budget exhausted before {phase}")))
+}
+
 pub(crate) async fn send_unidirectional(
     connection: &quinn::Connection,
     envelope: Envelope,
-    budget: Duration,
+    deadline: Instant,
 ) -> Result<(), SendError> {
     let bytes = envelope
         .wire_encode()
         .map_err(|err| SendError::pre_send(err.context("failed to serialize envelope for wire")))?;
 
-    let mut stream = tokio::time::timeout(budget, connection.open_uni())
-        .await
-        .map_err(|_| SendError::timeout(anyhow!("uni stream open exceeded send budget")))?
-        .map_err(|err| {
-            SendError::pre_send(anyhow::Error::new(err).context("failed to open uni stream"))
-        })?;
+    let mut stream = tokio::time::timeout(
+        remaining_budget(deadline, "uni stream open")?,
+        connection.open_uni(),
+    )
+    .await
+    .map_err(|_| SendError::timeout(anyhow!("uni stream open exceeded send budget")))?
+    .map_err(|err| {
+        SendError::pre_send(anyhow::Error::new(err).context("failed to open uni stream"))
+    })?;
     // Past this point the payload may reach the peer: every failure is
     // classified ambiguous.
-    tokio::time::timeout(budget, write_framed(&mut stream, &bytes))
-        .await
-        .map_err(|_| SendError::timeout(anyhow!("uni frame write exceeded send budget")))?
-        .map_err(|err| SendError::ambiguous(err.context("uni frame write failed")))?;
+    tokio::time::timeout(
+        remaining_budget(deadline, "uni frame write")?,
+        write_framed(&mut stream, &bytes),
+    )
+    .await
+    .map_err(|_| SendError::timeout(anyhow!("uni frame write exceeded send budget")))?
+    .map_err(|err| SendError::ambiguous(err.context("uni frame write failed")))?;
     stream.finish().map_err(|err| {
         SendError::ambiguous(anyhow::Error::new(err).context("failed to finish uni stream"))
     })?;
@@ -144,34 +165,41 @@ pub(crate) async fn send_request(
     connection: &quinn::Connection,
     envelope: Envelope,
     local_agent_id: &AgentId,
-    request_timeout: Duration,
+    deadline: Instant,
 ) -> Result<Envelope, SendError> {
     let bytes = envelope
         .wire_encode()
         .map_err(|err| SendError::pre_send(err.context("failed to serialize request for wire")))?;
 
-    let (mut send, mut recv) = tokio::time::timeout(request_timeout, connection.open_bi())
-        .await
-        .map_err(|_| SendError::timeout(anyhow!("bidi stream open exceeded send budget")))?
-        .map_err(|err| {
-            SendError::pre_send(anyhow::Error::new(err).context("failed to open bidi stream"))
-        })?;
+    let (mut send, mut recv) = tokio::time::timeout(
+        remaining_budget(deadline, "bidi stream open")?,
+        connection.open_bi(),
+    )
+    .await
+    .map_err(|_| SendError::timeout(anyhow!("bidi stream open exceeded send budget")))?
+    .map_err(|err| {
+        SendError::pre_send(anyhow::Error::new(err).context("failed to open bidi stream"))
+    })?;
     // Stream credits are peer-controlled: an unbounded write here would let
     // a trusted peer stall the exchange past its deadline.
-    tokio::time::timeout(request_timeout, write_framed(&mut send, &bytes))
-        .await
-        .map_err(|_| SendError::timeout(anyhow!("request frame write exceeded send budget")))?
-        .map_err(|err| SendError::ambiguous(err.context("request frame write failed")))?;
+    tokio::time::timeout(
+        remaining_budget(deadline, "request frame write")?,
+        write_framed(&mut send, &bytes),
+    )
+    .await
+    .map_err(|_| SendError::timeout(anyhow!("request frame write exceeded send budget")))?
+    .map_err(|err| SendError::ambiguous(err.context("request frame write failed")))?;
     send.finish().map_err(|err| {
         SendError::ambiguous(anyhow::Error::new(err).context("failed to finish request stream"))
     })?;
 
-    let timeout_label = if request_timeout.as_millis() < 1000 {
-        format!("{}ms", request_timeout.as_millis())
+    let response_budget = remaining_budget(deadline, "response read")?;
+    let timeout_label = if response_budget.as_millis() < 1000 {
+        format!("{}ms", response_budget.as_millis())
     } else {
-        format!("{}s", request_timeout.as_secs())
+        format!("{}s", response_budget.as_secs())
     };
-    let response_bytes = timeout(request_timeout, read_framed(&mut recv))
+    let response_bytes = timeout(response_budget, read_framed(&mut recv))
         .await
         .map_err(|_| SendError::timeout(anyhow!("request timed out after {timeout_label}")))?
         .map_err(SendError::ambiguous)?;

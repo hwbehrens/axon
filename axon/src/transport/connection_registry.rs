@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use tokio::sync::RwLock;
 
@@ -16,6 +17,9 @@ struct ConnectionSlot {
     generation: u64,
     direction: Direction,
     connection: quinn::Connection,
+    /// When this slot became authoritative. Bounds the window during which a
+    /// preferred-direction candidate may still replace it (see `admit_gated`).
+    installed_at: Instant,
 }
 
 #[derive(Default)]
@@ -86,6 +90,33 @@ impl ConnectionRegistry {
         F: FnOnce() -> Fut,
         Fut: std::future::Future<Output = bool>,
     {
+        self.admit_gated_with_window(
+            peer,
+            connection,
+            direction,
+            gate,
+            // A genuine simultaneous cross-dial handshake must complete within
+            // one dial timeout of the incumbent's installation (see the
+            // selection comment below).
+            super::DIAL_TIMEOUT,
+        )
+        .await
+    }
+
+    /// Admission with the cross-dial replacement window made explicit so the
+    /// aged-incumbent rule is unit-testable without real sleeps.
+    pub(crate) async fn admit_gated_with_window<F, Fut>(
+        &self,
+        peer: AgentId,
+        connection: quinn::Connection,
+        direction: Direction,
+        gate: F,
+        cross_dial_window: Duration,
+    ) -> Admission
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = bool>,
+    {
         let mut state = self.state.write().await;
         if !gate().await {
             drop(state);
@@ -110,7 +141,21 @@ impl ConnectionRegistry {
             } else {
                 Direction::Inbound
             };
-            if incumbent.direction == preferred || direction != preferred {
+            // SPEC.md §Connection Lifecycle 4: a healthy incumbent wins within
+            // its generation. Direction is ONLY a tie-breaker for simultaneous
+            // cross-dials (Q-006/DEC-014): two handshakes that overlapped in
+            // time. Any genuine racing handshake must have started before the
+            // incumbent was installed and completes within DIAL_TIMEOUT of its
+            // own start, so every member of the race arrives within
+            // DIAL_TIMEOUT of installation. A later preferred-direction
+            // candidate is not part of that race: it loses to the healthy
+            // incumbent and is closed as an ordinary duplicate instead of
+            // evicting a proven connection solely for its direction.
+            let within_cross_dial_window = incumbent.installed_at.elapsed() <= cross_dial_window;
+            if incumbent.direction == preferred
+                || direction != preferred
+                || !within_cross_dial_window
+            {
                 connection.close(0u32.into(), b"duplicate connection");
                 return Admission::Existing(incumbent.connection.clone());
             }
@@ -121,6 +166,7 @@ impl ConnectionRegistry {
                 generation,
                 direction,
                 connection: connection.clone(),
+                installed_at: Instant::now(),
             },
         );
         drop(state);
@@ -199,3 +245,7 @@ impl ConnectionRegistry {
         self.state.read().await.slots.len()
     }
 }
+
+#[cfg(test)]
+#[path = "connection_registry_tests.rs"]
+mod tests;

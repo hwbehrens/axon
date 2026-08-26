@@ -6,7 +6,8 @@
 //! private fields.
 
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::sync::atomic::Ordering;
+use std::time::Instant;
 
 use anyhow::{Context, Result, anyhow, bail};
 use tokio_util::sync::CancellationToken;
@@ -82,7 +83,7 @@ impl ConnectionManager {
                     "dial to peer {peer} was cancelled"
                 )));
             }
-            let Some(budget) = deadline.checked_duration_since(Instant::now()) else {
+            if deadline.checked_duration_since(Instant::now()).is_none() {
                 last_error = Some(SendError::pre_send_timeout(anyhow!(
                     "send budget exhausted before dialing {addr}"
                 )));
@@ -94,7 +95,7 @@ impl ConnectionManager {
                         agent_id: peer.clone(),
                         addr,
                     },
-                    budget.min(DIAL_TIMEOUT),
+                    deadline,
                 )
                 .await
             {
@@ -108,13 +109,23 @@ impl ConnectionManager {
     }
 
     pub async fn ensure_connection(&self, peer: &DialPeer) -> Result<quinn::Connection> {
-        self.dial(peer, DIAL_TIMEOUT).await
+        self.dial(peer, Instant::now() + DIAL_TIMEOUT).await
     }
 
-    async fn dial(&self, peer: &DialPeer, handshake_budget: Duration) -> Result<quinn::Connection> {
+    /// Dial with a bounded handshake under the whole-exchange `deadline`.
+    /// Every await here recomputes the remaining budget: the per-peer dial
+    /// lock, the handshake, and the admission gate all share one deadline,
+    /// so a caller's 1-second exchange can never spend its whole budget on
+    /// the lock wait and then receive a fresh full budget for the handshake.
+    async fn dial(&self, peer: &DialPeer, deadline: Instant) -> Result<quinn::Connection> {
         if let Some(existing) = self.registry.current(&peer.agent_id).await {
             return Ok(existing);
         }
+        // Attempt token: capture the enrollment epoch before anything can
+        // block. Admission re-checks it, so a handshake that raced a
+        // revocation is rejected even if the peer was re-enrolled in the
+        // meantime — a trusted attempt must start after revocation committed.
+        let epoch_at_dial_start = self.enrollment_epoch.load(Ordering::Relaxed);
         let dial_cancel = self.dial_token(&peer.agent_id).await;
         let peer_lock = {
             let mut locks = self.connecting_locks.lock().await;
@@ -123,7 +134,21 @@ impl ConnectionManager {
                 .or_insert_with(|| Arc::new(Mutex::new(())))
                 .clone()
         };
-        let _guard = peer_lock.lock().await;
+        // Waiting for the per-peer dial lock is part of the exchange budget:
+        // without this bound a contended lock could stall the caller past
+        // its deadline indefinitely.
+        let _guard = tokio::time::timeout(
+            super::super::connection::remaining_budget(deadline, "per-peer dial lock")
+                .map_err(|err| anyhow!("dial to {} failed: {err}", peer.agent_id))?,
+            peer_lock.lock(),
+        )
+        .await
+        .map_err(|_| {
+            anyhow!(
+                "timed out waiting for the per-peer dial lock for {}",
+                peer.agent_id
+            )
+        })?;
         if let Some(existing) = self.registry.current(&peer.agent_id).await {
             return Ok(existing);
         }
@@ -138,14 +163,16 @@ impl ConnectionManager {
             .with_context(|| format!("failed to begin QUIC connect to {}", peer.addr))?;
         let remote_addr = connecting.remote_address();
         // The handshake is the only long await before slot installation; it
-        // is bounded so a stalled dial cannot outlive the caller's budget,
+        // is bounded by the REMAINING exchange budget (recomputed after the
+        // lock wait) so a stalled dial cannot outlive the caller's deadline,
         // and cancellation-aware so revocation tears it down immediately.
         let connection = tokio::select! {
             _ = dial_cancel.cancelled() => {
                 bail!("dial to {} was cancelled", peer.agent_id);
             }
             result = tokio::time::timeout(
-                handshake_budget,
+                super::super::connection::remaining_budget(deadline, "QUIC handshake")
+                    .map_err(|err| anyhow!("dial to {} failed: {err}", peer.agent_id))?,
                 with_handshake_remote_addr(remote_addr, connecting),
             ) => result
                 .map_err(|_| anyhow!("QUIC handshake timed out with {}", peer.addr))?
@@ -160,17 +187,24 @@ impl ConnectionManager {
             );
         }
         // Revocation race guard: the handshake may have started before the
-        // peer was revoked. The enrollment gate runs under the registry's
-        // admission lock (see `admit_gated`), linearizing it against
-        // `remove_peer`: either the gate sees the revocation, or the
-        // subsequent `close_peer` tears the fresh slot down.
+        // peer was revoked. Two gates run under the registry's admission lock
+        // (see `admit_gated`), linearized against `remove_peer`: current
+        // enrollment AND the enrollment epoch captured at dial start. Either
+        // the gates observe the revocation, or the subsequent `close_peer`
+        // tears the fresh slot down. A pre-revocation attempt is never
+        // admitted against restored trust; it must re-dial.
+        let enrollment_epoch = self.enrollment_epoch.clone();
+        let gate_agent_id = peer.agent_id.clone();
         match self
             .registry
             .admit_gated(
                 peer.agent_id.clone(),
                 connection.clone(),
                 Direction::Outbound,
-                || self.directory.is_enrolled(&peer.agent_id),
+                || async move {
+                    enrollment_epoch.load(Ordering::Relaxed) == epoch_at_dial_start
+                        && self.directory.is_enrolled(&gate_agent_id).await
+                },
             )
             .await
         {

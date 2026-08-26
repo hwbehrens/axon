@@ -49,7 +49,7 @@ Send a message to an enrolled peer.
 {"cmd":"send","to":"<agent_id>","kind":"request|message","payload":{},"timeout_secs":30,"ref":"<uuid-optional>"}
 ```
 
-`timeout_secs` is optional and only valid for `request`.
+`timeout_secs` is optional and only valid for `request`. It bounds the WHOLE exchange (dial, stream open, frame write, and response read share one deadline; phases never receive independent budgets). Values above `3600` are rejected with `invalid_command`.
 
 For `message`:
 
@@ -167,14 +167,14 @@ A second client receives `handler_busy`. Repeating `serve` on the lease holder i
 Resolve one pending request delivered to the current handler.
 
 ```json
-{"cmd":"reply","request_id":"<uuid>","kind":"response|error","payload":{}}
+{"cmd":"reply","request_id":"<uuid>","peer":"<agent_id-optional>","kind":"response|error","payload":{}}
 ```
 
 ```json
 {"ok":true,"request_id":"<uuid>"}
 ```
 
-Only the handler that received the request may reply. Exactly one reply is admitted. Duplicate, late, unknown, and non-owner replies are rejected explicitly. A reply whose encoded envelope would exceed the 65,536-byte wire limit is rejected with `invalid_command` before the request is consumed; the handler may retry with a smaller payload.
+Only the handler that received the request may reply. Exactly one reply is admitted. Requests are correlated per authenticated remote peer: `request_id` alone can be ambiguous when two peers present the same UUID. Supplying `peer` (the `from` identity delivered with the request event) disambiguates; when it is omitted and the ID matches several pending requests, the reply is rejected with `invalid_command` rather than being routed to an arbitrary peer. Duplicate, late, unknown, and non-owner replies are rejected explicitly. A reply whose encoded envelope would exceed the 65,536-byte wire limit is rejected with `invalid_command` before the request is consumed; the handler may retry with a smaller payload.
 
 ---
 

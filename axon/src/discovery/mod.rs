@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::net::IpAddr;
 
 use anyhow::{Context, Result};
@@ -55,6 +55,10 @@ pub async fn run_mdns_discovery(
         .browse(SERVICE_TYPE)
         .context("failed to start mDNS browse")?;
     let mut observations_by_service = HashMap::<String, BTreeSet<ObservationId>>::new();
+    // Insertion order of tracked service names, backing the documented
+    // oldest-entry eviction contract. May contain stale names left behind by
+    // removals; those are skipped (and pruned) when they reach the front.
+    let mut insertion_order = VecDeque::<String>::new();
 
     loop {
         tokio::select! {
@@ -77,30 +81,53 @@ pub async fn run_mdns_discovery(
                                     .map(|observation| observation.id.clone())
                                     .collect();
                                 // Bound the tracking map independently of
-                                // peer-directory limits: evict an arbitrary
-                                // tracked service when a NEW name arrives at
-                                // capacity, surfacing Lost for its ids.
+                                // peer-directory limits: when a NEW name
+                                // arrives at capacity, evict the OLDEST-
+                                // INSERTED live service so an active peer is
+                                // never evicted ahead of stale ones purely by
+                                // hash-map ordering. The order queue may hold
+                                // stale names from earlier removals; they are
+                                // skipped here and pruned below.
                                 if !observations_by_service.contains_key(&fullname)
                                     && observations_by_service.len() >= MAX_TRACKED_SERVICES
-                                    && let Some(evicted) =
-                                        observations_by_service.keys().next().cloned()
                                 {
-                                    warn!(
-                                        service = %evicted,
-                                        capacity = MAX_TRACKED_SERVICES,
-                                        "mDNS service tracking at capacity; evicting"
-                                    );
-                                    if let Some(ids) = observations_by_service.remove(&evicted) {
-                                        for id in ids {
-                                            if tx.send(DiscoveryEvent::Lost(id)).await.is_err() {
-                                                return Ok(());
+                                    let evicted = loop {
+                                        match insertion_order.pop_front() {
+                                            Some(name)
+                                                if observations_by_service.contains_key(&name) =>
+                                            {
+                                                break Some(name)
+                                            }
+                                            Some(_) => continue,
+                                            None => break None,
+                                        }
+                                    };
+                                    if let Some(evicted) = evicted {
+                                        warn!(
+                                            service = %evicted,
+                                            capacity = MAX_TRACKED_SERVICES,
+                                            "mDNS service tracking at capacity; evicting oldest"
+                                        );
+                                        if let Some(ids) =
+                                            observations_by_service.remove(&evicted)
+                                        {
+                                            for id in ids {
+                                                if tx.send(DiscoveryEvent::Lost(id)).await.is_err() {
+                                                    return Ok(());
+                                                }
                                             }
                                         }
                                     }
                                 }
                                 let previous = observations_by_service
-                                    .insert(fullname, next_ids.clone())
+                                    .insert(fullname.clone(), next_ids.clone())
                                     .unwrap_or_default();
+                                if previous.is_empty() {
+                                    // New tracked service: record its position
+                                    // in insertion order. Refreshes of a known
+                                    // name keep their original position.
+                                    insertion_order.push_back(fullname);
+                                }
                                 for stale in previous.difference(&next_ids) {
                                     if tx.send(DiscoveryEvent::Lost(stale.clone())).await.is_err() {
                                         return Ok(());
@@ -122,6 +149,13 @@ pub async fn run_mdns_discovery(
                                     return Ok(());
                                 }
                             }
+                        }
+                        // Opportunistic compaction: churning instance names
+                        // must not grow the order queue without limit once
+                        // removals leave stale entries behind.
+                        if insertion_order.len() > observations_by_service.len() * 2 + 16 {
+                            insertion_order
+                                .retain(|name| observations_by_service.contains_key(name));
                         }
                     }
                     other => debug!(event = ?other, "ignoring non-resolved mDNS event"),

@@ -83,6 +83,12 @@ pub enum IpcCommand {
     },
     Reply {
         request_id: Uuid,
+        /// Authenticated origin of the request being answered (the `from`
+        /// delivered with the request event). Optional: when omitted and the
+        /// request ID matches several peer-scoped pending requests, the reply
+        /// is rejected as ambiguous instead of hitting an arbitrary peer.
+        #[serde(default)]
+        peer: Option<AgentId>,
         kind: IpcReplyKind,
         payload: Value,
         #[serde(default)]

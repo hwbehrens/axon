@@ -8,7 +8,9 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use super::reserve_slot;
+use crate::ipc::{IpcErrorCode, IpcSendKind};
+
+use super::{MAX_REQUEST_TIMEOUT_SECS, SendSlotGuard, reserve_slot, send_timeout};
 
 #[test]
 fn budget_of_one_admits_exactly_one_send() {
@@ -68,5 +70,45 @@ async fn racing_reservations_never_exceed_the_budget() {
     assert_eq!(
         admitted, BUDGET,
         "racing reservations must admit exactly the budget"
+    );
+}
+
+// =========================================================================
+// Round-five review regressions: hostile timeout_secs and panic-safe slots.
+// =========================================================================
+
+#[test]
+fn maximum_timeout_secs_is_rejected_not_overflowed() {
+    // `Instant::now() + u64::MAX seconds` panics; the IPC boundary must
+    // reject it as an invalid command before any Instant arithmetic.
+    let error = send_timeout(IpcSendKind::Request, Some(u64::MAX))
+        .expect_err("u64::MAX timeout must be rejected");
+    assert_eq!(error.code, IpcErrorCode::InvalidCommand);
+
+    let over = send_timeout(IpcSendKind::Request, Some(MAX_REQUEST_TIMEOUT_SECS + 1))
+        .expect_err("timeout above the maximum must be rejected");
+    assert_eq!(over.code, IpcErrorCode::InvalidCommand);
+
+    // The boundary itself is accepted.
+    assert!(send_timeout(IpcSendKind::Request, Some(MAX_REQUEST_TIMEOUT_SECS)).is_ok());
+    assert!(send_timeout(IpcSendKind::Request, None).is_ok());
+}
+
+#[test]
+fn dropped_send_slot_guard_releases_the_reserved_slot() {
+    let counter = Arc::new(AtomicUsize::new(0));
+    assert!(reserve_slot(&counter, 1).is_some());
+    assert!(reserve_slot(&counter, 1).is_none(), "budget exhausted");
+
+    // The RAII guard releases the slot on drop — including during unwind,
+    // so a panicking handler task can no longer leak capacity permanently.
+    {
+        let _guard = SendSlotGuard(counter.clone());
+        assert_eq!(counter.load(Ordering::Relaxed), 1);
+    }
+    assert_eq!(
+        counter.load(Ordering::Relaxed),
+        0,
+        "guard drop must decrement once"
     );
 }

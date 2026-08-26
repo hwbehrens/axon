@@ -10,6 +10,7 @@ Each entry: ID, date, subsystem, one-paragraph summary covering motivation, deci
 
 | ID | Date | Subsystem | Title |
 |---|---|---|---|
+| DEC-020 | 2026-08-24 | transport, daemon, ipc, broker, discovery | Round-five review hardening: absolute deadlines, enrollment epochs, peer-scoped correlation |
 | DEC-019 | 2026-08-24 | transport, broker, discovery, persistence | Whole-exchange deadlines, same-call tombstones, bounded tracking |
 | DEC-018 | 2026-08-24 | transport, request broker, ipc | Deadline-owned sends, tombstoned terminal outcomes, shutdown liveness |
 | DEC-017 | 2026-08-24 | transport, daemon, ipc | Revocation-linearized admission, at-most-once retries, bounded drains |
@@ -33,6 +34,12 @@ Each entry: ID, date, subsystem, one-paragraph summary covering motivation, deci
 ---
 
 ## Entries
+
+### DEC-020: Round-five review hardening: absolute deadlines, enrollment epochs, peer-scoped correlation
+
+Date: 2026-08-24 | Subsystem: transport, daemon, ipc, request broker, discovery
+
+Review of the connection-ownership redesign surfaced four error classes that this decision closes class-wide rather than patch-by-patch. **Absolute deadlines:** every await in the send path (`connect_peer`, the per-peer dial lock, stream open, frame write, response read) now recomputes the remaining budget from one `Instant` deadline, so a caller's N-second exchange can never consume more than N seconds in total; hostile `timeout_secs` values are bounded at IPC (`MAX_REQUEST_TIMEOUT_SECS = 3600`) and overflow-checked at the transport, and the reserved send slot is held by an unwind-safe RAII guard so a panic can no longer permanently leak capacity. **Authority-race admission:** handshakes capture an enrollment epoch (bumped on every revocation) before they begin and admission re-checks it under the registry lock alongside current enrollment, so a pre-revocation outbound handshake or untracked inbound handshake can never be admitted against re-enrolled trust — a trusted attempt must start after revocation committed; canceled reconnect attempts additionally release their `ReconnectBook` ticket via `abandoned` instead of staying `in_flight` forever. **Selection-rule precision:** direction is now strictly a simultaneous-cross-dial tie-breaker — a preferred-direction candidate may replace a healthy incumbent only within one `DIAL_TIMEOUT` of the incumbent's installation (the window in which a genuine racing handshake can still arrive); afterwards the healthy incumbent wins per SPEC.md §Connection Lifecycle 4. **Principal-scoped correlation:** inbound request correlation (pending entries, terminal-outcome tombstones, completed-response cache) is keyed by `(authenticated remote AgentId, request UUID)` so one peer's cached outcome can never be replayed to or satisfy a reply for another peer's exchange; the IPC `reply` command gains an optional `peer` field and uuid collisions without it fail explicitly as ambiguous. Finally, mDNS service-tracking eviction now evicts the oldest-INSERTED live service via explicit insertion-order tracking, matching its documented contract.
 
 ### DEC-019: Whole-exchange deadlines, same-call tombstones, bounded tracking
 

@@ -90,7 +90,7 @@ Automatic discovery is local-link only. AXON does not define a rendezvous, STUN,
 1. A peer is explicitly enrolled and has at least one current or configured locator.
 2. Either side may initiate a QUIC connection. When simultaneous cross-dials race, the lexicographically lower Agent ID is the preferred initiator; this is a tie-breaker, not a restriction on dialing an empty slot.
 3. mTLS handshake: both sides present self-signed certificates with ALPN token `axon/1`. Each side validates the peer certificate against the enrolled pin. Unknown or mismatched peers are rejected during TLS.
-4. Exactly one authoritative connection slot exists per peer. A healthy incumbent wins within its generation and duplicates are closed.
+4. Exactly one authoritative connection slot exists per peer. A healthy incumbent wins within its generation and duplicates are closed. The lexicographically-lower-initiator preference is only a tie-breaker for simultaneous cross-dials: a preferred-direction candidate may replace a healthy incumbent solely while that incumbent's cross-dial race can still be in flight (within one dial timeout of its installation); afterwards the healthy incumbent wins regardless of direction.
 5. Failure, an unhealthy transition, or a failed/timed-out exchange advances the generation. Retrying the exchange redials rather than reusing suspect state. A replacement must authenticate before it occupies the empty slot.
 6. On disconnect: reconnect with exponential backoff (1s, 2s, 4s, ... max 30s). Outcomes and teardown from an older generation cannot mutate a newer slot.
 

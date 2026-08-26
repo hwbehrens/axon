@@ -88,6 +88,20 @@ impl ReconnectBook {
         Some(wait)
     }
 
+    /// Release an attempt whose task ended without a dial outcome — shutdown
+    /// or per-peer revocation cancelled it mid-flight. The entry keeps its
+    /// backoff state but becomes claimable again immediately: without this,
+    /// a cancelled attempt would stay `in_flight` forever and maintenance
+    /// could never claim another attempt for the peer after re-enrollment.
+    pub(crate) async fn abandoned(&self, peer: &AgentId, ticket: AttemptTicket) {
+        let mut state = self.state.lock().await;
+        if let Some(attempt) = state.attempts.get_mut(peer)
+            && attempt.version == ticket.version
+        {
+            attempt.in_flight = false;
+        }
+    }
+
     pub(crate) async fn retain(&self, enrolled: &HashSet<AgentId>) {
         self.state
             .lock()
@@ -96,3 +110,7 @@ impl ReconnectBook {
             .retain(|peer, _| enrolled.contains(peer));
     }
 }
+
+#[cfg(test)]
+#[path = "reconnect_tests.rs"]
+mod tests;

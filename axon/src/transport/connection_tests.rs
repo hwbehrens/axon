@@ -53,3 +53,36 @@ proptest! {
         prop_assert!(payload.get("message").and_then(|v| v.as_str()).is_some());
     }
 }
+
+// =========================================================================
+// Round-five review regressions: whole-exchange deadline arithmetic.
+// =========================================================================
+
+#[test]
+fn remaining_budget_is_recomputed_against_the_absolute_deadline() {
+    // Whole-exchange budgeting: every phase must recompute what is left of
+    // ONE absolute deadline, not receive a fresh full budget.
+    let future = Instant::now() + Duration::from_secs(5);
+    let budget = remaining_budget(future, "test phase").expect("future deadline has budget");
+    assert!(budget <= Duration::from_secs(5));
+    assert!(budget > Duration::from_secs(4));
+
+    // An exhausted deadline yields the typed pre-delivery timeout, never a
+    // panic or a zero-length wait that could still consume a full phase.
+    let past = Instant::now() - Duration::from_secs(1);
+    let error = remaining_budget(past, "test phase").expect_err("exhausted deadline");
+    assert!(error.timed_out);
+    assert!(!error.ambiguous, "nothing was delivered yet");
+}
+
+#[test]
+fn checked_deadline_overflow_never_panics() {
+    // Mirrors send_to's deadline construction: hostile durations must
+    // overflow into an error, not an Instant-add panic that leaks caller
+    // resources.
+    assert!(
+        Instant::now()
+            .checked_add(Duration::from_secs(u64::MAX))
+            .is_none()
+    );
+}

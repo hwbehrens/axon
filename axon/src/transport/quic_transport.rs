@@ -3,9 +3,10 @@ use std::future::{Future, IntoFuture};
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore, broadcast};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
@@ -51,6 +52,13 @@ pub struct ConnectionManager {
     /// connection so a revocation that races an in-flight handshake cannot
     /// land a slot.
     directory: PeerDirectory,
+    /// Bumped on every `close_peer` (revocation). Handshake attempts capture
+    /// its value BEFORE the handshake begins and admission re-checks it, so
+    /// a handshake that raced a revocation is rejected at admission even if
+    /// the same peer was re-enrolled before the attempt finished. Without
+    /// this epoch, a pre-revocation outbound handshake or an untracked
+    /// inbound handshake could be admitted against freshly restored trust.
+    enrollment_epoch: Arc<AtomicU64>,
 }
 
 impl ConnectionManager {
@@ -111,6 +119,7 @@ impl ConnectionManager {
             tasks: TaskTracker::new(),
             reconnect: ReconnectBook::default(),
             directory,
+            enrollment_epoch: Arc::new(AtomicU64::new(0)),
         };
         manager.spawn_accept_loop();
         Ok(manager)
@@ -133,7 +142,13 @@ impl ConnectionManager {
     }
 
     pub async fn close_peer(&self, agent_id: &AgentId, reason: &'static [u8]) {
-        // Cancel and retire any in-flight dials for this peer first: the
+        // Advance the enrollment epoch FIRST so every handshake that began
+        // before this revocation — outbound dials tracked here and inbound
+        // handshakes captured in the accept loop alike — fails its admission
+        // gate even if the peer is re-enrolled moments later. A trusted
+        // attempt must start (and capture the new epoch) after revocation.
+        self.enrollment_epoch.fetch_add(1, Ordering::Relaxed);
+        // Cancel and retire any in-flight dials for this peer next: the
         // IPC revocation contract requires cancelling attempts, not merely
         // refusing their admission when they finish.
         let dial_cancel = self.dial_cancels.lock().await.remove(agent_id);
@@ -166,8 +181,16 @@ impl ConnectionManager {
                 // a handshake must not outlive close_all's join window as a
                 // detached task, nor keep dialing after removal.
                 tokio::select! {
-                    _ = manager.cancel.cancelled() => {}
-                    _ = dial_cancel.cancelled() => {}
+                    _ = manager.cancel.cancelled() => {
+                        // Shutdown/revocation ended the attempt without a dial
+                        // outcome: release the ticket or the entry would stay
+                        // `in_flight` forever and maintenance could never claim
+                        // another attempt for this peer after re-enrollment.
+                        manager.reconnect.abandoned(&peer, ticket).await;
+                    }
+                    _ = dial_cancel.cancelled() => {
+                        manager.reconnect.abandoned(&peer, ticket).await;
+                    }
                     result = manager.connect_peer(&directory, &peer, Instant::now() + DIAL_TIMEOUT) => {
                         match result {
                             Ok(_) => manager.reconnect.succeeded(&peer, ticket).await,
@@ -205,8 +228,12 @@ impl ConnectionManager {
         // and is enforced INSIDE this call, never by an external canceller:
         // a dropped future could skip `send_once`'s retirement of the exact
         // failed connection. Every failure here flows through normal error
-        // returns, so retirement is unconditional on failure.
-        let deadline = Instant::now() + request_timeout;
+        // returns, so retirement is unconditional on failure. Checked add:
+        // a hostile `timeout_secs` must overflow into a typed error, not a
+        // panic that leaks the caller's reserved send slot.
+        let deadline = Instant::now().checked_add(request_timeout).ok_or_else(|| {
+            SendError::pre_send_timeout(anyhow!("request timeout exceeds the supported range"))
+        })?;
         match self
             .send_once(directory, peer, envelope.clone(), deadline)
             .await
@@ -238,15 +265,12 @@ impl ConnectionManager {
         deadline: Instant,
     ) -> Result<Option<Envelope>, SendError> {
         let connection = self.connect_peer(directory, peer, deadline).await?;
-        let remaining = deadline
-            .checked_duration_since(Instant::now())
-            .unwrap_or_default();
         let result = if envelope.kind.expects_response() {
-            send_request(&connection, envelope, &self.local_agent_id, remaining)
+            send_request(&connection, envelope, &self.local_agent_id, deadline)
                 .await
                 .map(Some)
         } else {
-            send_unidirectional(&connection, envelope, remaining)
+            send_unidirectional(&connection, envelope, deadline)
                 .await
                 .map(|()| None)
         };
@@ -301,8 +325,20 @@ impl ConnectionManager {
                     incoming = manager.endpoint.accept() => {
                         let Some(connecting) = incoming else { break };
                         let remote_addr = connecting.remote_address();
+                        // Capture the enrollment epoch BEFORE awaiting the
+                        // handshake: inbound handshakes are not tracked by
+                        // per-peer dial tokens, so this captured value is what
+                        // lets admission reject a handshake that started before
+                        // a revocation committed, even if the peer was
+                        // re-enrolled before the handshake completed.
+                        let epoch_at_handshake_start =
+                            manager.enrollment_epoch.load(Ordering::Relaxed);
                         match with_handshake_remote_addr(remote_addr, connecting.into_future()).await {
-                            Ok(connection) => manager.accept_connection(connection).await,
+                            Ok(connection) => {
+                                manager
+                                    .accept_connection(connection, epoch_at_handshake_start)
+                                    .await
+                            }
                             Err(err) => warn!(error = %err, "failed to accept QUIC connection"),
                         }
                     }
@@ -311,7 +347,11 @@ impl ConnectionManager {
         });
     }
 
-    async fn accept_connection(&self, connection: quinn::Connection) {
+    async fn accept_connection(
+        &self,
+        connection: quinn::Connection,
+        epoch_at_handshake_start: u64,
+    ) {
         let permit = match self.connection_semaphore.clone().try_acquire_owned() {
             Ok(permit) => permit,
             Err(_) => {
@@ -334,16 +374,25 @@ impl ConnectionManager {
             };
         debug!(peer = %peer, remote = ?connection.remote_address(), "accepted QUIC connection");
         // TLS pinning already rejects unknown peers, but a handshake that
-        // started before revocation committed can still complete. The
-        // enrollment gate below runs under the registry's admission lock,
-        // so it is linearized against `remove_peer`'s `close_peer`: a
-        // handshake racing revocation either fails the gate or is closed
-        // moments later by the revocation itself — never left live.
+        // started before revocation committed can still complete. Two gates
+        // run under the registry's admission lock, linearized against
+        // `remove_peer`'s `close_peer`: current enrollment AND the enrollment
+        // epoch captured before the handshake began. A stale handshake either
+        // fails the gate or is closed moments later by the revocation itself
+        // — never left live, and never admitted against restored trust.
+        let enrollment_epoch = self.enrollment_epoch.clone();
+        let gate_peer = peer.clone();
         let admission = self
             .registry
-            .admit_gated(peer.clone(), connection.clone(), Direction::Inbound, || {
-                self.directory.is_enrolled(&peer)
-            })
+            .admit_gated(
+                peer.clone(),
+                connection.clone(),
+                Direction::Inbound,
+                || async move {
+                    enrollment_epoch.load(Ordering::Relaxed) == epoch_at_handshake_start
+                        && self.directory.is_enrolled(&gate_peer).await
+                },
+            )
             .await;
         if let Admission::Accepted { generation } = admission {
             self.spawn_connection_loop(peer, generation, connection, permit);

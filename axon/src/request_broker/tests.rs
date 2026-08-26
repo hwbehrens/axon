@@ -60,6 +60,7 @@ async fn handler_can_reply_exactly_once() {
             original.id,
             MessageKind::Response,
             json!({"answer":"yes"}),
+            None,
         )
         .await
         .expect("first reply");
@@ -71,7 +72,7 @@ async fn handler_can_reply_exactly_once() {
     assert_eq!(response.kind, MessageKind::Response);
     assert_eq!(
         broker
-            .reply(1, original.id, MessageKind::Response, json!({}))
+            .reply(1, original.id, MessageKind::Response, json!({}), None)
             .await,
         Err(BrokerError::RequestNotFound)
     );
@@ -111,7 +112,7 @@ async fn non_handler_cannot_reply() {
     };
 
     let result = broker
-        .reply(2, original.id, MessageKind::Response, json!({}))
+        .reply(2, original.id, MessageKind::Response, json!({}), None)
         .await;
 
     assert_eq!(result, Err(BrokerError::NotHandler));
@@ -187,6 +188,7 @@ async fn retried_request_replays_cached_completion_without_reexecution() {
             delivery.request_id,
             MessageKind::Response,
             json!({"answer": 42}),
+            None,
         )
         .await
         .expect("reply accepted");
@@ -279,7 +281,13 @@ async fn same_call_retry_after_sweep_replays_tombstone_not_fresh_delivery() {
     // The late reply can only hit RequestNotFound: nothing is pending.
     assert_eq!(
         broker
-            .reply(1, original.id, MessageKind::Response, json!({"late": true}))
+            .reply(
+                1,
+                original.id,
+                MessageKind::Response,
+                json!({"late": true}),
+                None
+            )
             .await,
         Err(BrokerError::RequestNotFound)
     );
@@ -298,7 +306,7 @@ async fn oversized_reply_is_rejected_without_consuming_the_request() {
     let oversized = json!({"blob": "x".repeat(MAX_MESSAGE_SIZE as usize)});
     assert_eq!(
         broker
-            .reply(1, original.id, MessageKind::Response, oversized)
+            .reply(1, original.id, MessageKind::Response, oversized, None)
             .await,
         Err(BrokerError::InvalidPayload),
         "over-limit reply must be rejected at IPC, not dropped on QUIC"
@@ -311,6 +319,7 @@ async fn oversized_reply_is_rejected_without_consuming_the_request() {
             original.id,
             MessageKind::Response,
             json!({"answer": "fits"}),
+            None,
         )
         .await
         .expect("reply within the wire limit must be accepted");
@@ -382,7 +391,13 @@ async fn swept_request_uuid_is_tombstoned_and_never_redelivered() {
     // The stale handler's late reply can only hit RequestNotFound.
     assert_eq!(
         broker
-            .reply(1, original.id, MessageKind::Response, json!({"late": true}))
+            .reply(
+                1,
+                original.id,
+                MessageKind::Response,
+                json!({"late": true}),
+                None
+            )
             .await,
         Err(BrokerError::RequestNotFound)
     );
@@ -402,6 +417,7 @@ async fn completed_response_replays_without_a_registered_handler() {
             original.id,
             MessageKind::Response,
             json!({"answer":"cached"}),
+            None,
         )
         .await
         .expect("reply");
@@ -417,4 +433,113 @@ async fn completed_response_replays_without_a_registered_handler() {
     };
     assert_eq!(replayed.kind, MessageKind::Response);
     assert_eq!(replayed.payload_value().unwrap()["answer"], json!("cached"));
+}
+
+// =========================================================================
+// Round-five review regressions: peer-scoped request correlation.
+// =========================================================================
+
+/// A request envelope identical to [`request`] but originating from a
+/// different authenticated peer, optionally reusing the same UUID.
+fn request_from(peer: AgentId, id: Uuid) -> Arc<Envelope> {
+    let mut envelope = Envelope::new(
+        peer,
+        agent('b'),
+        MessageKind::Request,
+        json!({"question":"ready?"}),
+    );
+    envelope.id = id;
+    Arc::new(envelope)
+}
+
+#[tokio::test]
+async fn same_uuid_from_another_peer_does_not_replay_cached_response() {
+    // Regression: pending entries and completed-response cache were keyed by
+    // UUID alone, so a second peer reusing a UUID could replay the first
+    // peer's cached response without its request ever being executed.
+    let broker = RequestBroker::new(agent('b'));
+    broker.register(1).await.unwrap();
+
+    let original = request();
+    let BeginRequest::Deliver(first) = broker.begin(original.clone(), REQUEST_TTL).await else {
+        panic!("delivery expected");
+    };
+    broker
+        .reply(
+            1,
+            original.id,
+            MessageKind::Response,
+            json!({"answer": "from-a"}),
+            None,
+        )
+        .await
+        .expect("reply accepted");
+    let _ = broker.await_response(first, Duration::from_secs(1)).await;
+
+    // A DIFFERENT peer presents the SAME UUID: it must be delivered fresh,
+    // never answered from peer 'a's cached completion.
+    let other_peer = request_from(agent('c'), original.id);
+    let BeginRequest::Deliver(second) = broker.begin(other_peer, REQUEST_TTL).await else {
+        panic!("same-UUID request from another peer must not hit the cache");
+    };
+    assert_eq!(second.request_id, original.id);
+    drop(second);
+
+    // And the first peer's redelivery still replays ITS own outcome.
+    let BeginRequest::Respond(replay) = broker.begin(original, REQUEST_TTL).await else {
+        panic!("cached replay expected for the original peer");
+    };
+    assert_eq!(replay.payload_value().unwrap()["answer"], json!("from-a"));
+}
+
+#[tokio::test]
+async fn uuid_collision_reply_is_ambiguous_without_peer_and_scoped_with_it() {
+    let broker = RequestBroker::new(agent('b'));
+    broker.register(1).await.unwrap();
+
+    let shared_id = uuid::Uuid::from_u128(0xfeed);
+    let from_a = request_from(agent('a'), shared_id);
+    let from_c = request_from(agent('c'), shared_id);
+    let BeginRequest::Deliver(delivery_a) = broker.begin(from_a, REQUEST_TTL).await else {
+        panic!("delivery expected");
+    };
+    let BeginRequest::Deliver(delivery_c) = broker.begin(from_c, REQUEST_TTL).await else {
+        panic!("second peer's same-UUID request must pend independently");
+    };
+
+    // Ambiguous: two peers have this UUID pending and no peer was supplied.
+    assert_eq!(
+        broker
+            .reply(1, shared_id, MessageKind::Response, json!({}), None)
+            .await,
+        Err(BrokerError::AmbiguousRequest)
+    );
+    assert_eq!(broker.pending_count().await, 2);
+
+    // Peer-scoped replies resolve exactly their own exchange.
+    broker
+        .reply(
+            1,
+            shared_id,
+            MessageKind::Response,
+            json!({"who": "a"}),
+            Some(agent('a')),
+        )
+        .await
+        .expect("scoped reply to peer a");
+    broker
+        .reply(
+            1,
+            shared_id,
+            MessageKind::Response,
+            json!({"who": "c"}),
+            Some(agent('c')),
+        )
+        .await
+        .expect("scoped reply to peer c");
+
+    let response_a = delivery_a.response.await.expect("peer a response");
+    let response_c = delivery_c.response.await.expect("peer c response");
+    assert_eq!(response_a.payload_value().unwrap()["who"], json!("a"));
+    assert_eq!(response_c.payload_value().unwrap()["who"], json!("c"));
 }

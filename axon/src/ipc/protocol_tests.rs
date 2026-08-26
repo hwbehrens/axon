@@ -28,6 +28,7 @@ fn sample_command(name: &str) -> IpcCommand {
         "serve" => IpcCommand::Serve { req_id: None },
         _ => IpcCommand::Reply {
             request_id: Uuid::new_v4(),
+            peer: None,
             kind: IpcReplyKind::Response,
             payload: json!({}),
             req_id: None,

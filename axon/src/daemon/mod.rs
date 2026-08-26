@@ -270,14 +270,19 @@ fn make_response_handler(ipc: IpcServer, broker: RequestBroker) -> ResponseHandl
                         .await
                         .is_err()
                     {
-                        broker
-                            .fail(
-                                request_id,
-                                "overloaded",
-                                "request handler queue is unavailable",
-                                true,
-                            )
-                            .await;
+                        // `from` is TLS-authenticated before broker entry, so
+                        // it scopes the terminal failure to this peer's key.
+                        if let Some(peer) = request.from.as_ref() {
+                            broker
+                                .fail(
+                                    peer,
+                                    request_id,
+                                    "overloaded",
+                                    "request handler queue is unavailable",
+                                    true,
+                                )
+                                .await;
+                        }
                     }
                     Some(
                         broker
