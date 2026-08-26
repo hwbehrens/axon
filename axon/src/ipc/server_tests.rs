@@ -142,3 +142,113 @@ async fn broadcast_peer_candidate_reaches_connected_clients() {
     assert!(line_b.contains("\"event\":\"peer_candidate\""));
     assert!(line_b.contains("\"agent_id\":\"ed25519.cccccccccccccccccccccccccccccccc\""));
 }
+
+// ---------------------------------------------------------------------------
+// Round-seven review pins (DEC-022): every outbound line passes one encoder
+// enforcing the framed limit (newline included). Oversized broadcasts are
+// dropped with a warning, never truncated; oversized replies fail
+// explicitly with `message_too_large`; oversized handler deliveries fail so
+// the broker can send the remote requester a terminal error.
+// ---------------------------------------------------------------------------
+
+fn agent_a() -> crate::message::AgentId {
+    crate::message::AgentId::parse("ed25519.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").unwrap()
+}
+
+fn agent_b() -> crate::message::AgentId {
+    crate::message::AgentId::parse("ed25519.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb").unwrap()
+}
+
+fn single_client_server() -> (IpcServer, mpsc::Receiver<Arc<str>>) {
+    let (tx, rx) = mpsc::channel::<Arc<str>>(8);
+    let mut clients = HashMap::new();
+    clients.insert(1u64, tx);
+    (test_server_with_clients(clients), rx)
+}
+
+#[tokio::test]
+async fn oversized_inbound_event_is_dropped_never_truncated() {
+    let (server, mut rx) = single_client_server();
+
+    let huge = Envelope::new(
+        agent_a(),
+        agent_b(),
+        MessageKind::Message,
+        json!({"pad": "x".repeat(70_000)}),
+    );
+    server
+        .broadcast_inbound(&huge)
+        .await
+        .expect("an oversized broadcast is a logged drop, not an error");
+    assert!(
+        rx.try_recv().is_err(),
+        "no truncated or oversized event may be delivered"
+    );
+
+    // Healthy events still flow afterwards.
+    let small = Envelope::new(
+        agent_a(),
+        agent_b(),
+        MessageKind::Message,
+        json!({"data": 1}),
+    );
+    server
+        .broadcast_inbound(&small)
+        .await
+        .expect("small broadcast");
+    let line = rx.recv().await.expect("small event delivered");
+    assert!(line.len() < crate::ipc::MAX_IPC_LINE_LENGTH);
+}
+
+#[tokio::test]
+async fn oversized_reply_fails_explicitly_with_message_too_large() {
+    let (server, mut rx) = single_client_server();
+
+    let huge = DaemonReply::SendOk {
+        ok: true,
+        msg_id: uuid::Uuid::new_v4(),
+        req_id: Some("req-7".to_string()),
+        response: Some(Envelope::new(
+            agent_a(),
+            agent_b(),
+            MessageKind::Response,
+            json!({"pad": "x".repeat(70_000)}),
+        )),
+    };
+    server
+        .send_reply(1, &huge)
+        .await
+        .expect("oversized reply delivery itself succeeds");
+
+    let line = rx
+        .recv()
+        .await
+        .expect("explicit error reply replaces the payload");
+    let decoded: serde_json::Value = serde_json::from_str(&line).expect("error reply is JSON");
+    assert_eq!(decoded["ok"], json!(false));
+    assert_eq!(decoded["error"], json!("message_too_large"));
+    assert_eq!(
+        decoded["req_id"],
+        json!("req-7"),
+        "correlation must survive"
+    );
+}
+
+#[tokio::test]
+async fn oversized_request_event_fails_delivery_explicitly() {
+    let (server, mut rx) = single_client_server();
+
+    let huge_request = Envelope::new(
+        agent_a(),
+        agent_b(),
+        MessageKind::Request,
+        json!({"pad": "x".repeat(70_000)}),
+    );
+    let result = server.send_request_event(1, &huge_request).await;
+    assert!(
+        result.is_err(),
+        "oversized handler delivery must fail so the broker sends the \
+         remote requester one terminal error response"
+    );
+    assert!(rx.try_recv().is_err(), "nothing may be delivered");
+}

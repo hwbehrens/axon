@@ -30,7 +30,7 @@ Know where to make changes before you start editing:
 | IPC command/reply schema | `axon/src/ipc/protocol.rs` |
 | IPC server behavior / broadcast | `axon/src/ipc/server.rs` |
 | IPC peer credential auth | `axon/src/ipc/auth.rs` |
-| Peer identity / trust / locators / pin snapshots | `axon/src/peer_directory/` |
+| Peer identity / trust / locators / pin snapshots | `axon/src/peer_directory/` (persistence transaction worker: `peer_directory/persistence.rs`) |
 | Inbound request correlation / handler lease | `axon/src/request_broker/` |
 | Bonjour/mDNS candidate discovery | `axon/src/discovery/` |
 | Daemon event loop / startup / shutdown | `axon/src/daemon/mod.rs` |

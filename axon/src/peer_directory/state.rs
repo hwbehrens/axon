@@ -105,6 +105,50 @@ impl DirectoryState {
             })
     }
 
+    /// Structural consistency: every `observation_index` entry must resolve
+    /// to a live observation in an enrolled or candidate record, and every
+    /// recorded observation must be indexed.
+    ///
+    /// Ghost entries (index without record) are invisible to
+    /// `expire_observations` — `observation()` no longer resolves them — so
+    /// nothing else ever removes them. Pinned by the Hegel invariants and
+    /// the revocation-interleaving tests (DEC-022).
+    #[cfg(test)]
+    pub(super) fn assert_no_ghost_observations(&self) {
+        for (id, agent_id) in &self.observation_index {
+            let resolves = self
+                .enrolled
+                .get(agent_id)
+                .is_some_and(|peer| peer.observations.contains_key(id))
+                || self
+                    .candidates
+                    .get(agent_id)
+                    .is_some_and(|peer| peer.observations.contains_key(id));
+            assert!(
+                resolves,
+                "ghost observation {id} owned by {agent_id} has no live record"
+            );
+        }
+        for (agent_id, peer) in &self.enrolled {
+            for id in peer.observations.keys() {
+                assert_eq!(
+                    self.observation_index.get(id),
+                    Some(agent_id),
+                    "enrolled observation {id} lost its index entry"
+                );
+            }
+        }
+        for (agent_id, peer) in &self.candidates {
+            for id in peer.observations.keys() {
+                assert_eq!(
+                    self.observation_index.get(id),
+                    Some(agent_id),
+                    "candidate observation {id} lost its index entry"
+                );
+            }
+        }
+    }
+
     pub(super) fn stored_peers(&self) -> Vec<StoredPeer> {
         self.enrolled
             .values()

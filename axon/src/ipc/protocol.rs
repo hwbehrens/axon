@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
@@ -5,6 +7,34 @@ use uuid::Uuid;
 use crate::message::{AgentId, Envelope, MessageKind};
 
 pub const MAX_IPC_LINE_LENGTH: usize = 64 * 1024;
+
+/// Failure to encode an outbound daemon reply/event as one spec-conformant
+/// IPC line.
+#[derive(Debug)]
+pub enum EncodeLineError {
+    /// Serialization failed unexpectedly (all reply types are plain JSON).
+    Serialize(String),
+    /// The encoded line plus its trailing newline would exceed
+    /// [`MAX_IPC_LINE_LENGTH`].
+    TooLarge(usize),
+}
+
+/// Serialize one outbound reply or event into a framed IPC line.
+///
+/// The 65,536-byte limit INCLUDES the trailing newline (spec/IPC.md §2), so
+/// the JSON body may be at most 65,535 bytes. Oversized payloads are refused
+/// — never truncated — so callers can fail delivery explicitly (an error
+/// reply, or a logged drop). Without this check a network envelope accepted
+/// under the wire limit becomes an oversized IPC line once wrapped in event
+/// JSON, and the client's reader would reject or choke on the frame.
+pub fn encode_reply_line(reply: &DaemonReply) -> Result<Arc<str>, EncodeLineError> {
+    let serialized =
+        serde_json::to_string(reply).map_err(|err| EncodeLineError::Serialize(err.to_string()))?;
+    if serialized.len() + 1 > MAX_IPC_LINE_LENGTH {
+        return Err(EncodeLineError::TooLarge(serialized.len() + 1));
+    }
+    Ok(Arc::from(serialized))
+}
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -168,6 +198,7 @@ pub enum IpcErrorCode {
     NotHandler,
     RequestNotFound,
     SendCapacityExceeded,
+    MessageTooLarge,
     InternalError,
 }
 
@@ -186,6 +217,7 @@ impl IpcErrorCode {
             Self::NotHandler => "this IPC connection does not own the request-handler lease",
             Self::RequestNotFound => "request is unknown, expired, or already completed",
             Self::SendCapacityExceeded => "too many concurrent sends; retry shortly",
+            Self::MessageTooLarge => "reply or event exceeds the 64KB IPC line limit",
             Self::InternalError => "unexpected daemon or persistence failure",
         }
     }
@@ -267,6 +299,27 @@ pub enum DaemonReply {
         locators: Vec<String>,
         source: &'static str,
     },
+}
+
+impl DaemonReply {
+    /// The echoed request id, if any. Used to preserve correlation when a
+    /// reply must be replaced — e.g. by a `message_too_large` error after
+    /// the original reply exceeded the line limit.
+    pub fn req_id(&self) -> Option<&str> {
+        match self {
+            Self::SendOk { req_id, .. }
+            | Self::Peers { req_id, .. }
+            | Self::Status { req_id, .. }
+            | Self::Whoami { req_id, .. }
+            | Self::PeerChanged { req_id, .. }
+            | Self::Serving { req_id, .. }
+            | Self::Replied { req_id, .. }
+            | Self::Error { req_id, .. } => req_id.as_deref(),
+            Self::InboundEvent { .. }
+            | Self::RequestEvent { .. }
+            | Self::PeerCandidateEvent { .. } => None,
+        }
+    }
 }
 
 #[cfg(test)]

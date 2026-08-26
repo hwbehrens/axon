@@ -13,7 +13,10 @@ use tokio_util::task::TaskTracker;
 
 use super::auth;
 use super::client_handler::handle_client;
-use super::protocol::{CommandEvent, DaemonReply, IpcCommand, IpcErrorCode, WhoamiInfo};
+use super::protocol::{
+    CommandEvent, DaemonReply, EncodeLineError, IpcCommand, IpcErrorCode, WhoamiInfo,
+    encode_reply_line,
+};
 use crate::message::Envelope;
 
 #[derive(Clone)]
@@ -134,8 +137,31 @@ impl IpcServer {
     }
 
     pub async fn send_reply(&self, client_id: u64, reply: &DaemonReply) -> Result<()> {
-        let line: Arc<str> =
-            Arc::from(serde_json::to_string(reply).context("failed to serialize daemon reply")?);
+        // Every outbound line passes one encoder that enforces the framed
+        // limit (newline included). An oversized reply fails EXPLICITLY:
+        // the client receives a `message_too_large` error carrying the same
+        // req_id — never a truncated payload.
+        let line = match encode_reply_line(reply) {
+            Ok(line) => line,
+            Err(EncodeLineError::TooLarge(bytes)) => {
+                tracing::warn!(
+                    client_id,
+                    bytes,
+                    "IPC reply exceeds the line limit; delivering message_too_large instead"
+                );
+                let fallback = DaemonReply::Error {
+                    ok: false,
+                    error: IpcErrorCode::MessageTooLarge,
+                    message: IpcErrorCode::MessageTooLarge.message().to_string(),
+                    req_id: reply.req_id().map(str::to_string),
+                };
+                encode_reply_line(&fallback)
+                    .expect("error replies are far below the IPC line limit")
+            }
+            Err(EncodeLineError::Serialize(err)) => {
+                anyhow::bail!("failed to serialize daemon reply: {err}")
+            }
+        };
         let tx = {
             let clients = self.clients.lock().await;
             clients.get(&client_id).map(|client| client.tx.clone())
@@ -163,7 +189,23 @@ impl IpcServer {
                 .unwrap_or_default(),
             envelope: envelope.clone(),
         };
-        let line: Arc<str> = Arc::from(serde_json::to_string(&event)?);
+        // Oversized broadcasts are dropped with a warning, never truncated:
+        // a near-limit network envelope legitimately grows past the IPC
+        // line limit once wrapped in event JSON.
+        let line = match encode_reply_line(&event) {
+            Ok(line) => line,
+            Err(EncodeLineError::TooLarge(bytes)) => {
+                tracing::warn!(
+                    bytes,
+                    msg_id = %envelope.id,
+                    "inbound envelope exceeds the IPC line limit when framed; dropping the event"
+                );
+                return Ok(());
+            }
+            Err(EncodeLineError::Serialize(err)) => {
+                anyhow::bail!("failed to serialize inbound event: {err}")
+            }
+        };
         self.broadcast_line(line).await
     }
 
@@ -178,7 +220,19 @@ impl IpcServer {
                 .unwrap_or_default(),
             envelope: envelope.clone(),
         };
-        let line: Arc<str> = Arc::from(serde_json::to_string(&event)?);
+        // An oversized request event fails delivery explicitly: the caller
+        // (the daemon's response handler) sends the remote requester one
+        // terminal error response, per spec/IPC.md §6.2.
+        let line = match encode_reply_line(&event) {
+            Ok(line) => line,
+            Err(EncodeLineError::TooLarge(bytes)) => anyhow::bail!(
+                "IPC request event for {} exceeds the line limit ({bytes} bytes)",
+                envelope.id
+            ),
+            Err(EncodeLineError::Serialize(err)) => {
+                anyhow::bail!("failed to serialize request event: {err}")
+            }
+        };
         let client = self.clients.lock().await.get(&client_id).cloned();
         let Some(client) = client else {
             anyhow::bail!("IPC request handler disconnected");
@@ -208,7 +262,22 @@ impl IpcServer {
             locators,
             source,
         };
-        let line: Arc<str> = Arc::from(serde_json::to_string(&event)?);
+        // Same rule as inbound broadcasts: drop with a warning, never
+        // truncate. (Candidate events are small by construction; the check
+        // exists so no outbound path can bypass the framed limit.)
+        let line = match encode_reply_line(&event) {
+            Ok(line) => line,
+            Err(EncodeLineError::TooLarge(bytes)) => {
+                tracing::warn!(
+                    bytes,
+                    "peer-candidate event exceeds the IPC line limit; dropping the event"
+                );
+                return Ok(());
+            }
+            Err(EncodeLineError::Serialize(err)) => {
+                anyhow::bail!("failed to serialize peer-candidate event: {err}")
+            }
+        };
         self.broadcast_line(line).await
     }
 

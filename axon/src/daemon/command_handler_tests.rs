@@ -10,7 +10,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::ipc::{IpcErrorCode, IpcSendKind};
 
-use super::{MAX_REQUEST_TIMEOUT_SECS, SendSlotGuard, reserve_slot, send_timeout};
+use super::{
+    MAX_REQUEST_TIMEOUT_SECS, SendSlotGuard, directory_failure, reserve_slot, send_timeout,
+};
 
 #[test]
 fn budget_of_one_admits_exactly_one_send() {
@@ -110,5 +112,47 @@ fn dropped_send_slot_guard_releases_the_reserved_slot() {
         counter.load(Ordering::Relaxed),
         0,
         "guard drop must decrement once"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Round-seven review pin (DEC-022): directory failures map to instructive
+// IPC codes — unknown-peer classes stay user-facing, capacity and
+// persistence failures are internal errors, never misreported as missing
+// peers.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn directory_failures_map_to_instructive_ipc_codes() {
+    use crate::message::AgentId;
+    use crate::peer_directory::DirectoryError;
+
+    let agent = AgentId::parse("ed25519.cccccccccccccccccccccccccccccccc").unwrap();
+
+    assert_eq!(
+        directory_failure(DirectoryError::NotEnrolled(agent.clone())).code,
+        IpcErrorCode::PeerNotFound
+    );
+    assert_eq!(
+        directory_failure(DirectoryError::NotObserved(agent.clone())).code,
+        IpcErrorCode::PeerNotObserved
+    );
+    assert_eq!(
+        directory_failure(DirectoryError::LocalAgentId(agent)).code,
+        IpcErrorCode::SelfSend
+    );
+    assert_eq!(
+        directory_failure(DirectoryError::EnrolledCapacity).code,
+        IpcErrorCode::InternalError,
+        "capacity failures must not masquerade as peer_not_found"
+    );
+    assert_eq!(
+        directory_failure(DirectoryError::LocatorCapacity).code,
+        IpcErrorCode::InternalError
+    );
+    assert_eq!(
+        directory_failure(DirectoryError::Persist(anyhow::anyhow!("disk on fire"))).code,
+        IpcErrorCode::InternalError,
+        "persistence failures must not masquerade as peer_not_observed"
     );
 }

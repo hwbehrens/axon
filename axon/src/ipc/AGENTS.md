@@ -17,6 +17,7 @@ Spec compliance (`spec/IPC.md`) > security > usability.
 ## Guardrails
 
 - Command semantics must match `spec/IPC.md` §3.
+- EVERY outbound line passes `encode_reply_line`, which enforces the 65,536-byte limit including the trailing newline: oversized replies fail explicitly with `message_too_large`, oversized broadcasts are dropped with a warning, oversized handler deliveries fail to the broker's terminal-error path — never truncate (DEC-022).
 - Bounded queues must overflow-disconnect lagging clients, not silently drop messages.
 - Validate all inbound data before forwarding to IPC subscribers.
 - `add_peer`/`remove_peer` are the only runtime trust mutation boundary.

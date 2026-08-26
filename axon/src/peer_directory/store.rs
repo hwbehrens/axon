@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
+use tracing::warn;
 use uuid::Uuid;
 
 use super::{MAX_ENROLLED_PEERS, MAX_LOCATORS_PER_PEER, PeerIdentity, PeerLocator};
@@ -211,10 +212,28 @@ fn write_and_replace(path: &Path, temp_path: &Path, parent: &Path, data: &[u8]) 
             temp_path.display()
         )
     })?;
-    File::open(parent)
-        .and_then(|directory| directory.sync_all())
-        .with_context(|| format!("failed to sync peer-store directory: {}", parent.display()))?;
+    // Post-rename the file content is already live: a directory-sync
+    // failure is a durability concern, NOT a content change. Returning it
+    // as an error would tell the caller "nothing was persisted" while the
+    // rename already landed, leaving disk ahead of memory. Warn and report
+    // success so the caller still applies the persisted state.
+    note_post_rename_sync(
+        File::open(parent).and_then(|directory| directory.sync_all()),
+        path,
+    );
     Ok(())
+}
+
+/// Map a post-rename directory-sync result onto the save result: never
+/// fatal, because the renamed file already holds the new content.
+pub(super) fn note_post_rename_sync(result: std::io::Result<()>, path: &Path) {
+    if let Err(err) = result {
+        warn!(
+            error = %err,
+            path = %path.display(),
+            "peer-store directory sync failed after rename; new content is live"
+        );
+    }
 }
 
 fn validate_bounds(peers: &[StoredPeer]) -> Result<()> {

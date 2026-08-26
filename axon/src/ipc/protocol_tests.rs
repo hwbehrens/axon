@@ -109,3 +109,72 @@ fn error_code_messages_are_distinct_and_nonempty() {
         assert!(seen.insert(message), "duplicate message for {code:?}");
     }
 }
+
+// ---------------------------------------------------------------------------
+// Round-seven review pin (DEC-022): the outbound line limit includes the
+// trailing newline, and every daemon reply/event must pass ONE encoder that
+// enforces it — a network envelope accepted under the wire limit grows once
+// wrapped in event JSON.
+// ---------------------------------------------------------------------------
+
+fn inbound_event_with_payload(payload: &serde_json::Value) -> DaemonReply {
+    let envelope = Envelope::new(
+        AgentId::parse("ed25519.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").unwrap(),
+        AgentId::parse("ed25519.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb").unwrap(),
+        crate::message::MessageKind::Message,
+        payload.clone(),
+    );
+    DaemonReply::InboundEvent {
+        event: "inbound",
+        from: envelope
+            .from
+            .as_ref()
+            .map(|id| id.to_string())
+            .unwrap_or_default(),
+        envelope,
+    }
+}
+
+#[test]
+fn encode_reply_line_enforces_the_limit_including_newline() {
+    // Baseline with an empty payload; every additional 'a' adds exactly one
+    // byte to the serialization (no JSON escaping), so exact boundary
+    // lengths are constructible deterministically.
+    let base = serde_json::to_string(&inbound_event_with_payload(&serde_json::json!("")))
+        .expect("baseline serializes")
+        .len();
+    let payload_for = |total_body: usize| serde_json::json!("a".repeat(total_body - base));
+
+    // Body of exactly 65,535 bytes + newline = the 65,536-byte frame limit.
+    let fits = inbound_event_with_payload(&payload_for(MAX_IPC_LINE_LENGTH - 1));
+    assert!(
+        encode_reply_line(&fits).is_ok(),
+        "a body of MAX-1 bytes plus newline is exactly at the limit"
+    );
+
+    // One byte more must be refused — never truncated.
+    let over = inbound_event_with_payload(&payload_for(MAX_IPC_LINE_LENGTH));
+    match encode_reply_line(&over) {
+        Err(EncodeLineError::TooLarge(_)) => {}
+        Err(EncodeLineError::Serialize(err)) => panic!("unexpected serialize error: {err}"),
+        Ok(line) => panic!("oversized line must be refused, got {} bytes", line.len()),
+    }
+}
+
+#[test]
+fn daemon_reply_req_id_extracts_correlation_ids() {
+    assert_eq!(
+        DaemonReply::SendOk {
+            ok: true,
+            msg_id: Uuid::new_v4(),
+            req_id: Some("req-1".to_string()),
+            response: None,
+        }
+        .req_id(),
+        Some("req-1")
+    );
+    assert_eq!(
+        inbound_event_with_payload(&serde_json::json!({})).req_id(),
+        None
+    );
+}

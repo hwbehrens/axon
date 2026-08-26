@@ -300,6 +300,7 @@ These are compile-time constants and cannot be changed via configuration.
 | `MAX_REQUEST_TIMEOUT_SECS` | `3600` | `daemon/command_handler.rs` | Upper bound for caller-supplied `timeout_secs`; larger values are rejected with `invalid_command` instead of overflowing deadline arithmetic. |
 | `MAX_IPC_CLIENTS` | `64` | `daemon/mod.rs` | Maximum simultaneous IPC client connections. |
 | `IPC_OVERLONG_DRAIN_TIMEOUT` | `2s` | `ipc/client_handler.rs` | Maximum time to drain an overlong IPC line before closing the client so the error reply can be delivered. |
+| `PERSIST_COMMIT_ATTEMPTS` | `8` | `peer_directory/persistence.rs` | Attempts a persistent directory edit may lose the persist-generation race before the store is healed from live memory and a retryable error is returned. |
 | `MAX_PEER_STORE_BYTES` | `1 MiB` | `peer_directory/store.rs` | Maximum peer-store file size on load. Non-regular files and larger stores are rejected without unbounded reads. |
 | `MAX_CLIENT_QUEUE` | `1024` | `daemon/mod.rs` | Per-IPC-client outbound message queue depth; overflow disconnects lagging clients. |
 | `MAX_INFLIGHT_SENDS` | `256` | `daemon/mod.rs` | Maximum concurrent outbound IPC send operations; excess `send` commands are rejected with `send_capacity_exceeded`, while control commands remain responsive. |

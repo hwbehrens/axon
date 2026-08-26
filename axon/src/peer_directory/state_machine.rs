@@ -325,6 +325,52 @@ impl DirectoryMachine {
         }
     }
 
+    /// No ghost observations: every `observation_index` entry resolves to a
+    /// live observation in an enrolled or candidate record, and every
+    /// recorded observation is indexed. Ghost entries are invisible to
+    /// expiry and would leak forever — this is the invariant that would
+    /// have caught round-seven's revocation race (DEC-022).
+    #[invariant]
+    fn observation_index_stays_ghost_free(&self, _tc: TestCase) {
+        self.rt
+            .block_on(self.directory.state.read())
+            .assert_no_ghost_observations();
+    }
+
+    /// Every structural bound holds after every rule: enrolled and
+    /// candidate counts, per-peer observation counts, and per-peer locator
+    /// counts. Capacity rejection (not silent overflow) is what keeps these
+    /// true; the invariant pins it so a future edit cannot regress the
+    /// bound without the state machine shrinking to a failing sequence.
+    #[invariant]
+    fn directory_bounds_hold(&self, _tc: TestCase) {
+        let state = self.rt.block_on(self.directory.state.read());
+        assert!(
+            state.enrolled.len() <= MAX_ENROLLED_PEERS,
+            "enrolled-peer bound exceeded"
+        );
+        assert!(
+            state.candidates.len() <= MAX_CANDIDATE_PEERS,
+            "candidate bound exceeded"
+        );
+        for peer in state.enrolled.values() {
+            assert!(
+                peer.observations.len() <= MAX_OBSERVATIONS_PER_PEER,
+                "enrolled observation bound exceeded"
+            );
+            assert!(
+                peer.locators.len() <= MAX_LOCATORS_PER_PEER,
+                "enrolled locator bound exceeded"
+            );
+        }
+        for peer in state.candidates.values() {
+            assert!(
+                peer.observations.len() <= MAX_OBSERVATIONS_PER_PEER,
+                "candidate observation bound exceeded"
+            );
+        }
+    }
+
     /// Durable intent always equals the live enrolled set.
     #[invariant]
     fn durable_intent_matches_live_authority(&self, _tc: TestCase) {

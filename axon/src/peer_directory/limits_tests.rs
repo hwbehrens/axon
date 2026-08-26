@@ -304,3 +304,105 @@ async fn enroll_accepts_exactly_max_locators_then_rejects_more() {
         "accumulated locators beyond MAX_LOCATORS_PER_PEER must be rejected"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Round-seven review pin (DEC-022): a refresh of an EXISTING observation ID
+// must never be rejected by the per-peer capacity bound. The stale entry is
+// withdrawn before the capacity check, so an actively refreshing peer's
+// liveness (`observed_at`) keeps advancing even at the 16-observation limit;
+// otherwise its observations would expire out from under it.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn refresh_at_observation_capacity_still_updates_liveness() {
+    let (_root, directory) = directory().await;
+    let remote = identity(41);
+    let agent_id = remote.agent_id().clone();
+    directory.enroll(remote, Vec::new()).await.expect("enroll");
+
+    for index in 0..MAX_OBSERVATIONS_PER_PEER {
+        let outcome = directory
+            .observe(observation(
+                41,
+                &format!("mdns:cap:{index}"),
+                &format!("127.0.0.1:{}", 7800 + index),
+            ))
+            .await;
+        assert_eq!(outcome, ObserveOutcome::EnrolledPeerRefreshed);
+    }
+
+    // The enrolled record is now exactly at capacity. Refreshing an
+    // existing ID must still succeed — a new ID at capacity is rejected,
+    // but a refresh replaces its own slot.
+    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    let outcome = directory
+        .observe(observation(41, "mdns:cap:0", "127.0.0.1:7800"))
+        .await;
+    assert_eq!(
+        outcome,
+        ObserveOutcome::EnrolledPeerRefreshed,
+        "capacity must reject only genuinely new observation IDs"
+    );
+
+    let state = directory.state.read().await;
+    let peer = state.enrolled.get(&agent_id).expect("enrolled");
+    assert_eq!(peer.observations.len(), MAX_OBSERVATIONS_PER_PEER);
+    let refreshed = peer
+        .observations
+        .get(&ObservationId::new("mdns:cap:0").expect("id"))
+        .expect("refreshed observation stays live");
+    let other = peer
+        .observations
+        .get(&ObservationId::new("mdns:cap:1").expect("id"))
+        .expect("sibling observation");
+    assert!(
+        refreshed.observed_at > other.observed_at,
+        "the refresh must advance observed_at, keeping the peer alive"
+    );
+}
+
+#[tokio::test]
+async fn candidate_refresh_at_observation_capacity_still_updates_liveness() {
+    let (_root, directory) = directory().await;
+
+    for (index, expected) in std::iter::once(ObserveOutcome::CandidateAdded)
+        .chain(std::iter::repeat(ObserveOutcome::CandidateRefreshed))
+        .take(MAX_OBSERVATIONS_PER_PEER)
+        .enumerate()
+    {
+        let outcome = directory
+            .observe(observation(
+                42,
+                &format!("mdns:cap:{index}"),
+                &format!("127.0.0.1:{}", 7900 + index),
+            ))
+            .await;
+        assert_eq!(outcome, expected);
+    }
+
+    // A genuinely NEW observation ID at capacity is still rejected...
+    assert_eq!(
+        directory
+            .observe(observation(42, "mdns:cap:new", "127.0.0.1:7999"))
+            .await,
+        ObserveOutcome::CapacityReached,
+        "capacity must still bound genuinely new observation IDs"
+    );
+
+    // ...but a refresh of an EXISTING ID replaces its own slot.
+    let outcome = directory
+        .observe(observation(42, "mdns:cap:0", "127.0.0.1:7900"))
+        .await;
+    assert_eq!(
+        outcome,
+        ObserveOutcome::CandidateRefreshed,
+        "candidate refresh at capacity must replace its own slot"
+    );
+
+    let state = directory.state.read().await;
+    let candidate = state
+        .candidates
+        .get(identity(42).agent_id())
+        .expect("candidate");
+    assert_eq!(candidate.observations.len(), MAX_OBSERVATIONS_PER_PEER);
+}

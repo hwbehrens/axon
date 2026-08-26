@@ -23,7 +23,7 @@ Ordinary inbound messages are broadcast to connected clients with deliver-or-dis
 
 **Protocol:** Line-delimited JSON. Each command, response, or event is one complete JSON object terminated by `\n`. Literal newlines inside strings MUST be escaped. There is no handshake or version negotiation.
 
-**Maximum line size:** 65,536 bytes including the trailing newline. An overlong command receives `command_too_large` when possible and the connection is closed.
+**Maximum line size:** 65,536 bytes including the trailing newline. An overlong command receives `command_too_large` when possible and the connection is closed. The limit binds BOTH directions: clients must refuse to send a body whose length plus newline exceeds it, and the daemon never writes an oversized line. A reply that would exceed the limit is replaced by an explicit `message_too_large` error reply (never truncated); a broadcast event that would exceed it is dropped with a warning (never truncated); a handler request delivery that would exceed it fails so the broker sends the remote requester one terminal error response.
 
 **Permissions:** The daemon creates the socket with mode `0600`.
 
@@ -188,6 +188,7 @@ Only the handler that received the request may reply. Exactly one reply is admit
 |---|---|
 | `invalid_command` | Malformed JSON, unknown command, or invalid/mutually exclusive fields. |
 | `command_too_large` | IPC command exceeds 65,536 bytes. |
+| `message_too_large` | A reply or event would exceed the 65,536-byte line limit. The payload was refused, never truncated. |
 | `peer_not_found` | Target is not an enrolled peer. |
 | `peer_not_observed` | Candidate enrollment names no current observation. |
 | `peer_conflict` | Agent ID/public-key binding conflicts with enrolled state. |
@@ -206,7 +207,7 @@ Errors are instructive and MUST NOT report a timeout as `peer_unreachable`.
 
 ## 6. Events
 
-Events contain `event` and never contain `ok` or `req_id`.
+Events contain `event` and never contain `ok` or `req_id`. An event whose encoded line would exceed the 65,536-byte limit is dropped with a warning, never truncated; a handler request delivery that would exceed it fails and produces one terminal error response to the remote requester.
 
 ### 6.1 Ordinary inbound message
 

@@ -8,6 +8,50 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::message::AgentId;
 
+/// Typed failure for a persistent directory edit.
+///
+/// Callers (notably the IPC command handler) must distinguish "the peer is
+/// unknown" — a user-facing `peer_not_found`/`peer_not_observed` — from
+/// capacity and persistence failures, which are `internal_error` per
+/// spec/IPC.md §5. Mapping every directory error onto the not-found classes
+/// (the round-six behavior) misreports a failed disk save as a missing peer.
+#[derive(Debug)]
+pub enum DirectoryError {
+    /// The target agent is not enrolled.
+    NotEnrolled(AgentId),
+    /// The candidate has no live observation to enroll from.
+    NotObserved(AgentId),
+    /// The enrolled-peer capacity bound was reached.
+    EnrolledCapacity,
+    /// The per-peer locator capacity bound was reached.
+    LocatorCapacity,
+    /// The local Agent ID cannot be enrolled or targeted.
+    LocalAgentId(AgentId),
+    /// Peer-store persistence failed, or persistent edits lost too many
+    /// generation races to quiesce. Live memory remains the authority; the
+    /// caller may retry the edit.
+    Persist(anyhow::Error),
+}
+
+impl fmt::Display for DirectoryError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NotEnrolled(agent_id) => write!(f, "peer {agent_id} is not enrolled"),
+            Self::NotObserved(agent_id) => {
+                write!(f, "peer candidate {agent_id} is not currently observed")
+            }
+            Self::EnrolledCapacity => write!(f, "enrolled-peer limit reached"),
+            Self::LocatorCapacity => write!(f, "per-peer locator limit reached"),
+            Self::LocalAgentId(agent_id) => {
+                write!(f, "cannot enroll or target the local Agent ID {agent_id}")
+            }
+            Self::Persist(err) => write!(f, "peer-store persistence failed: {err}"),
+        }
+    }
+}
+
+impl std::error::Error for DirectoryError {}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PeerIdentity {
     agent_id: AgentId,

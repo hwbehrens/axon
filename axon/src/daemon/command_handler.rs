@@ -7,7 +7,7 @@ use crate::ipc::{
     CommandEvent, DaemonReply, IpcCommand, IpcErrorCode, IpcSendKind, IpcServer, PeerSummary,
 };
 use crate::message::{AgentId, Envelope};
-use crate::peer_directory::{PeerDirectory, PeerIdentity, PeerLocator, PeerTrust};
+use crate::peer_directory::{DirectoryError, PeerDirectory, PeerIdentity, PeerLocator, PeerTrust};
 use crate::peer_token;
 use crate::request_broker::{BrokerError, RequestBroker};
 use crate::transport::{ConnectionManager, REQUEST_TIMEOUT};
@@ -37,6 +37,24 @@ impl CommandFailure {
             message: message.into(),
         }
     }
+}
+
+/// Map typed directory failures onto instructive IPC error codes
+/// (spec/IPC.md §5): unknown-peer classes stay user-facing
+/// (`peer_not_found`, `peer_not_observed`), while capacity and persistence
+/// failures are `internal_error`. The round-six behavior mapped EVERY
+/// directory error onto the not-found classes, reporting a failed disk save
+/// or an exhausted enrolled-peer bound as a missing peer.
+fn directory_failure(err: DirectoryError) -> CommandFailure {
+    let code = match &err {
+        DirectoryError::NotEnrolled(_) => IpcErrorCode::PeerNotFound,
+        DirectoryError::NotObserved(_) => IpcErrorCode::PeerNotObserved,
+        DirectoryError::LocalAgentId(_) => IpcErrorCode::SelfSend,
+        DirectoryError::EnrolledCapacity
+        | DirectoryError::LocatorCapacity
+        | DirectoryError::Persist(_) => IpcErrorCode::InternalError,
+    };
+    CommandFailure::new(code, err.to_string())
 }
 
 #[derive(Clone)]
@@ -169,10 +187,7 @@ pub(crate) async fn handle_command(cmd: CommandEvent, ctx: &DaemonContext) -> Re
                         req_id,
                     }
                 }
-                Err(err) => error_reply(
-                    CommandFailure::new(IpcErrorCode::PeerNotFound, err.to_string()),
-                    req_id,
-                ),
+                Err(err) => error_reply(directory_failure(err), req_id),
             }
         }
         IpcCommand::Serve { req_id } => match ctx.broker.register(client_id).await {
@@ -223,7 +238,7 @@ async fn add_peer(
                 .enroll_candidate(&agent_id)
                 .await
                 .map(|identity| identity.agent_id().clone())
-                .map_err(|err| CommandFailure::new(IpcErrorCode::PeerNotObserved, err.to_string()))
+                .map_err(directory_failure)
         }
         (None, Some(token)) => {
             let decoded = peer_token::decode(&token).map_err(|err| {
@@ -244,7 +259,7 @@ async fn add_peer(
                 .enroll(identity, vec![locator])
                 .await
                 .map(|identity| identity.agent_id().clone())
-                .map_err(|err| CommandFailure::new(IpcErrorCode::InternalError, err.to_string()))
+                .map_err(directory_failure)
         }
         _ => Err(CommandFailure::new(
             IpcErrorCode::InvalidCommand,

@@ -288,3 +288,15 @@ async fn save_refuses_serialized_store_over_the_load_cap() {
         "failed save must not leave a store file behind"
     );
 }
+
+#[test]
+fn post_rename_sync_failure_is_a_warning_not_an_error() {
+    // After a successful rename the new content is already live on disk.
+    // Reporting the directory-sync failure as an error would tell callers
+    // "nothing was persisted" while the rename already landed — disk ahead
+    // of memory. The mapping must swallow it.
+    let failing: std::io::Result<()> = Err(std::io::Error::other("directory sync failed"));
+    super::store::note_post_rename_sync(failing, std::path::Path::new("/tmp/peers.json"));
+    let ok: std::io::Result<()> = Ok(());
+    super::store::note_post_rename_sync(ok, std::path::Path::new("/tmp/peers.json"));
+}
