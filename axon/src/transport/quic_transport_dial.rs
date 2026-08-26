@@ -6,7 +6,6 @@
 //! private fields.
 
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
 use std::time::Instant;
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -45,7 +44,18 @@ impl ConnectionManager {
             return Ok(existing);
         }
         let dial_cancel = self.dial_token(peer).await;
-        let targets = directory.dial_targets(peer).await;
+        // Peer lookup shares the directory lock with persistence. Persistence
+        // no longer runs disk I/O under that lock, but the wait is still part
+        // of the exchange budget: a contended directory must never push the
+        // request past its `timeout_secs` deadline.
+        let targets = tokio::time::timeout(
+            super::super::connection::remaining_budget(deadline, "peer lookup")?,
+            directory.dial_targets(peer),
+        )
+        .await
+        .map_err(|_| {
+            SendError::pre_send_timeout(anyhow!("peer lookup for {peer} exceeded send budget"))
+        })?;
         let mut addresses = Vec::new();
         let mut last_error = None;
         for target in targets {
@@ -63,10 +73,30 @@ impl ConnectionManager {
                         )));
                         break;
                     };
-                    match tokio::time::timeout(resolve_budget, locator.resolve()).await {
-                        Ok(Ok(resolved)) => addresses.extend(resolved),
-                        Ok(Err(err)) => last_error = Some(SendError::pre_send(err)),
-                        Err(_) => {
+                    // DNS resolution is unbounded by nature; bound it with
+                    // the remaining budget so a stalled resolver cannot
+                    // exceed the exchange deadline, and make it
+                    // cancellation-aware so revocation tears the wait down
+                    // immediately instead of after the timeout elapses. The
+                    // resolver runs on `spawn_blocking`, so an abandoned
+                    // worker thread may finish in the background; its result
+                    // is simply dropped — the dial never consumes it.
+                    let outcome = tokio::select! {
+                        _ = dial_cancel.cancelled() => None,
+                        result = tokio::time::timeout(resolve_budget, locator.resolve()) => {
+                            Some(result)
+                        }
+                    };
+                    match outcome {
+                        None => {
+                            last_error = Some(SendError::pre_send(anyhow!(
+                                "dial to peer {peer} was cancelled during resolution"
+                            )));
+                            break;
+                        }
+                        Some(Ok(Ok(resolved))) => addresses.extend(resolved),
+                        Some(Ok(Err(err))) => last_error = Some(SendError::pre_send(err)),
+                        Some(Err(_)) => {
                             last_error = Some(SendError::pre_send_timeout(anyhow!(
                                 "locator resolution exceeded send budget"
                             )));
@@ -121,11 +151,12 @@ impl ConnectionManager {
         if let Some(existing) = self.registry.current(&peer.agent_id).await {
             return Ok(existing);
         }
-        // Attempt token: capture the enrollment epoch before anything can
-        // block. Admission re-checks it, so a handshake that raced a
-        // revocation is rejected even if the peer was re-enrolled in the
-        // meantime — a trusted attempt must start after revocation committed.
-        let epoch_at_dial_start = self.enrollment_epoch.load(Ordering::Relaxed);
+        // Attempt token: capture THIS peer's enrollment epoch before anything
+        // can block. Admission re-checks it, so a handshake that raced a
+        // revocation of the same peer is rejected even if the peer was
+        // re-enrolled in the meantime — a trusted attempt must start after
+        // revocation committed. Other peers' epochs are irrelevant here.
+        let epoch_at_dial_start = self.peer_enrollment_epoch(&peer.agent_id);
         let dial_cancel = self.dial_token(&peer.agent_id).await;
         let peer_lock = {
             let mut locks = self.connecting_locks.lock().await;
@@ -136,19 +167,27 @@ impl ConnectionManager {
         };
         // Waiting for the per-peer dial lock is part of the exchange budget:
         // without this bound a contended lock could stall the caller past
-        // its deadline indefinitely.
-        let _guard = tokio::time::timeout(
-            super::super::connection::remaining_budget(deadline, "per-peer dial lock")
-                .map_err(|err| anyhow!("dial to {} failed: {err}", peer.agent_id))?,
-            peer_lock.lock(),
-        )
-        .await
-        .map_err(|_| {
-            anyhow!(
-                "timed out waiting for the per-peer dial lock for {}",
-                peer.agent_id
-            )
-        })?;
+        // its deadline indefinitely. The wait is also cancellation-aware:
+        // `remove_peer` retires the dial token, so a queued dial for a
+        // revoked peer aborts immediately rather than taking its turn and
+        // discovering the revocation afterwards.
+        let _guard = tokio::select! {
+            _ = dial_cancel.cancelled() => {
+                bail!("dial to {} was cancelled", peer.agent_id);
+            }
+            guard = tokio::time::timeout(
+                super::super::connection::remaining_budget(deadline, "per-peer dial lock")
+                    .map_err(|err| anyhow!("dial to {} failed: {err}", peer.agent_id))?,
+                peer_lock.lock(),
+            ) => {
+                guard.map_err(|_| {
+                    anyhow!(
+                        "timed out waiting for the per-peer dial lock for {}",
+                        peer.agent_id
+                    )
+                })?
+            }
+        };
         if let Some(existing) = self.registry.current(&peer.agent_id).await {
             return Ok(existing);
         }
@@ -188,12 +227,12 @@ impl ConnectionManager {
         }
         // Revocation race guard: the handshake may have started before the
         // peer was revoked. Two gates run under the registry's admission lock
-        // (see `admit_gated`), linearized against `remove_peer`: current
-        // enrollment AND the enrollment epoch captured at dial start. Either
-        // the gates observe the revocation, or the subsequent `close_peer`
-        // tears the fresh slot down. A pre-revocation attempt is never
-        // admitted against restored trust; it must re-dial.
-        let enrollment_epoch = self.enrollment_epoch.clone();
+        // (see `admit_gated`), linearized against `remove_peer`: unchanged
+        // per-peer enrollment epoch AND current enrollment. Either the gates
+        // observe the revocation, or the subsequent `close_peer` tears the
+        // fresh slot down. A pre-revocation attempt is never admitted against
+        // restored trust; it must re-dial. The gate is bounded by the whole-
+        // exchange deadline and fails closed (see `admission_gate`).
         let gate_agent_id = peer.agent_id.clone();
         match self
             .registry
@@ -201,10 +240,7 @@ impl ConnectionManager {
                 peer.agent_id.clone(),
                 connection.clone(),
                 Direction::Outbound,
-                || async move {
-                    enrollment_epoch.load(Ordering::Relaxed) == epoch_at_dial_start
-                        && self.directory.is_enrolled(&gate_agent_id).await
-                },
+                || self.admission_gate(gate_agent_id.clone(), epoch_at_dial_start, Some(deadline)),
             )
             .await
         {
@@ -218,9 +254,11 @@ impl ConnectionManager {
                 Ok(connection)
             }
             Admission::Existing(existing) => Ok(existing),
-            Admission::Rejected => {
-                bail!("peer {} was revoked during connection setup", peer.agent_id)
-            }
+            Admission::Rejected => bail!(
+                "peer {} was revoked or admission could not be verified \
+                 during connection setup",
+                peer.agent_id
+            ),
         }
     }
 }

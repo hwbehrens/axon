@@ -24,8 +24,8 @@ Know where to make changes before you start editing:
 |--------|---------|
 | Envelope schema / message kinds | `axon/src/message/envelope.rs` |
 | TLS peer verification / cert parsing | `axon/src/transport/tls.rs` |
-| Connection ownership / QUIC bind / connect / send | `axon/src/transport/quic_transport.rs`, `axon/src/transport/connection_registry.rs` |
-| Connection loop / framing | `axon/src/transport/connection.rs` |
+| Connection ownership / QUIC bind / connect / send | `axon/src/transport/quic_transport.rs` (+ `quic_transport_dial.rs`, `quic_transport_epochs.rs`), `axon/src/transport/connection_registry.rs` |
+| Connection loop / framing / inbound stream handlers | `axon/src/transport/connection.rs` (+ `connection_streams.rs`) |
 | Reconnect attempt versioning / backoff | `axon/src/transport/reconnect.rs` |
 | IPC command/reply schema | `axon/src/ipc/protocol.rs` |
 | IPC server behavior / broadcast | `axon/src/ipc/server.rs` |

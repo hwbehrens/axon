@@ -126,3 +126,88 @@ fn service_without_agent_id_is_not_a_candidate() {
 
     assert!(observations.is_empty());
 }
+
+// ---------------------------------------------------------------------------
+// ServiceTracker — bounded tracking under repeated refreshes
+//
+// Regression coverage for the insertion-order queue: a service whose stored
+// observation set is empty (self, malformed, or address-less) refreshes
+// periodically, and every refresh must keep its original queue position
+// instead of re-appending.
+// ---------------------------------------------------------------------------
+
+fn empty_resolution(tracker: &mut ServiceTracker, fullname: &str) {
+    let events = tracker.observe_resolution(fullname.to_string(), Vec::new());
+    assert!(events.is_empty(), "empty resolution emits no events");
+}
+
+#[test]
+fn repeated_empty_refresh_does_not_grow_insertion_order() {
+    let mut tracker = ServiceTracker::new();
+
+    for _ in 0..1_000 {
+        empty_resolution(&mut tracker, "self-or-malformed._axon._udp.local.");
+    }
+
+    assert_eq!(tracker.observations_by_service.len(), 1);
+    assert_eq!(
+        tracker.insertion_order.len(),
+        1,
+        "refreshes of an already-tracked name must not re-append to the order queue"
+    );
+}
+
+#[test]
+fn valid_service_refresh_keeps_single_queue_entry() {
+    let (local, _) = identity(13);
+    let (remote, public_key) = identity(14);
+    let info = service(&remote, &public_key);
+
+    let mut tracker = ServiceTracker::new();
+    let first = parse_resolved_service(&local, &info).expect("valid observation");
+    let second = parse_resolved_service(&local, &info).expect("valid observation");
+
+    let events = tracker.observe_resolution("remote._axon._udp.local.".to_string(), first);
+    assert_eq!(events.len(), 1);
+    let events = tracker.observe_resolution("remote._axon._udp.local.".to_string(), second);
+    assert_eq!(events.len(), 1, "refresh emits one Observed event");
+
+    assert_eq!(tracker.insertion_order.len(), 1);
+}
+
+#[test]
+fn unique_empty_services_stay_bounded_at_capacity() {
+    let mut tracker = ServiceTracker::new();
+
+    // More unique names than MAX_TRACKED_SERVICES: each new name past the
+    // cap evicts the oldest live entry, so neither structure may exceed it.
+    for index in 0..(MAX_TRACKED_SERVICES + 64) {
+        empty_resolution(&mut tracker, &format!("churn-{index}._axon._udp.local."));
+    }
+
+    assert_eq!(tracker.observations_by_service.len(), MAX_TRACKED_SERVICES);
+    assert!(
+        tracker.insertion_order.len() <= MAX_TRACKED_SERVICES,
+        "order queue must stay bounded by the tracked-service cap"
+    );
+}
+
+#[test]
+fn removal_compacts_stale_queue_entries() {
+    let mut tracker = ServiceTracker::new();
+    for index in 0..64 {
+        empty_resolution(&mut tracker, &format!("gone-{index}._axon._udp.local."));
+    }
+
+    for index in 0..64 {
+        let events = tracker.remove_service(&format!("gone-{index}._axon._udp.local."));
+        assert!(events.is_empty());
+    }
+
+    assert!(tracker.observations_by_service.is_empty());
+    assert!(
+        tracker.insertion_order.len() < 16,
+        "compaction must prune stale entries: {}",
+        tracker.insertion_order.len()
+    );
+}

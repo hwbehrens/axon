@@ -284,7 +284,7 @@ pub(crate) fn derive_peer_id_from_connection(connection: &quinn::Connection) -> 
     Ok(derive_agent_id_from_pubkey_bytes(&pubkey_bytes))
 }
 
-fn overwrite_authenticated_identity(
+pub(super) fn overwrite_authenticated_identity(
     envelope: &mut Envelope,
     peer_id: &str,
     local_agent_id: &AgentId,
@@ -293,151 +293,6 @@ fn overwrite_authenticated_identity(
         AgentId::parse(peer_id).expect("peer Agent ID is derived from authenticated key material"),
     );
     envelope.to = Some(local_agent_id.clone());
-}
-
-// ---------------------------------------------------------------------------
-// Connection context — shared state for stream handlers
-// ---------------------------------------------------------------------------
-
-#[derive(Clone)]
-struct ConnectionContext {
-    local_agent_id: AgentId,
-    inbound_tx: broadcast::Sender<Arc<Envelope>>,
-    response_handler: Option<ResponseHandlerFn>,
-    inbound_read_timeout: Duration,
-}
-
-// ---------------------------------------------------------------------------
-// Unidirectional stream handler
-// ---------------------------------------------------------------------------
-
-async fn handle_uni_stream(ctx: &ConnectionContext, peer_id: &str, mut recv: quinn::RecvStream) {
-    match timeout(ctx.inbound_read_timeout, read_framed(&mut recv)).await {
-        Ok(Ok(bytes)) => match serde_json::from_slice::<Envelope>(&bytes) {
-            Ok(mut envelope) => {
-                overwrite_authenticated_identity(&mut envelope, peer_id, &ctx.local_agent_id);
-                if !envelope.kind.is_allowed_on_unidirectional() {
-                    debug!(kind = %envelope.kind, "dropping kind that is invalid on uni stream");
-                } else if let Err(err) = envelope.validate() {
-                    debug!(error = %err, "dropping invalid uni envelope");
-                } else {
-                    let _ = ctx.inbound_tx.send(Arc::new(envelope));
-                }
-            }
-            Err(err) => {
-                debug!(error = %err, "dropping malformed uni envelope");
-            }
-        },
-        Ok(Err(err)) => {
-            warn!(error = %err, peer = peer_id, "failed reading uni stream");
-        }
-        Err(_) => {
-            warn!(peer = peer_id, "uni stream read timed out");
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Bidirectional stream handler
-// ---------------------------------------------------------------------------
-
-/// Handle an authenticated bidi request.
-async fn handle_authenticated_bidi(
-    ctx: &ConnectionContext,
-    request: Envelope,
-    mut send: quinn::SendStream,
-) {
-    if let Err(err) = request.validate() {
-        let response = Envelope::response_to(
-            &request,
-            ctx.local_agent_id.clone(),
-            MessageKind::Error,
-            json!({
-                "code": "invalid_envelope",
-                "message": format!("envelope validation failed: {err}"),
-                "retryable": false,
-            }),
-        );
-        send_response(&mut send, &response).await;
-    } else if let MessageKind::Unknown(kind) = &request.kind {
-        let response = Envelope::response_to(
-            &request,
-            ctx.local_agent_id.clone(),
-            MessageKind::Error,
-            json!({
-                "code": "unsupported_kind",
-                "message": format!(
-                    "unsupported message kind '{}' on bidirectional stream",
-                    kind.chars().take(64).collect::<String>()
-                ),
-                "retryable": false,
-            }),
-        );
-        send_response(&mut send, &response).await;
-    } else if !request.kind.expects_response() {
-        let response = Envelope::response_to(
-            &request,
-            ctx.local_agent_id.clone(),
-            MessageKind::Error,
-            json!({
-                "code": "invalid_envelope",
-                "message": format!("message kind '{}' cannot initiate a bidirectional stream", request.kind),
-                "retryable": false,
-            }),
-        );
-        send_response(&mut send, &response).await;
-    } else {
-        let request_arc = Arc::new(request.clone());
-        let response = if let Some(ref handler) = ctx.response_handler {
-            match handler(request_arc).await {
-                Some(resp) => resp,
-                None => default_error_response(&request, ctx.local_agent_id.as_str()),
-            }
-        } else {
-            default_error_response(&request, ctx.local_agent_id.as_str())
-        };
-        send_response(&mut send, &response).await;
-    }
-}
-
-async fn handle_bidi_stream(
-    ctx: &ConnectionContext,
-    peer_id: &str,
-    send: quinn::SendStream,
-    mut recv: quinn::RecvStream,
-) {
-    let mut request = match timeout(ctx.inbound_read_timeout, read_framed(&mut recv)).await {
-        Ok(Ok(bytes)) => match serde_json::from_slice::<Envelope>(&bytes) {
-            Ok(r) => r,
-            Err(err) => {
-                debug!(error = %err, "dropping malformed bidi envelope");
-                return;
-            }
-        },
-        Ok(Err(err)) => {
-            warn!(error = %err, peer = peer_id, "failed reading bidi stream");
-            return;
-        }
-        Err(_) => {
-            warn!(peer = peer_id, "bidi stream read timed out");
-            return;
-        }
-    };
-
-    overwrite_authenticated_identity(&mut request, peer_id, &ctx.local_agent_id);
-    handle_authenticated_bidi(ctx, request, send).await;
-}
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-async fn send_response(send: &mut quinn::SendStream, response: &Envelope) {
-    if let Ok(response_bytes) = response.wire_encode()
-        && write_framed(send, &response_bytes).await.is_ok()
-    {
-        let _ = send.finish();
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -514,6 +369,11 @@ pub(crate) async fn run_connection(
     streams.abort_all();
     while streams.join_next().await.is_some() {}
 }
+
+#[path = "connection_streams.rs"]
+mod streams;
+
+use streams::{ConnectionContext, handle_bidi_stream, handle_uni_stream};
 
 #[cfg(test)]
 #[path = "connection_tests.rs"]

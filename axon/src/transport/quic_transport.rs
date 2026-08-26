@@ -2,8 +2,7 @@ use std::collections::HashMap;
 use std::future::{Future, IntoFuture};
 use std::net::SocketAddr;
 use std::pin::Pin;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex as StdMutex, atomic::AtomicU64};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow};
@@ -52,14 +51,30 @@ pub struct ConnectionManager {
     /// connection so a revocation that races an in-flight handshake cannot
     /// land a slot.
     directory: PeerDirectory,
-    /// Bumped on every `close_peer` (revocation). Handshake attempts capture
-    /// its value BEFORE the handshake begins and admission re-checks it, so
-    /// a handshake that raced a revocation is rejected at admission even if
-    /// the same peer was re-enrolled before the attempt finished. Without
-    /// this epoch, a pre-revocation outbound handshake or an untracked
-    /// inbound handshake could be admitted against freshly restored trust.
-    enrollment_epoch: Arc<AtomicU64>,
+    /// PER-PEER enrollment epochs, bumped ONLY by `close_peer` (revocation).
+    /// Handshake attempts capture the DIALED peer's epoch BEFORE the handshake
+    /// begins and admission re-checks it, so a handshake that raced a
+    /// revocation is rejected at admission even if the same peer was
+    /// re-enrolled before the attempt finished. Without this epoch, a
+    /// pre-revocation outbound handshake or an untracked inbound handshake
+    /// could be admitted against freshly restored trust.
+    ///
+    /// Scoping matters: a GLOBAL epoch would let revoking peer B reject an
+    /// otherwise valid in-flight handshake for unrelated peer A. Entries are
+    /// created lazily on first bump, so the map grows only for peers that
+    /// were actually revoked (local IPC administration), and epochs are never
+    /// reused — pruning entries would allow an ABA reuse against restored
+    /// trust. Reads take a short std mutex; no await runs under it.
+    enrollment_epochs: Arc<StdMutex<HashMap<AgentId, Arc<AtomicU64>>>>,
 }
+
+/// Upper bound on one admission-gate evaluation (the registry lock wait plus
+/// the directory enrollment lookup). Both critical sections are short and —
+/// since peer-directory persistence moved outside the directory lock — free
+/// of disk I/O; the bound exists so a pathological stall fails the gate
+/// CLOSED instead of stalling connection admission forever. Outbound dials
+/// use the caller's whole-exchange budget instead when it is smaller.
+pub(crate) const ADMISSION_GATE_BUDGET: Duration = Duration::from_secs(5);
 
 impl ConnectionManager {
     pub async fn bind(
@@ -119,7 +134,7 @@ impl ConnectionManager {
             tasks: TaskTracker::new(),
             reconnect: ReconnectBook::default(),
             directory,
-            enrollment_epoch: Arc::new(AtomicU64::new(0)),
+            enrollment_epochs: Arc::new(StdMutex::new(HashMap::new())),
         };
         manager.spawn_accept_loop();
         Ok(manager)
@@ -142,12 +157,14 @@ impl ConnectionManager {
     }
 
     pub async fn close_peer(&self, agent_id: &AgentId, reason: &'static [u8]) {
-        // Advance the enrollment epoch FIRST so every handshake that began
-        // before this revocation — outbound dials tracked here and inbound
-        // handshakes captured in the accept loop alike — fails its admission
-        // gate even if the peer is re-enrolled moments later. A trusted
-        // attempt must start (and capture the new epoch) after revocation.
-        self.enrollment_epoch.fetch_add(1, Ordering::Relaxed);
+        // Advance THIS peer's enrollment epoch FIRST so every handshake that
+        // began before this revocation — outbound dials tracked here and
+        // inbound handshakes captured in the accept loop alike — fails its
+        // admission gate even if the peer is re-enrolled moments later. A
+        // trusted attempt must start (and capture the new epoch) after
+        // revocation. Peer-scoping keeps unrelated in-flight handshakes
+        // valid: revoking B must not reject A's handshake.
+        self.advance_enrollment_epoch(agent_id);
         // Cancel and retire any in-flight dials for this peer next: the
         // IPC revocation contract requires cancelling attempts, not merely
         // refusing their admission when they finish.
@@ -325,18 +342,21 @@ impl ConnectionManager {
                     incoming = manager.endpoint.accept() => {
                         let Some(connecting) = incoming else { break };
                         let remote_addr = connecting.remote_address();
-                        // Capture the enrollment epoch BEFORE awaiting the
-                        // handshake: inbound handshakes are not tracked by
-                        // per-peer dial tokens, so this captured value is what
-                        // lets admission reject a handshake that started before
-                        // a revocation committed, even if the peer was
-                        // re-enrolled before the handshake completed.
-                        let epoch_at_handshake_start =
-                            manager.enrollment_epoch.load(Ordering::Relaxed);
+                        // Capture EVERY peer's enrollment epoch BEFORE awaiting
+                        // the handshake: inbound handshakes are not tracked by
+                        // per-peer dial tokens and the authenticated peer is not
+                        // known until the TLS identity is derived, so the
+                        // snapshot is what lets admission reject a handshake
+                        // that started before ITS OWN peer's revocation
+                        // committed, even if that peer was re-enrolled before
+                        // the handshake completed. Unrelated peers' epochs are
+                        // ignored at admission, so their revocations cannot
+                        // interfere.
+                        let epochs_at_handshake_start = manager.capture_enrollment_epochs();
                         match with_handshake_remote_addr(remote_addr, connecting.into_future()).await {
                             Ok(connection) => {
                                 manager
-                                    .accept_connection(connection, epoch_at_handshake_start)
+                                    .accept_connection(connection, epochs_at_handshake_start)
                                     .await
                             }
                             Err(err) => warn!(error = %err, "failed to accept QUIC connection"),
@@ -350,7 +370,7 @@ impl ConnectionManager {
     async fn accept_connection(
         &self,
         connection: quinn::Connection,
-        epoch_at_handshake_start: u64,
+        epochs_at_handshake_start: HashMap<AgentId, u64>,
     ) {
         let permit = match self.connection_semaphore.clone().try_acquire_owned() {
             Ok(permit) => permit,
@@ -376,23 +396,18 @@ impl ConnectionManager {
         // TLS pinning already rejects unknown peers, but a handshake that
         // started before revocation committed can still complete. Two gates
         // run under the registry's admission lock, linearized against
-        // `remove_peer`'s `close_peer`: current enrollment AND the enrollment
-        // epoch captured before the handshake began. A stale handshake either
-        // fails the gate or is closed moments later by the revocation itself
-        // — never left live, and never admitted against restored trust.
-        let enrollment_epoch = self.enrollment_epoch.clone();
+        // `remove_peer`'s `close_peer`: unchanged per-peer enrollment epoch
+        // (captured before THIS peer's handshake began) AND current
+        // enrollment. A stale handshake either fails the gate or is closed
+        // moments later by the revocation itself — never left live, and
+        // never admitted against restored trust.
+        let captured_epoch = epochs_at_handshake_start.get(&peer).copied().unwrap_or(0);
         let gate_peer = peer.clone();
         let admission = self
             .registry
-            .admit_gated(
-                peer.clone(),
-                connection.clone(),
-                Direction::Inbound,
-                || async move {
-                    enrollment_epoch.load(Ordering::Relaxed) == epoch_at_handshake_start
-                        && self.directory.is_enrolled(&gate_peer).await
-                },
-            )
+            .admit_gated(peer.clone(), connection.clone(), Direction::Inbound, || {
+                self.admission_gate(gate_peer.clone(), captured_epoch, None)
+            })
             .await;
         if let Admission::Accepted { generation } = admission {
             self.spawn_connection_loop(peer, generation, connection, permit);
@@ -429,6 +444,9 @@ impl ConnectionManager {
 
 #[path = "quic_transport_dial.rs"]
 mod dial;
+
+#[path = "quic_transport_epochs.rs"]
+mod epochs;
 
 #[cfg(test)]
 #[path = "quic_transport_tests/mod.rs"]

@@ -2,7 +2,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::json;
 
-use super::fixtures::make_transport_pair;
+use super::fixtures::{make_transport_pair, make_transport_trio};
 use crate::message::{AgentId, Envelope, MessageKind};
 
 #[tokio::test]
@@ -79,4 +79,90 @@ async fn explicit_refresh_advances_slot_and_reconnects() {
         .await
         .expect("send after refresh");
     assert!(pair.transport_a.has_connection(&agent_b).await);
+}
+
+// ---------------------------------------------------------------------------
+// Peer-scoped enrollment epochs
+//
+// Regression: revoking peer B used to bump a GLOBAL epoch, rejecting an
+// otherwise valid in-flight handshake for unrelated peer A. The epoch is now
+// per-peer: only the revoked peer's stale attempts are refused.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn revoking_one_peer_does_not_reject_an_unrelated_peers_handshake() {
+    let trio = make_transport_trio().await;
+
+    // Simulate an in-flight handshake for C on A's side: capture C's
+    // enrollment epoch exactly as a dial would, BEFORE any revocation.
+    let captured_c = trio.transport_a.peer_enrollment_epoch(&trio.agent_c);
+
+    // Revoke B.
+    trio.transport_a
+        .close_peer(&trio.agent_b, b"revoke b")
+        .await;
+
+    // B's pre-revocation attempt (captured epoch 0) is rejected...
+    assert!(
+        !trio
+            .transport_a
+            .admission_gate(trio.agent_b.clone(), 0, None)
+            .await
+    );
+    // ...while C's equally-old in-flight attempt remains fully admissible:
+    // its epoch did not move and it is still enrolled.
+    assert_eq!(
+        trio.transport_a.peer_enrollment_epoch(&trio.agent_c),
+        captured_c
+    );
+    assert!(
+        trio.transport_a
+            .admission_gate(trio.agent_c.clone(), captured_c, None)
+            .await
+    );
+
+    // End to end: A↔C exchange works after B's revocation.
+    let message = Envelope::new(
+        AgentId::parse(trio.id_a.agent_id()).unwrap(),
+        trio.agent_c.clone(),
+        MessageKind::Message,
+        json!({"hello": "c"}),
+    );
+    trio.transport_a
+        .send_to(
+            &trio.directory_a,
+            &trio.agent_c,
+            message,
+            Duration::from_secs(5),
+        )
+        .await
+        .expect("send to unrelated peer must succeed after revoking B");
+}
+
+#[tokio::test]
+async fn stale_epoch_attempt_is_rejected_while_fresh_capture_is_admissible() {
+    let trio = make_transport_trio().await;
+    trio.transport_a
+        .close_peer(&trio.agent_b, b"revoke b")
+        .await;
+    let bumped = trio.transport_a.peer_enrollment_epoch(&trio.agent_b);
+
+    // Stale pre-revocation attempt: rejected by the epoch mismatch even
+    // though the directory still lists B as enrolled.
+    assert!(
+        !trio
+            .transport_a
+            .admission_gate(trio.agent_b.clone(), 0, None)
+            .await
+    );
+    // An attempt that started after the revocation committed captures the
+    // new epoch. Trust removal itself is the directory's authority
+    // (`remove_peer`); while B remains enrolled there, such an attempt is
+    // admissible — but it can never be confused with the pre-revocation
+    // generation (no ABA reuse of epoch 0).
+    assert!(
+        trio.transport_a
+            .admission_gate(trio.agent_b.clone(), bumped, None)
+            .await
+    );
 }

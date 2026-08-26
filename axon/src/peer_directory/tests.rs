@@ -299,3 +299,136 @@ async fn revocation_unquarantines_survivors_of_conflicting_endpoints() {
         "surviving peer must become dialable once the conflict is gone"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Persistence without disk I/O under the state lock
+//
+// The persisting edits (enroll_candidate / enroll / remove_peer) save the
+// peer store with no lock held and then apply their delta under a short
+// commit lock. These tests pin the observable contract: persistence is
+// correct across reload, revocation frees the identity for fresh discovery,
+// and concurrent ephemeral observations are never clobbered by a persistent
+// edit's commit.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn remove_peer_allows_reobservation_as_fresh_candidate() {
+    let (_root, directory) = directory().await;
+    let remote = identity(21);
+    let agent_id = remote.agent_id().clone();
+
+    directory
+        .observe(observation(21, "mdns:revoke", "127.0.0.1:7102"))
+        .await;
+    let enrolled_identity = directory.enroll_candidate(&agent_id).await.expect("enroll");
+    assert_eq!(
+        directory.get_enrolled(&agent_id).await,
+        Some(enrolled_identity.clone())
+    );
+
+    let removed = directory.remove_peer(&agent_id).await.expect("remove");
+    assert_eq!(removed, enrolled_identity);
+    assert_eq!(directory.get_enrolled(&agent_id).await, None);
+
+    // Re-observation after revocation must start a FRESH candidate: not an
+    // error, not a conflict against the revoked peer's stale claims.
+    let outcome = directory
+        .observe(observation(21, "mdns:revoke", "127.0.0.1:7102"))
+        .await;
+    assert_eq!(outcome, ObserveOutcome::CandidateAdded);
+}
+
+#[tokio::test]
+async fn remove_peer_persists_across_reload() {
+    let (root, directory) = directory().await;
+    let keep = identity(22);
+    let drop_peer = identity(23);
+    let drop_agent_id = drop_peer.agent_id().clone();
+
+    directory
+        .enroll(
+            keep.clone(),
+            vec![PeerLocator::Socket("127.0.0.1:7103".parse().expect("addr"))],
+        )
+        .await
+        .expect("enroll keep");
+    directory
+        .enroll(
+            drop_peer,
+            vec![PeerLocator::Socket("127.0.0.1:7104".parse().expect("addr"))],
+        )
+        .await
+        .expect("enroll drop");
+
+    directory.remove_peer(&drop_agent_id).await.expect("remove");
+
+    let reloaded = PeerDirectory::load(
+        identity(99).agent_id().clone(),
+        PeerStore::new(root.path().join("peers.json")),
+    )
+    .await
+    .expect("reload");
+    assert!(reloaded.get_enrolled(&drop_agent_id).await.is_none());
+    assert!(
+        reloaded.get_enrolled(keep.agent_id()).await.is_some(),
+        "unrelated enrolled peer must survive another peer's persisted removal"
+    );
+    assert_eq!(reloaded.list().await.len(), 1);
+}
+
+#[tokio::test]
+async fn concurrent_observations_are_not_clobbered_by_persistent_edits() {
+    use std::sync::Arc;
+
+    let (_root, dir) = directory().await;
+    let directory = Arc::new(dir);
+    let observer = directory.clone();
+    let editor = directory.clone();
+    let churn_identity = identity(24);
+    let churn_agent_id = churn_identity.agent_id().clone();
+
+    // Ephemeral-only mutations run concurrently with a loop of persistent
+    // edits. Under the old whole-snapshot swap this could resurrect or erase
+    // candidate observations; with delta-apply commits the candidate must be
+    // present afterwards.
+    let churn = tokio::spawn(async move {
+        for round in 0..64u32 {
+            let id = ObservationId::new(format!("mdns:churn:{round}")).expect("id");
+            let observation = PeerObservation::new(
+                id,
+                churn_identity.agent_id().clone(),
+                churn_identity.public_key(),
+                Some(format!("127.0.0.1:{}", 7200 + round).parse().expect("addr")),
+                None,
+                ObservationSource::Mdns,
+            )
+            .expect("observation");
+            let _ = observer.observe(observation).await;
+        }
+    });
+
+    let target = identity(25);
+    for _ in 0..16 {
+        let _ = editor
+            .enroll(
+                target.clone(),
+                vec![PeerLocator::Socket("127.0.0.1:7300".parse().expect("addr"))],
+            )
+            .await
+            .expect("enroll");
+        editor.remove_peer(target.agent_id()).await.expect("remove");
+    }
+    churn.await.expect("churn task");
+
+    let views = directory.list().await;
+    let churn_view = views
+        .iter()
+        .find(|view| view.identity.agent_id() == &churn_agent_id)
+        .expect("concurrently observed candidate must survive persistent-edit commits");
+    assert_eq!(
+        churn_view.observed_endpoints.len(),
+        MAX_OBSERVATIONS_PER_PEER,
+        "ephemeral observations must survive persistent-edit commits (bounded \
+         only by the documented per-peer observation cap)"
+    );
+}

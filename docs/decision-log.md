@@ -10,6 +10,7 @@ Each entry: ID, date, subsystem, one-paragraph summary covering motivation, deci
 
 | ID | Date | Subsystem | Title |
 |---|---|---|---|
+| DEC-021 | 2026-08-24 | transport, peer_directory, discovery | Round-six review hardening: per-peer enrollment epochs, disk-I/O-free directory persistence, fully bounded/cancellable send path |
 | DEC-020 | 2026-08-24 | transport, daemon, ipc, broker, discovery | Round-five review hardening: absolute deadlines, enrollment epochs, peer-scoped correlation |
 | DEC-019 | 2026-08-24 | transport, broker, discovery, persistence | Whole-exchange deadlines, same-call tombstones, bounded tracking |
 | DEC-018 | 2026-08-24 | transport, request broker, ipc | Deadline-owned sends, tombstoned terminal outcomes, shutdown liveness |
@@ -34,6 +35,10 @@ Each entry: ID, date, subsystem, one-paragraph summary covering motivation, deci
 ---
 
 ## Entries
+
+### DEC-021: Round-six review hardening: per-peer enrollment epochs, disk-I/O-free directory persistence, fully bounded/cancellable send path
+
+Review of the round-five hardening surfaced four residual classes, closed structurally. **Per-peer enrollment epochs:** the single global epoch bumped on every revocation let revoking peer B reject an otherwise valid in-flight handshake for unrelated peer A; epochs are now tracked per AgentId (bumped only by `close_peer`, never pruned — pruning would allow ABA reuse of epoch 0 against restored trust), inbound handshakes snapshot the full epoch map before the handshake and admission compares only the authenticated peer's entry, so revocation remains linearized per-peer without cross-peer interference. **No disk I/O under the directory lock:** `enroll_candidate`/`enroll`/`remove_peer` previously held the directory write lock across `PeerStore::save`, letting one stalled save block every reader (`dial_targets`, the admission gate) indefinitely; persistence now validates against a read-lock snapshot, saves with no lock held, and commits its delta under a short write lock guarded by a `persist_generation` counter (lost races retry; exhaustion heals the store from live memory before failing). Deltas are applied onto fresh state rather than swapping whole snapshots so concurrent ephemeral observations are never clobbered. **Every send-path await is bounded or cancellable:** peer lookup shares the exchange deadline, DNS resolution selects on the per-peer dial token (abandoned `spawn_blocking` resolvers have their results dropped), the per-peer dial-lock wait selects on cancellation too, and the admission gate's enrollment lookup fails CLOSED under `ADMISSION_GATE_BUDGET` (or the caller's remaining budget) instead of stalling connection admission forever. **mDNS insertion-order boundedness:** a refresh of a known service whose stored set is empty (self/malformed/address-less) re-satisfied `previous.is_empty()`, re-appending to `insertion_order` on every periodic refresh despite the map cap; names are enqueued only when genuinely new, enforced by a testable `ServiceTracker` with repeated-empty-refresh regression coverage.
 
 ### DEC-020: Round-five review hardening: absolute deadlines, enrollment epochs, peer-scoped correlation
 

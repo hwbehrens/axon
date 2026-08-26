@@ -19,6 +19,117 @@ pub const SERVICE_TYPE: &str = "_axon._udp.local.";
 /// directory expires the corresponding candidates.
 pub const MAX_TRACKED_SERVICES: usize = 1024;
 
+/// Diffing state for mDNS browse results: the live observation set per
+/// service name plus the insertion order backing oldest-entry eviction.
+/// Both structures are bounded: the map by [`MAX_TRACKED_SERVICES`], and the
+/// order queue grows only when a NEW name enters the map (refreshes of a
+/// known name — including names whose stored set is empty because the
+/// service is self/malformed/address-less — never re-append).
+struct ServiceTracker {
+    observations_by_service: HashMap<String, BTreeSet<ObservationId>>,
+    insertion_order: VecDeque<String>,
+}
+
+impl ServiceTracker {
+    fn new() -> Self {
+        Self {
+            observations_by_service: HashMap::new(),
+            insertion_order: VecDeque::new(),
+        }
+    }
+
+    /// Record a resolved service and produce the events to forward.
+    /// `Lost` events (evictions and stale observations) precede `Observed`
+    /// events so consumers expire before they re-learn.
+    fn observe_resolution(
+        &mut self,
+        fullname: String,
+        observations: Vec<PeerObservation>,
+    ) -> Vec<DiscoveryEvent> {
+        let next_ids: BTreeSet<_> = observations
+            .iter()
+            .map(|observation| observation.id.clone())
+            .collect();
+        // Whether this name is NEWLY tracked, computed BEFORE the insert:
+        // `previous.is_empty()` cannot play this role because a refresh of a
+        // known name whose stored set is empty (self/malformed/no-address
+        // services refresh periodically) yields an empty previous set too.
+        // Re-appending those would grow `insertion_order` without bound even
+        // though the map itself is capped.
+        let newly_tracked = !self.observations_by_service.contains_key(&fullname);
+        if newly_tracked && self.observations_by_service.len() >= MAX_TRACKED_SERVICES {
+            // Bound the tracking map independently of peer-directory limits:
+            // when a NEW name arrives at capacity, evict the OLDEST-INSERTED
+            // live service so an active peer is never evicted ahead of stale
+            // ones purely by hash-map ordering. The order queue may hold
+            // stale names from earlier removals; they are skipped here and
+            // pruned by `remove_service` compaction.
+            let evicted = loop {
+                match self.insertion_order.pop_front() {
+                    Some(name) if self.observations_by_service.contains_key(&name) => {
+                        break Some(name);
+                    }
+                    Some(_) => continue,
+                    None => break None,
+                }
+            };
+            if let Some(evicted) = evicted {
+                warn!(
+                    service = %evicted,
+                    capacity = MAX_TRACKED_SERVICES,
+                    "mDNS service tracking at capacity; evicting oldest"
+                );
+                if let Some(ids) = self.observations_by_service.remove(&evicted) {
+                    return ids
+                        .into_iter()
+                        .map(DiscoveryEvent::Lost)
+                        .collect::<Vec<_>>()
+                        .into_iter()
+                        .chain(self.observe_resolution(fullname, observations))
+                        .collect();
+                }
+                return self.observe_resolution(fullname, observations);
+            }
+        }
+        let mut events = Vec::new();
+        let previous = self
+            .observations_by_service
+            .insert(fullname.clone(), next_ids.clone())
+            .unwrap_or_default();
+        if newly_tracked {
+            self.insertion_order.push_back(fullname);
+        }
+        events.extend(
+            previous
+                .difference(&next_ids)
+                .map(|stale| DiscoveryEvent::Lost(stale.clone())),
+        );
+        events.extend(observations.into_iter().map(DiscoveryEvent::Observed));
+        events
+    }
+
+    /// Drop a service after `ServiceRemoved`, emitting `Lost` for its live
+    /// observations. Opportunistic compaction: churning instance names must
+    /// not grow the order queue without limit once removals leave stale
+    /// entries behind.
+    fn remove_service(&mut self, fullname: &str) -> Vec<DiscoveryEvent> {
+        let lost = self
+            .observations_by_service
+            .remove(fullname)
+            .map(|ids| {
+                ids.into_iter()
+                    .map(DiscoveryEvent::Lost)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        if self.insertion_order.len() > self.observations_by_service.len() * 2 + 16 {
+            self.insertion_order
+                .retain(|name| self.observations_by_service.contains_key(name));
+        }
+        lost
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum DiscoveryEvent {
     Observed(PeerObservation),
@@ -54,11 +165,7 @@ pub async fn run_mdns_discovery(
     let receiver = mdns
         .browse(SERVICE_TYPE)
         .context("failed to start mDNS browse")?;
-    let mut observations_by_service = HashMap::<String, BTreeSet<ObservationId>>::new();
-    // Insertion order of tracked service names, backing the documented
-    // oldest-entry eviction contract. May contain stale names left behind by
-    // removals; those are skipped (and pruned) when they reach the front.
-    let mut insertion_order = VecDeque::<String>::new();
+    let mut tracker = ServiceTracker::new();
 
     loop {
         tokio::select! {
@@ -76,65 +183,8 @@ pub async fn run_mdns_discovery(
                         let fullname = info.get_fullname().to_string();
                         match parse_resolved_service(&local_agent_id, &info) {
                             Ok(observations) => {
-                                let next_ids: BTreeSet<_> = observations
-                                    .iter()
-                                    .map(|observation| observation.id.clone())
-                                    .collect();
-                                // Bound the tracking map independently of
-                                // peer-directory limits: when a NEW name
-                                // arrives at capacity, evict the OLDEST-
-                                // INSERTED live service so an active peer is
-                                // never evicted ahead of stale ones purely by
-                                // hash-map ordering. The order queue may hold
-                                // stale names from earlier removals; they are
-                                // skipped here and pruned below.
-                                if !observations_by_service.contains_key(&fullname)
-                                    && observations_by_service.len() >= MAX_TRACKED_SERVICES
-                                {
-                                    let evicted = loop {
-                                        match insertion_order.pop_front() {
-                                            Some(name)
-                                                if observations_by_service.contains_key(&name) =>
-                                            {
-                                                break Some(name)
-                                            }
-                                            Some(_) => continue,
-                                            None => break None,
-                                        }
-                                    };
-                                    if let Some(evicted) = evicted {
-                                        warn!(
-                                            service = %evicted,
-                                            capacity = MAX_TRACKED_SERVICES,
-                                            "mDNS service tracking at capacity; evicting oldest"
-                                        );
-                                        if let Some(ids) =
-                                            observations_by_service.remove(&evicted)
-                                        {
-                                            for id in ids {
-                                                if tx.send(DiscoveryEvent::Lost(id)).await.is_err() {
-                                                    return Ok(());
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                                let previous = observations_by_service
-                                    .insert(fullname.clone(), next_ids.clone())
-                                    .unwrap_or_default();
-                                if previous.is_empty() {
-                                    // New tracked service: record its position
-                                    // in insertion order. Refreshes of a known
-                                    // name keep their original position.
-                                    insertion_order.push_back(fullname);
-                                }
-                                for stale in previous.difference(&next_ids) {
-                                    if tx.send(DiscoveryEvent::Lost(stale.clone())).await.is_err() {
-                                        return Ok(());
-                                    }
-                                }
-                                for observation in observations {
-                                    if tx.send(DiscoveryEvent::Observed(observation)).await.is_err() {
+                                for event in tracker.observe_resolution(fullname, observations) {
+                                    if tx.send(event).await.is_err() {
                                         return Ok(());
                                     }
                                 }
@@ -143,19 +193,10 @@ pub async fn run_mdns_discovery(
                         }
                     }
                     ServiceEvent::ServiceRemoved(_service_type, fullname) => {
-                        if let Some(ids) = observations_by_service.remove(&fullname) {
-                            for id in ids {
-                                if tx.send(DiscoveryEvent::Lost(id)).await.is_err() {
-                                    return Ok(());
-                                }
+                        for event in tracker.remove_service(&fullname) {
+                            if tx.send(event).await.is_err() {
+                                return Ok(());
                             }
-                        }
-                        // Opportunistic compaction: churning instance names
-                        // must not grow the order queue without limit once
-                        // removals leave stale entries behind.
-                        if insertion_order.len() > observations_by_service.len() * 2 + 16 {
-                            insertion_order
-                                .retain(|name| observations_by_service.contains_key(name));
                         }
                     }
                     other => debug!(event = ?other, "ignoring non-resolved mDNS event"),

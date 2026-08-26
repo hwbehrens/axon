@@ -13,6 +13,15 @@ pub(super) struct DirectoryState {
     pub(super) enrolled: BTreeMap<AgentId, EnrolledPeer>,
     pub(super) candidates: BTreeMap<AgentId, CandidatePeer>,
     pub(super) observation_index: HashMap<ObservationId, AgentId>,
+    /// Monotonic counter bumped only by edits that persist to the peer store
+    /// (`enroll_candidate`, `enroll`, `remove_peer`). Persistence runs
+    /// OUTSIDE the state lock (a stalled save must not block readers such as
+    /// `dial_targets` or the transport's admission gate), so this counter is
+    /// what lets a save-then-commit sequence detect that another persistent
+    /// edit landed while the lock was released. Ephemeral-only mutations
+    /// (`observe`, expiry) do not touch it and therefore never force a
+    /// retry.
+    pub(super) persist_generation: u64,
 }
 
 #[derive(Debug, Clone)]

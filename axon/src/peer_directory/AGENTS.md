@@ -19,6 +19,7 @@ Identity and trust invariants > one authoritative owner > availability.
 - Discovery adds candidates only; explicit enrollment is the only path into the TLS pin set.
 - Persist enrolled intent and configured locators only. Never persist mDNS liveness or observed addresses.
 - Validate and durably persist a mutation before publishing its new immutable pinning snapshot.
+- Peer-store I/O never runs under the state lock: persistent edits validate against a read snapshot, save with no lock held, then apply their delta under a short write lock guarded by `persist_generation` (lost races retry; see DEC-021).
 - Conflicting identity/address evidence is quarantined, never resolved by last-writer-wins.
 - Keep all peer, locator, and observation collections bounded; constant changes require README.md updates.
 

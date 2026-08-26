@@ -108,3 +108,110 @@ pub(super) async fn make_transport_pair_with_options(
         _dir_b: dir_b,
     }
 }
+
+#[allow(dead_code)] // id_b/id_c pin the fixture's three identities for future tests
+pub(super) struct TransportTrio {
+    pub(super) id_a: Identity,
+    pub(super) id_b: Identity,
+    pub(super) id_c: Identity,
+    pub(super) directory_a: PeerDirectory,
+    pub(super) transport_a: ConnectionManager,
+    pub(super) agent_b: AgentId,
+    pub(super) agent_c: AgentId,
+    _dir_a: TempDir,
+    _dir_b: TempDir,
+    _dir_c: TempDir,
+}
+
+/// A↔B↔C fixture: A has B and C enrolled with live locators; B and C each
+/// have A enrolled. Used for cross-peer interference regressions (revoking
+/// one peer must not affect another's handshake or slot).
+pub(super) async fn make_transport_trio() -> TransportTrio {
+    let roots: Vec<TempDir> = (0..3).map(|_| tempdir().expect("tempdir")).collect();
+    let paths: Vec<AxonPaths> = roots
+        .iter()
+        .map(|root| AxonPaths::from_root(root.path().to_path_buf()))
+        .collect();
+    let ids: Vec<Identity> = paths
+        .iter()
+        .map(|paths| Identity::load_or_generate(paths).expect("identity"))
+        .collect();
+    let agents: Vec<AgentId> = ids
+        .iter()
+        .map(|id| AgentId::parse(id.agent_id()).expect("agent"))
+        .collect();
+    let identities: Vec<PeerIdentity> = ids
+        .iter()
+        .map(|id| PeerIdentity::from_public_key(id.public_key_base64()).expect("peer identity"))
+        .collect();
+
+    let mut directories = Vec::new();
+    for index in 0..3 {
+        directories.push(
+            PeerDirectory::load(
+                agents[index].clone(),
+                PeerStore::new(paths[index].peers.clone()),
+            )
+            .await
+            .expect("directory"),
+        );
+    }
+
+    let mut transports = Vec::new();
+    for index in 0..3 {
+        transports.push(
+            ConnectionManager::bind_cancellable(
+                "127.0.0.1:0".parse().unwrap(),
+                &ids[index],
+                CancellationToken::new(),
+                128,
+                Duration::from_secs(15),
+                Duration::from_secs(60),
+                None,
+                Duration::from_secs(10),
+                directories[index].clone(),
+            )
+            .await
+            .expect("bind"),
+        );
+    }
+    let local_addrs: Vec<std::net::SocketAddr> = transports
+        .iter()
+        .map(|transport| transport.local_addr().expect("local addr"))
+        .collect();
+
+    // A enrolls B and C with live locators.
+    for peer in 1..3 {
+        directories[0]
+            .enroll(
+                identities[peer].clone(),
+                vec![PeerLocator::Socket(local_addrs[peer])],
+            )
+            .await
+            .expect("enroll on A");
+    }
+    // B and C enroll A with live locators so inbound direction works too.
+    for directory in directories.iter().skip(1) {
+        directory
+            .enroll(
+                identities[0].clone(),
+                vec![PeerLocator::Socket(local_addrs[0])],
+            )
+            .await
+            .expect("enroll A");
+    }
+
+    let mut roots_iter = roots.into_iter();
+    TransportTrio {
+        id_a: ids[0].clone(),
+        id_b: ids[1].clone(),
+        id_c: ids[2].clone(),
+        directory_a: directories[0].clone(),
+        transport_a: transports[0].clone(),
+        agent_b: agents[1].clone(),
+        agent_c: agents[2].clone(),
+        _dir_a: roots_iter.next().expect("root a"),
+        _dir_b: roots_iter.next().expect("root b"),
+        _dir_c: roots_iter.next().expect("root c"),
+    }
+}
