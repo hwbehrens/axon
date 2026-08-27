@@ -58,7 +58,7 @@ impl PeerDirectory {
     /// memory can never diverge because of a cancelled request.
     pub(super) async fn commit_persistent<T>(
         &self,
-        build: impl Fn(&DirectoryState) -> Result<PersistPlan<T>, DirectoryError> + Send + 'static,
+        build: impl FnOnce(&DirectoryState) -> Result<PersistPlan<T>, DirectoryError> + Send + 'static,
     ) -> Result<T, DirectoryError>
     where
         T: Send + 'static,
@@ -72,7 +72,7 @@ impl PeerDirectory {
     /// so tests can prove a detached worker still commits.
     pub(super) fn spawn_persistent_edit<T>(
         &self,
-        build: impl Fn(&DirectoryState) -> Result<PersistPlan<T>, DirectoryError> + Send + 'static,
+        build: impl FnOnce(&DirectoryState) -> Result<PersistPlan<T>, DirectoryError> + Send + 'static,
     ) -> JoinHandle<Result<T, DirectoryError>>
     where
         T: Send + 'static,
@@ -102,7 +102,7 @@ impl PeerDirectory {
     /// the state lock.
     async fn run_persistent_edit<T>(
         &self,
-        build: impl Fn(&DirectoryState) -> Result<PersistPlan<T>, DirectoryError>,
+        build: impl FnOnce(&DirectoryState) -> Result<PersistPlan<T>, DirectoryError>,
     ) -> Result<T, DirectoryError> {
         // The guard is held (by binding) to the end of the transaction:
         // build, save, apply all run under the gate.

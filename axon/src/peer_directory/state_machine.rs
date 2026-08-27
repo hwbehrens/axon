@@ -438,9 +438,10 @@ impl DirectoryMachine {
     }
 }
 
-/// 20 cases x up to 50 steps keeps the in-crate suite fast while still
-/// exploring thousands of rule sequences; `HEGEL_TEST_CASES` scales it
-/// without code changes for deeper local or nightly runs.
+/// 80 cases x up to 50 steps (hegeltest's default step count) keeps the
+/// in-crate suite fast while still exploring thousands of rule sequences;
+/// `HEGEL_TEST_CASES` scales it without code changes for deeper local or
+/// nightly runs.
 #[hegel::test(test_cases = 80)]
 fn directory_state_machine_preserves_trust_invariants(tc: TestCase) {
     stateful::run(DirectoryMachine::new(), tc);

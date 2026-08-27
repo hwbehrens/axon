@@ -218,13 +218,8 @@ impl PeerDirectory {
         if identity.agent_id() == &self.local_agent_id {
             return Err(DirectoryError::LocalAgentId(identity.agent_id().clone()));
         }
-        self.commit_persistent(move |current| {
-            // Per-attempt clones: `build` is an `Fn` (the retry loop may
-            // invoke it repeatedly), so it cannot move its captures.
-            let identity = identity.clone();
-            enroll_plan(current, &identity, &locators)
-        })
-        .await
+        self.commit_persistent(move |current| enroll_plan(current, &identity, &locators))
+            .await
     }
 
     pub async fn remove_peer(&self, agent_id: &AgentId) -> Result<PeerIdentity, DirectoryError> {
