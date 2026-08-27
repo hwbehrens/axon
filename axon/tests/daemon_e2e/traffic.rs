@@ -94,6 +94,17 @@ async fn request_response_is_scoped_to_the_requesting_client_only() {
         "B without a handler must answer with an error envelope"
     );
     assert_eq!(reply["response"]["payload"]["code"], "unhandled");
+    let response_ref = reply["response"]["ref"]
+        .as_str()
+        .expect("unhandled response references the request");
+    assert_eq!(
+        reply["response"]["payload"]["message"],
+        json!(format!(
+            "no application handler registered for request '{}'",
+            response_ref
+        ))
+    );
+    assert_eq!(reply["response"]["payload"]["retryable"], json!(false));
 
     // The listener must not receive the response as a broadcast.
     let mut stray = String::new();
