@@ -299,7 +299,8 @@ The reference daemon responds to unhandled bidirectional requests with `kind: "e
 ```json
 {
   "code": "unhandled",
-  "message": "no handler registered"
+  "message": "no application handler registered for request '<request-id>'",
+  "retryable": false
 }
 ```
 

@@ -30,7 +30,7 @@ Each entry: ID, date, subsystem, one-paragraph summary covering motivation, deci
 | DEC-006 | 2025-01-01 | identity | Base64-encoded identity.key format |
 | DEC-005 | 2025-01-01 | ipc, transport | Peer pinning model — reject unknown at TLS |
 | DEC-004 | 2025-01-01 | discovery | mDNS for LAN discovery |
-| DEC-003 | 2025-01-01 | transport | QUIC over TCP |
+| DEC-003 | 2025-01-01 | transport | QUIC instead of TCP |
 | DEC-002 | 2025-01-01 | identity | SHA-256 for agent ID derivation |
 | DEC-001 | 2025-01-01 | identity | Ed25519 for identity key pair |
 
@@ -150,11 +150,11 @@ Date: 2025-01-01 | Subsystem: discovery
 
 mDNS/DNS-SD (`_axon._udp.local.`) is the discovery mechanism for LAN deployments. It requires no address configuration, but advertisements are untrusted candidates and do not grant admission. Explicit peer tokens provide DNS or VPN/Tailscale locators when mDNS is unavailable. Automatic discovery is deliberately local-link only; AXON does not define a rendezvous, STUN, or WAN-discovery service.
 
-### DEC-003: QUIC over TCP
+### DEC-003: QUIC instead of TCP
 
 Date: 2025-01-01 | Subsystem: transport
 
-QUIC was chosen over TCP for transport because: (1) multiplexed streams avoid head-of-line blocking — a slow response doesn't block fire-and-forget messages, (2) TLS 1.3 is built into the protocol — no separate TLS handshake layer, (3) connection migration supports agents that change network addresses, and (4) the `quinn` crate provides a mature Rust implementation. The overhead of UDP/QUIC vs TCP is negligible for AXON's message sizes.
+QUIC over UDP was chosen instead of TCP because: (1) multiplexed streams avoid head-of-line blocking — a slow response doesn't block fire-and-forget messages, (2) TLS 1.3 is built into the protocol — no separate TLS handshake layer, (3) connection migration supports agents that change network addresses, and (4) the `quinn` crate provides a mature Rust implementation. The overhead of UDP/QUIC vs TCP is negligible for AXON's message sizes.
 
 ### DEC-002: SHA-256 for agent ID derivation
 

@@ -19,7 +19,7 @@ use super::quic_transport::ResponseHandlerFn;
 use super::tls::{derive_agent_id_from_pubkey_bytes, extract_ed25519_pubkey_from_cert_der};
 
 // ---------------------------------------------------------------------------
-// Framing helpers — length-delimited read/write on QUIC streams
+// Framing helpers — stream-delimited read/write on QUIC streams
 // ---------------------------------------------------------------------------
 
 pub(crate) async fn write_framed(stream: &mut quinn::SendStream, bytes: &[u8]) -> Result<()> {

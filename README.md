@@ -46,7 +46,7 @@ Agent ←→ [Unix Socket IPC] ←→ AXON Daemon ←→ [QUIC/UDP] ←→ AXON 
 
 Each machine runs a lightweight daemon (<5 MB RSS, negligible CPU when idle). Agents connect to it over a Unix socket and exchange structured JSON messages. The daemon handles everything else:
 
-- **Identity** — Ed25519 keypair generated on first run. `identity.key` stores a base64-encoded 32-byte seed (strictly required; non-base64 or raw legacy formats are rejected). Agent ID derived from the public key. Self-signed X.509 cert for QUIC/TLS 1.3.
+- **Identity** — Ed25519 keypair generated on first run. `identity.key` stores a base64-encoded 32-byte seed (strictly required; non-base64 or raw legacy formats are rejected). Agent ID is `ed25519.` plus the first 16 bytes of SHA-256(public key), lowercase hex-encoded. Self-signed X.509 cert for QUIC/TLS 1.3.
 - **Discovery** — Bonjour/mDNS finds LAN candidates; candidates remain untrusted until explicitly enrolled.
 - **Transport** — QUIC with TLS 1.3 and forward secrecy.
 - **Security** — Mutual TLS peer pinning from one durable peer directory; unknown peers are rejected during TLS.
@@ -272,6 +272,8 @@ Legacy `peers:` entries are rejected rather than silently imported.
 
 There is deliberately no legacy migration layer: remove or back up `known_peers.json`, then re-enroll peers. Do not edit `peers.json` while the daemon is running; use `axon connect` and `axon forget`.
 
+The daemon uses `daemon.pid` as a runtime lock file to prevent two daemons from sharing one state root. It is removed on clean shutdown; stale locks are replaced after the recorded process is no longer running.
+
 ### Internal constants
 
 These are compile-time constants and cannot be changed via configuration.
@@ -298,6 +300,8 @@ These are compile-time constants and cannot be changed via configuration.
 | `DIAL_TIMEOUT` | `10s` | `transport/mod.rs` | Maximum time for a single outbound QUIC dial including handshake. Also bounds how long a fresh preferred-direction candidate may replace a healthy connection-slot incumbent (the simultaneous cross-dial race window). |
 | `MAX_TRACKED_SERVICES` | `1024` | `discovery/mod.rs` | Maximum mDNS service instances tracked for stale-observation diffing; overflow evicts the oldest-inserted service and emits lost events. |
 | `MAX_REQUEST_TIMEOUT_SECS` | `3600` | `daemon/command_handler.rs` | Upper bound for caller-supplied `timeout_secs`; larger values are rejected with `invalid_command` instead of overflowing deadline arithmetic. |
+| `PAIR_REQUEST_LOG_WINDOW` | `30s` | `transport/tls.rs` | Rate-limit window for repeated unknown-peer pairing events. |
+| `DAEMON_PID_FILE_NAME` | `daemon.pid` | `daemon/lockfile.rs` | Runtime lock file used for single-instance enforcement. |
 | `MAX_IPC_CLIENTS` | `64` | `daemon/mod.rs` | Maximum simultaneous IPC client connections. |
 | `IPC_OVERLONG_DRAIN_TIMEOUT` | `2s` | `ipc/client_handler.rs` | Maximum time to drain an overlong IPC line before closing the client so the error reply can be delivered. |
 | `MAX_REQ_ID_BYTES` | `1,024` | `ipc/protocol.rs` | Upper bound on the echoed `req_id`; commands with a longer `req_id` are rejected with `invalid_command` so replies stay within the framed line limit. |

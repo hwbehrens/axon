@@ -35,8 +35,7 @@ The following areas are in scope for security reports:
 | **Identity & key handling** | Ed25519 key generation, agent ID derivation, key material leakage |
 | **Transport (QUIC/TLS)** | TLS 1.3 configuration, certificate validation, handshake bypasses |
 | **Peer pinning & authentication** | Accepting unpinned peers, identity/certificate mismatches |
-| **Hello-first gating** | Sending or processing application messages before handshake completes |
-| **Replay protection** | UUID deduplication bypass, replay cache eviction attacks |
+| **Message sequencing & replay** | Stream-role confusion, duplicate/replayed envelopes, or application idempotency assumptions |
 | **IPC** | Unix socket permission issues, command injection via IPC protocol |
 | **mDNS discovery** | Spoofed announcements leading to peer impersonation |
 | **Wire format** | Malformed messages causing panics, memory exhaustion, or undefined behavior |

@@ -73,3 +73,38 @@ async fn send_notify_unidirectional() {
     assert_eq!(received.kind, MessageKind::Message);
     assert_eq!(received.from.as_deref(), Some(pair.id_a.agent_id()));
 }
+
+#[tokio::test]
+async fn send_unknown_unidirectional_kind_preserves_name() {
+    let pair = make_transport_pair().await;
+    let mut rx_b = pair.transport_b.subscribe_inbound();
+    let peer_b = AgentId::parse(pair.id_b.agent_id()).unwrap();
+    let future_kind = "future_kind_v99";
+    let message = Envelope::new(
+        AgentId::parse(pair.id_a.agent_id()).unwrap(),
+        AgentId::parse(pair.id_b.agent_id()).unwrap(),
+        MessageKind::unknown(future_kind),
+        json!({"future": true}),
+    );
+    let message_id = message.id;
+
+    let result = pair
+        .transport_a
+        .send_to(&pair.directory_a, &peer_b, message, Duration::from_secs(5))
+        .await
+        .expect("send");
+    assert!(result.is_none());
+
+    let received = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let message = rx_b.recv().await.expect("recv");
+            if message.id == message_id {
+                break message;
+            }
+        }
+    })
+    .await
+    .expect("timeout");
+    assert_eq!(received.kind, MessageKind::unknown(future_kind));
+    assert_eq!(received.kind.as_str(), future_kind);
+}

@@ -47,7 +47,7 @@ For machine-readable task routing (subsystem → files → specs → tests), see
 
 Do not break these. They are load-bearing:
 
-- **Agent ID = SHA-256(pubkey)** — all Agent IDs are canonical validated values; authenticated envelope identity comes from the peer certificate, never wire claims.
+- **Agent ID = `ed25519.` + first 16 bytes of SHA-256(pubkey)** — all Agent IDs are canonical validated values; authenticated envelope identity comes from the peer certificate, never wire claims.
 - **Intentional admission** — discovery creates candidates only. A key enters the TLS pin set only after explicit enrollment; revocation persists before the pin is removed and the connection is closed.
 - **PeerDirectory owns logical peer state** — it is the only mutable owner of identities, trust, configured locators, live observations, and derived immutable pin snapshots/views.
 - **ConnectionManager owns physical state** — one authoritative generation-checked slot per peer; deterministic cross-dial selection closes losers, and stale outcomes cannot clear a newer winner.
@@ -56,7 +56,7 @@ Do not break these. They are load-bearing:
 
 ## Verification
 
-Run all three before submitting. All must pass:
+Run all four before submitting. All must pass:
 
 ```sh
 cd axon
@@ -169,11 +169,11 @@ Every change must include tests. The test structure:
 
 ### Unit tests
 
-Every module has `#[cfg(test)]` tests in sibling `*_tests.rs` files, wired via:
+Tests live inside the owning module directory: directory modules use `tests.rs`, while leaf modules may use `<name>_tests.rs`, wired via:
 
 ```rust
 #[cfg(test)]
-#[path = "foo_tests.rs"]
+#[path = "tests.rs"]
 mod tests;
 ```
 

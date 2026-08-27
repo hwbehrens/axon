@@ -1,5 +1,7 @@
 # AXON
 
+Status: Normative
+
 > Rust QUIC-based agent-to-agent messaging daemon with Ed25519 identity, mDNS discovery, and Unix socket IPC.
 
 Core entrypoints:
@@ -9,7 +11,7 @@ Core entrypoints:
 - ./CONTRIBUTING.md — Contribution workflow, full module map, testing requirements
 - ./docs/agent-index.json — Machine-readable subsystem map for task routing and file discovery
 - ./spec/SPEC.md — Architecture, identity, discovery, transport lifecycle
-- ./spec/MESSAGE_TYPES.md — Message kinds (4) and stream mapping
+- ./spec/MESSAGE_TYPES.md — Message kinds (4 known + future-kind preservation) and stream mapping
 - ./spec/WIRE_FORMAT.md — Normative interoperable wire format
 - ./spec/IPC.md — IPC protocol, Unix socket commands
 
@@ -33,7 +35,7 @@ Operating rules:
 - PeerDirectory owns logical peer state; ConnectionManager owns physical QUIC state
 - Verification: `cd axon && make verify` (fmt + lint + full test suite)
 - All Rust source files must stay under 500 lines
-- Unit tests live in sibling *_tests.rs files; integration/e2e tests in axon/tests/
+- Unit tests live inside module directories (`tests.rs` for directory modules, `<name>_tests.rs` for leaf modules); integration/e2e tests live in axon/tests/
 
 Suggested agent loading order:
 

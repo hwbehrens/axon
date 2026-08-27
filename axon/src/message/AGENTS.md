@@ -8,8 +8,8 @@ Spec compliance first — envelope schema must match `spec/WIRE_FORMAT.md` §6.
 
 ## File responsibilities
 
-- `envelope.rs`: Envelope struct, MessageKind enum, encode/decode, validation.
-- `mod.rs`: Module exports, `MAX_MESSAGE_SIZE` constant.
+- `envelope.rs`: Envelope struct, MessageKind enum, encode/decode, validation, and `MAX_MESSAGE_SIZE`.
+- `mod.rs`: Module exports.
 
 ## Guardrails
 

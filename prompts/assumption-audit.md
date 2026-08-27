@@ -54,7 +54,7 @@ If one question's answer reveals coupling with other questions, call that out ex
 ### Step 3: Cross-reference with AXON invariants
 
 Verify the plan against load-bearing invariants:
-- Agent ID = SHA-256(pubkey) — does the plan preserve this?
+- Agent ID = `ed25519.` + first 16 bytes of SHA-256(pubkey) — does the plan preserve this?
 - Peer pinning — does the plan maintain transport-layer rejection of unknown peers?
 - Locator conflict quarantine — does the plan avoid silently assigning one observed endpoint to conflicting identities?
 - PeerDirectory owns logical peer truth and derives pinning snapshots — does the plan respect this ownership boundary?
