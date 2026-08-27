@@ -1,15 +1,16 @@
 {
   "schema_version": "1.0.0",
   "status": "normative",
-  "last_updated": "2026-02-24",
+  "last_updated": "2026-08-26",
   "description": "Canonical machine-readable map for agent task routing and subsystem boundaries. Key files list only architecturally significant entry points — use code_roots directories for full file discovery.",
   "authoritative_order": [
-    "AGENTS.md",
-    "docs/agent-index.json",
     "spec/*",
-    "rubrics/*",
+    "AGENTS.md",
+    "CONTRIBUTING.md",
     "docs/decision-log.md",
-    "docs/open-questions.md"
+    "rubrics/*",
+    "docs/agent-index.json",
+    "README.md"
   ],
   "escalation": {
     "stop_when": [
@@ -30,7 +31,7 @@
   "subsystems": [
     {
       "id": "transport",
-      "description": "QUIC/TLS connections, framing, and peer verification.",
+      "description": "Physical QUIC/TLS connection ownership, framing, reconnect, and peer verification.",
       "code_roots": ["axon/src/transport"],
       "test_roots": ["axon/src/transport"],
       "specs": ["spec/SPEC.md", "spec/WIRE_FORMAT.md"],
@@ -38,12 +39,14 @@
       "key_files": [
         "axon/src/transport/tls.rs",
         "axon/src/transport/quic_transport.rs",
-        "axon/src/transport/connection.rs"
+        "axon/src/transport/connection.rs",
+        "axon/src/transport/connection_registry.rs",
+        "axon/src/transport/reconnect.rs"
       ]
     },
     {
       "id": "message",
-      "description": "MessageKind (4 variants), Envelope, encode/decode.",
+      "description": "Validated AgentId, lossless MessageKind, Envelope, encode/decode.",
       "code_roots": ["axon/src/message"],
       "test_roots": ["axon/src/message"],
       "specs": ["spec/MESSAGE_TYPES.md", "spec/WIRE_FORMAT.md"],
@@ -69,23 +72,21 @@
     },
     {
       "id": "daemon",
-      "description": "Daemon orchestration, lifecycle, reconnect, command dispatch.",
+      "description": "Daemon orchestration, lifecycle, and command dispatch across subsystem owners.",
       "code_roots": ["axon/src/daemon"],
       "test_roots": ["axon/src/daemon"],
       "specs": ["spec/SPEC.md"],
       "rubrics": ["rubrics/QUALITY.md"],
       "key_files": [
         "axon/src/daemon/mod.rs",
-        "axon/src/daemon/command_handler.rs",
-        "axon/src/daemon/reconnect.rs",
-        "axon/src/daemon/peer_events.rs"
+        "axon/src/daemon/command_handler.rs"
       ]
     },
     {
       "id": "discovery",
-      "description": "mDNS + static peer discovery.",
+      "description": "Bonjour/mDNS candidate discovery; never a trust authority.",
       "code_roots": ["axon/src/discovery"],
-      "test_roots": ["axon/src/discovery"],
+      "test_roots": ["axon/src/discovery", "axon/tests/mdns_live.rs"],
       "specs": ["spec/SPEC.md"],
       "rubrics": ["rubrics/QUALITY.md"],
       "key_files": [
@@ -104,14 +105,29 @@
       ]
     },
     {
-      "id": "peer_table",
-      "description": "Peer storage, pinning, shared PubkeyMap, address uniqueness.",
-      "code_roots": ["axon/src/peer_table"],
-      "test_roots": ["axon/src/peer_table"],
+      "id": "peer_directory",
+      "description": "Sole logical owner of enrolled peers, candidates, locators, conflicts, persistence, and pinning views.",
+      "code_roots": ["axon/src/peer_directory"],
+      "test_roots": ["axon/src/peer_directory"],
       "specs": ["spec/SPEC.md"],
       "rubrics": ["rubrics/QUALITY.md"],
       "key_files": [
-        "axon/src/peer_table/mod.rs"
+        "axon/src/peer_directory/mod.rs",
+        "axon/src/peer_directory/state.rs",
+        "axon/src/peer_directory/types.rs",
+        "axon/src/peer_directory/store.rs",
+        "axon/src/peer_directory/persistence.rs"
+      ]
+    },
+    {
+      "id": "request_broker",
+      "description": "Single IPC request-handler lease and exactly-once request completion.",
+      "code_roots": ["axon/src/request_broker"],
+      "test_roots": ["axon/src/request_broker"],
+      "specs": ["spec/IPC.md", "spec/MESSAGE_TYPES.md"],
+      "rubrics": ["rubrics/QUALITY.md"],
+      "key_files": [
+        "axon/src/request_broker/mod.rs"
       ]
     },
     {
@@ -127,7 +143,7 @@
     },
     {
       "id": "config",
-      "description": "YAML config parsing (name, port, advertise_addr, peers).",
+      "description": "Local daemon YAML settings and peer-state path/legacy validation.",
       "code_roots": ["axon/src/config"],
       "test_roots": ["axon/src/config"],
       "specs": ["spec/SPEC.md"],
@@ -167,7 +183,7 @@
     {
       "task_id": "tls-or-peer-verification-change",
       "subsystem": "transport",
-      "primary_files": ["axon/src/transport/tls.rs", "axon/src/peer_table/mod.rs"],
+      "primary_files": ["axon/src/transport/tls.rs", "axon/src/peer_directory/mod.rs"],
       "also_update": ["spec/SPEC.md", "spec/WIRE_FORMAT.md"]
     },
     {
@@ -191,13 +207,13 @@
     {
       "task_id": "discovery-change",
       "subsystem": "discovery",
-      "primary_files": ["axon/src/discovery/mod.rs", "axon/src/daemon/peer_events.rs"],
+      "primary_files": ["axon/src/discovery/mod.rs", "axon/src/peer_directory/mod.rs"],
       "also_update": ["spec/SPEC.md"]
     },
     {
       "task_id": "daemon-lifecycle-change",
       "subsystem": "daemon",
-      "primary_files": ["axon/src/daemon/mod.rs", "axon/src/daemon/reconnect.rs"],
+      "primary_files": ["axon/src/daemon/mod.rs", "axon/src/transport/reconnect.rs"],
       "also_update": ["spec/SPEC.md"]
     }
   ],

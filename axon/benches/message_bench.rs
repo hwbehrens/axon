@@ -4,14 +4,18 @@ use uuid::Uuid;
 
 use axon::message::{AgentId, Envelope, MessageKind, decode, encode};
 
+fn agent_id(hex: char) -> AgentId {
+    AgentId::parse(&format!("ed25519.{}", hex.to_string().repeat(32))).unwrap()
+}
+
 fn make_small_envelope() -> Envelope {
     Envelope {
         id: Uuid::new_v4(),
         kind: MessageKind::Request,
         ref_id: None,
         payload: Envelope::raw_json(&json!({})),
-        from: Some(AgentId::from(format!("ed25519.{}", "a".repeat(32)))),
-        to: Some(AgentId::from(format!("ed25519.{}", "b".repeat(32)))),
+        from: Some(agent_id('a')),
+        to: Some(agent_id('b')),
     }
 }
 
@@ -26,8 +30,8 @@ fn make_medium_envelope() -> Envelope {
             "max_tokens": 1024,
             "deadline_ms": 30000
         })),
-        from: Some(AgentId::from(format!("ed25519.{}", "a".repeat(32)))),
-        to: Some(AgentId::from(format!("ed25519.{}", "b".repeat(32)))),
+        from: Some(agent_id('a')),
+        to: Some(agent_id('b')),
     }
 }
 
@@ -45,8 +49,8 @@ fn make_large_envelope() -> Envelope {
             "tokens_used": 4096,
             "truncated": false
         })),
-        from: Some(AgentId::from(format!("ed25519.{}", "a".repeat(32)))),
-        to: Some(AgentId::from(format!("ed25519.{}", "b".repeat(32)))),
+        from: Some(agent_id('a')),
+        to: Some(agent_id('b')),
     }
 }
 

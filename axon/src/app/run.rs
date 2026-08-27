@@ -8,12 +8,11 @@ use clap::{Parser, Subcommand};
 use serde_json::json;
 use tracing_subscriber::EnvFilter;
 
-use axon::config::{
-    AxonPaths, Config, PeerAddr, PersistedStaticPeerConfig, load_persisted_config,
-    save_persisted_config,
-};
+use axon::config::{AxonPaths, Config};
 use axon::daemon::{DaemonOptions, run_daemon};
 use axon::identity::Identity;
+use axon::message::AgentId;
+use axon::peer_directory::PeerLocator;
 use axon::peer_token;
 
 use super::{cli, doctor, examples};
@@ -26,7 +25,7 @@ use super::{cli, doctor, examples};
     propagate_version = true
 )]
 pub(crate) struct Cli {
-    /// AXON state root directory (socket/identity/config/known_peers).
+    /// AXON state root directory (socket/identity/config/peers).
     /// Falls back to AXON_ROOT, then ~/.axon.
     #[arg(
         long = "state-root",
@@ -54,7 +53,7 @@ pub(crate) enum Commands {
     Daemon {
         #[arg(long)]
         port: Option<u16>,
-        /// Disable mDNS discovery (use static peers only).
+        /// Disable mDNS discovery (use enrolled peers' configured locators only).
         #[arg(long)]
         disable_mdns: bool,
     },
@@ -104,8 +103,13 @@ pub(crate) enum Commands {
         #[arg(long, value_name = "ADDR")]
         addr: Option<String>,
     },
-    /// Enroll a peer from an `axon://` token.
-    Connect { token: String },
+    /// Enroll an observed Agent ID or an `axon://` peer token.
+    Connect { peer: String },
+    /// Revoke an enrolled peer.
+    Forget {
+        #[arg(value_parser = parse_agent_id_arg)]
+        agent_id: String,
+    },
     /// Print running daemon identity and metadata via IPC.
     Whoami {
         /// Print machine-readable JSON.
@@ -145,6 +149,7 @@ pub(crate) async fn run(cli: Cli) -> Result<ExitCode> {
                 disable_mdns,
                 axon_root: Some(paths.root.clone()),
                 cancel: None,
+                max_inflight_sends: None,
             })
             .await?;
         }
@@ -245,65 +250,41 @@ pub(crate) async fn run(cli: Cli) -> Result<ExitCode> {
                 println!("{}", cli::identity_output::render_identity_human(&uri));
             }
         }
-        Commands::Connect { token } => {
+        Commands::Connect { peer } => {
             let paths = resolve_paths()?;
-            let identity = Identity::load_or_generate(&paths)?;
-            let decoded = peer_token::decode(&token).context("failed to parse peer token")?;
-
-            if decoded.agent_id.as_str() == identity.agent_id() {
-                anyhow::bail!("refusing to enroll self ({})", decoded.agent_id);
-            }
-
-            let mut persisted = load_persisted_config(&paths.config).await?;
-            if persisted
-                .peers
-                .iter()
-                .any(|peer| peer.agent_id.as_str() == decoded.agent_id.as_str())
-            {
-                anyhow::bail!(
-                    "peer {} already exists in {}",
-                    decoded.agent_id,
-                    paths.config.display()
-                );
-            }
-
-            let parsed_addr =
-                PeerAddr::parse(&decoded.addr).context("peer token has invalid addr")?;
-            persisted.peers.push(PersistedStaticPeerConfig {
-                agent_id: decoded.agent_id.clone(),
-                addr: parsed_addr,
-                pubkey: decoded.pubkey.clone(),
-            });
-            save_persisted_config(&paths.config, &persisted).await?;
-
-            if paths.socket.exists() {
-                let hotload = cli::ipc_client::send_ipc(
-                    &paths,
-                    json!({"cmd": "add_peer", "pubkey": decoded.pubkey, "addr": decoded.addr}),
+            let (command, label) = if peer.starts_with("axon://") {
+                let decoded = peer_token::decode(&peer).context("failed to parse peer token")?;
+                (
+                    json!({"cmd": "add_peer", "token": peer}),
+                    decoded.agent_id.to_string(),
                 )
-                .await;
-                match hotload {
-                    Ok(response) if response.get("ok") == Some(&json!(true)) => {}
-                    Ok(response) => {
-                        let rendered = serde_json::to_string_pretty(&response)
-                            .unwrap_or_else(|_| response.to_string());
-                        anyhow::bail!(
-                            "peer saved to {} but daemon hot-load failed.\nDaemon response: {}",
-                            paths.config.display(),
-                            rendered
-                        );
-                    }
-                    Err(err) => {
-                        anyhow::bail!(
-                            "peer saved to {} but daemon hot-load failed: {}",
-                            paths.config.display(),
-                            err
-                        );
-                    }
-                }
+            } else {
+                let agent_id =
+                    AgentId::parse(&peer).context("failed to parse candidate Agent ID")?;
+                (
+                    json!({"cmd": "add_peer", "agent_id": agent_id.clone()}),
+                    agent_id.to_string(),
+                )
+            };
+            let response = cli::ipc_client::send_ipc(&paths, command).await?;
+            if response.get("ok") != Some(&json!(true)) {
+                print_json_value(&response)?;
+                return Ok(ExitCode::from(2));
             }
-
-            println!("✓ Added peer {} ({})", decoded.agent_id, decoded.addr);
+            println!("✓ Enrolled peer {label}");
+        }
+        Commands::Forget { agent_id } => {
+            let paths = resolve_paths()?;
+            let response = cli::ipc_client::send_ipc(
+                &paths,
+                json!({"cmd": "remove_peer", "agent_id": agent_id}),
+            )
+            .await?;
+            if response.get("ok") != Some(&json!(true)) {
+                print_json_value(&response)?;
+                return Ok(ExitCode::from(2));
+            }
+            println!("✓ Revoked peer {agent_id}");
         }
         Commands::Whoami { json } => {
             let paths = resolve_paths()?;
@@ -414,14 +395,7 @@ fn parse_agent_id_arg(input: &str) -> std::result::Result<String, String> {
 }
 
 fn canonicalize_agent_id(input: &str) -> Option<String> {
-    let (prefix, hex) = input.split_once('.')?;
-    if !prefix.eq_ignore_ascii_case("ed25519") {
-        return None;
-    }
-    if hex.len() != 32 || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
-        return None;
-    }
-    Some(format!("ed25519.{}", hex.to_ascii_lowercase()))
+    AgentId::parse(input).ok().map(|id| id.to_string())
 }
 
 fn select_identity_addr(
@@ -440,15 +414,15 @@ fn select_identity_addr(
 }
 
 fn normalize_addr(input: &str) -> Result<String> {
-    let parsed = PeerAddr::parse(input)?;
+    let parsed = PeerLocator::parse(input)?;
     Ok(parsed.to_string())
 }
 
 fn split_addr_port(addr: &str) -> Result<(String, u16)> {
-    let parsed = PeerAddr::parse(addr)?;
+    let parsed = PeerLocator::parse(addr)?;
     match parsed {
-        PeerAddr::Socket(socket) => Ok((socket.ip().to_string(), socket.port())),
-        PeerAddr::Host { host, port } => Ok((host, port)),
+        PeerLocator::Socket(socket) => Ok((socket.ip().to_string(), socket.port())),
+        PeerLocator::Host { host, port } => Ok((host.into(), port)),
     }
 }
 

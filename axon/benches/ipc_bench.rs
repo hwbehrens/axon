@@ -7,6 +7,10 @@ use uuid::Uuid;
 use axon::ipc::{DaemonReply, IpcCommand, IpcErrorCode, PeerSummary, WhoamiInfo};
 use axon::message::{AgentId, Envelope, MessageKind};
 
+fn agent_id(hex: char) -> AgentId {
+    AgentId::parse(&format!("ed25519.{}", hex.to_string().repeat(32))).unwrap()
+}
+
 fn make_envelope() -> Envelope {
     Envelope {
         id: Uuid::new_v4(),
@@ -17,8 +21,8 @@ fn make_envelope() -> Envelope {
             "data": {"step": 3, "total": 10, "message": "Compiling module xyz"},
             "importance": "medium"
         })),
-        from: Some(AgentId::from(format!("ed25519.{}", "a".repeat(32)))),
-        to: Some(AgentId::from(format!("ed25519.{}", "b".repeat(32)))),
+        from: Some(agent_id('a')),
+        to: Some(agent_id('b')),
     }
 }
 
@@ -77,14 +81,14 @@ fn bench_daemon_reply_serialize(c: &mut Criterion) {
     });
 
     let request = Envelope::new(
-        AgentId::from(format!("ed25519.{}", "a".repeat(32))),
-        AgentId::from(format!("ed25519.{}", "b".repeat(32))),
+        agent_id('a'),
+        agent_id('b'),
         MessageKind::Request,
         json!({"question": "hello?"}),
     );
     let response = Envelope::response_to(
         &request,
-        AgentId::from(format!("ed25519.{}", "b".repeat(32))),
+        agent_id('b'),
         MessageKind::Response,
         json!({"answer": "hi"}),
     );
@@ -102,10 +106,12 @@ fn bench_daemon_reply_serialize(c: &mut Criterion) {
         ok: true,
         peers: vec![PeerSummary {
             agent_id: format!("ed25519.{}", "a".repeat(32)),
-            addr: "127.0.0.1:7100".to_string(),
-            status: "connected".to_string(),
+            public_key: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".to_string(),
+            trust: "enrolled",
+            locators: vec!["127.0.0.1:7100".to_string()],
+            status: "connected",
             rtt_ms: Some(1.2),
-            source: "static".to_string(),
+            display_name: None,
         }],
         req_id: Some("req-3".to_string()),
     };
@@ -143,7 +149,7 @@ fn bench_daemon_reply_serialize(c: &mut Criterion) {
     let err = DaemonReply::Error {
         ok: false,
         error: IpcErrorCode::InvalidCommand,
-        message: IpcErrorCode::InvalidCommand.message(),
+        message: IpcErrorCode::InvalidCommand.message().to_string(),
         req_id: Some("req-6".to_string()),
     };
     group.bench_function("error", |b| {

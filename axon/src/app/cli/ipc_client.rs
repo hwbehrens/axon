@@ -12,6 +12,21 @@ pub enum ResponseMode {
     Request,
 }
 
+/// Enforce the client side of the IPC line limit BEFORE connecting.
+///
+/// The 65,536-byte limit INCLUDES the trailing newline (spec/IPC.md §2):
+/// a body of exactly 65,536 bytes plus newline is a 65,537-byte frame the
+/// daemon must reject. The off-by-one used to permit exactly that.
+pub fn validate_command_line(line: &str) -> Result<()> {
+    if line.len() + 1 > axon::ipc::MAX_IPC_LINE_LENGTH {
+        anyhow::bail!(
+            "IPC command size ({} bytes plus newline) exceeds the 64KB limit",
+            line.len()
+        );
+    }
+    Ok(())
+}
+
 pub fn is_unsolicited_event(decoded: &Value) -> bool {
     decoded.get("event").is_some()
 }
@@ -43,12 +58,7 @@ pub fn render_json(value: &Value) -> Result<String> {
 
 pub async fn send_ipc(paths: &AxonPaths, command: Value) -> Result<Value> {
     let line = serde_json::to_string(&command).context("failed to serialize IPC command")?;
-    if line.len() > axon::ipc::MAX_IPC_LINE_LENGTH {
-        anyhow::bail!(
-            "IPC command size ({} bytes) exceeds the 64KB limit",
-            line.len()
-        );
-    }
+    validate_command_line(&line)?;
 
     tracing::debug!(socket = %paths.socket.display(), "connecting to daemon IPC socket");
 

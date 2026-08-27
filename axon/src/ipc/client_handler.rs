@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use serde_json::Value;
@@ -7,25 +8,35 @@ use tokio::net::UnixStream;
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
-use super::protocol::{CommandEvent, DaemonReply, IpcCommand, IpcErrorCode, MAX_IPC_LINE_LENGTH};
+use super::protocol::{
+    CommandEvent, IpcCommand, IpcErrorCode, MAX_IPC_LINE_LENGTH, MAX_REQ_ID_BYTES, error_reply_line,
+};
 
-fn build_error_line(error: IpcErrorCode, req_id: Option<String>) -> Arc<str> {
-    Arc::from(
-        serde_json::to_string(&DaemonReply::Error {
-            ok: false,
-            message: error.message(),
-            error,
-            req_id,
-        })
-        .expect("IPC error serialization"),
-    )
+/// Maximum time the handler may spend draining an overlong line before the
+/// client is closed. The drain exists so the queued `command_too_large`
+/// error survives the connection close (an abrupt close with unread inbound
+/// data sends RST and discards it); without a deadline a client that pauses
+/// mid-line would hold one of the bounded IPC client slots indefinitely,
+/// and server shutdown could not interrupt it.
+pub(super) const IPC_OVERLONG_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Encode a terminal error line through the shared outbound encoder so
+/// even malformed-command replies respect the framed limit (spec/IPC.md
+/// §2). The req_id echo is dropped (not truncated) if it would overflow —
+/// it is bounded at ingress anyway; this is defense in depth.
+fn build_error_line(error: IpcErrorCode, req_id: Option<String>) -> Option<Arc<str>> {
+    error_reply_line(error, req_id).ok()
 }
 
+/// Extract the req_id to echo from an UNPARSEABLE line. Only in-bound
+/// req_ids are echoed: the line already failed validation, and an
+/// unbounded echo could produce an oversized error frame.
 fn extract_req_id(line: &str) -> Option<String> {
     let parsed = serde_json::from_str::<Value>(line).ok()?;
     parsed
         .get("req_id")
         .and_then(Value::as_str)
+        .filter(|req_id| req_id.len() <= MAX_REQ_ID_BYTES)
         .map(str::to_string)
 }
 
@@ -34,7 +45,13 @@ fn try_queue_error(
     error: IpcErrorCode,
     req_id: Option<String>,
 ) -> bool {
-    out_tx.try_send(build_error_line(error, req_id)).is_ok()
+    match build_error_line(error, req_id) {
+        Some(line) => out_tx.try_send(line).is_ok(),
+        None => {
+            tracing::warn!("failed to encode IPC error line; dropping it");
+            false
+        }
+    }
 }
 
 pub(super) async fn handle_client(
@@ -114,7 +131,8 @@ pub(super) async fn handle_client(
 
             if let Some(pos) = available.iter().position(|&b| b == b'\n') {
                 let needed = pos;
-                if buf.len() + needed > MAX_IPC_LINE_LENGTH {
+                // Spec counts the trailing newline in the 65,536-byte bound.
+                if buf.len() + needed + 1 > MAX_IPC_LINE_LENGTH {
                     exceeded = true;
                     reader.consume(pos + 1);
                     break;
@@ -125,7 +143,9 @@ pub(super) async fn handle_client(
                 break;
             } else {
                 let len = available.len();
-                if buf.len() + len > MAX_IPC_LINE_LENGTH {
+                // Reserve one byte for the newline that must eventually end
+                // the line (spec: 65,536 bytes including the newline).
+                if buf.len() + len + 1 > MAX_IPC_LINE_LENGTH {
                     exceeded = true;
                     reader.consume(len);
                     break;
@@ -139,7 +159,44 @@ pub(super) async fn handle_client(
             if try_queue_error(&out_tx, IpcErrorCode::CommandTooLarge, None) {
                 writer_close_mode = WriterCloseMode::FlushQueued;
             }
-            break; // Close connection — can't reliably find next command boundary
+            // Drain the remainder of the overlong line (bounded in bytes and
+            // in time, and interruptible by cancellation) before closing:
+            // closing with unread inbound data sends RST, which would
+            // discard the queued error reply before the client can read it.
+            let mut drained = 0usize;
+            let deadline =
+                tokio::time::sleep_until(tokio::time::Instant::now() + IPC_OVERLONG_DRAIN_TIMEOUT);
+            tokio::pin!(deadline);
+            loop {
+                let available_len = tokio::select! {
+                    _ = cancel.cancelled() => break,
+                    _ = &mut deadline => {
+                        tracing::warn!(client_id, "timed out draining overlong IPC line");
+                        break;
+                    }
+                    read_result = reader.fill_buf() => match read_result {
+                        Ok([]) => break, // EOF
+                        Ok(chunk) => {
+                            let newline = chunk.iter().position(|&b| b == b'\n');
+                            match newline {
+                                Some(pos) => {
+                                    reader.consume(pos + 1);
+                                    break;
+                                }
+                                None => chunk.len(),
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                };
+                drained += available_len;
+                reader.consume(available_len);
+                if drained > MAX_IPC_LINE_LENGTH {
+                    // Hostile never-terminated stream: stop reading.
+                    break;
+                }
+            }
+            break; // Close connection — command boundary was restored above
         }
 
         if !found_newline {
@@ -156,10 +213,29 @@ pub(super) async fn handle_client(
         };
         match serde_json::from_str::<IpcCommand>(line) {
             Ok(command) => {
-                cmd_tx
-                    .send(CommandEvent { client_id, command })
-                    .await
-                    .map_err(|_| anyhow::anyhow!("daemon command channel closed"))?;
+                // Ingress bound on the echoed correlation id: an overlong
+                // req_id would make the reply frame exceed the line limit
+                // (spec/IPC.md §3). Rejected as a field constraint, without
+                // echoing the offending value.
+                if command
+                    .req_id()
+                    .is_some_and(|req_id| req_id.len() > MAX_REQ_ID_BYTES)
+                {
+                    if !try_queue_error(&out_tx, IpcErrorCode::InvalidCommand, None) {
+                        break;
+                    }
+                    continue;
+                }
+                // Cancellation-aware: shutdown (or eviction) must be able to
+                // interrupt a handler blocked on a full command channel,
+                // otherwise the daemon's receiver can stop draining while
+                // this task stays parked past IPC shutdown.
+                tokio::select! {
+                    _ = cancel.cancelled() => break,
+                    result = cmd_tx.send(CommandEvent { client_id, command }) => {
+                        result.map_err(|_| anyhow::anyhow!("daemon command channel closed"))?;
+                    }
+                }
             }
             Err(_err) => {
                 if !try_queue_error(&out_tx, IpcErrorCode::InvalidCommand, extract_req_id(line)) {

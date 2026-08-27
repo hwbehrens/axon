@@ -1,16 +1,22 @@
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
 
-use crate::config::resolve_static_peer;
 use crate::ipc::{
     CommandEvent, DaemonReply, IpcCommand, IpcErrorCode, IpcSendKind, IpcServer, PeerSummary,
 };
 use crate::message::{AgentId, Envelope};
-use crate::peer_table::{ConnectionStatus, PeerSource, PeerTable};
-use crate::peer_token::derive_agent_id_from_pubkey_base64;
-use crate::transport::{QuicTransport, REQUEST_TIMEOUT};
+use crate::peer_directory::{DirectoryError, PeerDirectory, PeerIdentity, PeerLocator, PeerTrust};
+use crate::peer_token;
+use crate::request_broker::{BrokerError, RequestBroker};
+use crate::transport::{ConnectionManager, REQUEST_TIMEOUT};
+
+/// Upper bound for caller-supplied `timeout_secs`. Without it, `u64::MAX`
+/// would overflow `Instant::now() + timeout` into a panic that leaks the
+/// sender's reserved send-slot budget. One hour comfortably exceeds any
+/// legitimate interactive request while keeping the arithmetic safe.
+const MAX_REQUEST_TIMEOUT_SECS: u64 = 3600;
 
 #[derive(Default)]
 pub(crate) struct Counters {
@@ -19,61 +25,54 @@ pub(crate) struct Counters {
 }
 
 #[derive(Debug)]
-pub(crate) enum DaemonIpcError {
-    PeerNotFound,
-    SelfSend,
-    PeerUnreachable,
-    Timeout,
-    InvalidCommand(String),
+struct CommandFailure {
+    code: IpcErrorCode,
+    message: String,
 }
 
-impl std::fmt::Display for DaemonIpcError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            DaemonIpcError::PeerNotFound => write!(f, "peer_not_found"),
-            DaemonIpcError::SelfSend => write!(f, "self_send"),
-            DaemonIpcError::PeerUnreachable => write!(f, "peer_unreachable"),
-            DaemonIpcError::Timeout => write!(f, "timeout"),
-            DaemonIpcError::InvalidCommand(msg) => write!(f, "invalid_command: {msg}"),
+impl CommandFailure {
+    fn new(code: IpcErrorCode, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            message: message.into(),
         }
     }
 }
 
-impl std::error::Error for DaemonIpcError {}
+/// Map typed directory failures onto instructive IPC error codes
+/// (spec/IPC.md §5): unknown-peer classes stay user-facing
+/// (`peer_not_found`, `peer_not_observed`), while capacity and persistence
+/// failures are `internal_error`. The round-six behavior mapped EVERY
+/// directory error onto the not-found classes, reporting a failed disk save
+/// or an exhausted enrolled-peer bound as a missing peer.
+fn directory_failure(err: DirectoryError) -> CommandFailure {
+    let code = match &err {
+        DirectoryError::NotEnrolled(_) => IpcErrorCode::PeerNotFound,
+        DirectoryError::NotObserved(_) => IpcErrorCode::PeerNotObserved,
+        DirectoryError::LocalAgentId(_) => IpcErrorCode::SelfSend,
+        DirectoryError::EnrolledCapacity
+        | DirectoryError::LocatorCapacity
+        | DirectoryError::Persist(_) => IpcErrorCode::InternalError,
+    };
+    CommandFailure::new(code, err.to_string())
+}
 
-pub(crate) struct DaemonContext<'a> {
-    pub(crate) ipc: &'a IpcServer,
-    pub(crate) peer_table: &'a PeerTable,
-    pub(crate) transport: &'a QuicTransport,
-    pub(crate) local_agent_id: &'a AgentId,
-    pub(crate) counters: &'a Counters,
+#[derive(Clone)]
+pub(crate) struct DaemonContext {
+    pub(crate) ipc: IpcServer,
+    pub(crate) directory: PeerDirectory,
+    pub(crate) transport: ConnectionManager,
+    pub(crate) broker: RequestBroker,
+    pub(crate) local_agent_id: AgentId,
+    pub(crate) counters: std::sync::Arc<Counters>,
+    /// In-flight `send` tasks; control commands never consume this budget.
+    pub(crate) inflight_sends: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    pub(crate) max_inflight_sends: usize,
     pub(crate) start: Instant,
 }
 
-pub(crate) fn status_str(status: &ConnectionStatus) -> &'static str {
-    match status {
-        ConnectionStatus::Discovered => "discovered",
-        ConnectionStatus::Connecting => "connecting",
-        ConnectionStatus::Connected => "connected",
-        ConnectionStatus::Disconnected => "disconnected",
-    }
-}
-
-pub(crate) fn source_str(source: &PeerSource) -> &'static str {
-    match source {
-        PeerSource::Static => "static",
-        PeerSource::Discovered => "discovered",
-        PeerSource::Cached => "cached",
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Command dispatch — directly handles all IPC commands
-// ---------------------------------------------------------------------------
-
-pub(crate) async fn handle_command(cmd: CommandEvent, ctx: &DaemonContext<'_>) -> Result<()> {
+pub(crate) async fn handle_command(cmd: CommandEvent, ctx: &DaemonContext) -> Result<()> {
     let client_id = cmd.client_id;
-
     let reply = match cmd.command {
         IpcCommand::Send {
             to,
@@ -82,81 +81,83 @@ pub(crate) async fn handle_command(cmd: CommandEvent, ctx: &DaemonContext<'_>) -
             timeout_secs,
             ref_id,
             req_id,
-        } => match handle_send(ctx, to, kind, payload, timeout_secs, ref_id).await {
-            Ok((msg_id, response)) => {
-                let broadcast_envelope = response.clone();
-                let reply = DaemonReply::SendOk {
-                    ok: true,
-                    msg_id,
+        } => {
+            // Reserve a send slot atomically before executing. The budget
+            // counts exactly the sends being processed, so a limit of N
+            // admits N concurrent sends and rejects the rest.
+            if reserve_send_slot(ctx).is_none() {
+                // Control commands stay responsive under send pressure: only
+                // excess sends are rejected.
+                error_reply(
+                    CommandFailure::new(
+                        IpcErrorCode::SendCapacityExceeded,
+                        IpcErrorCode::SendCapacityExceeded.message(),
+                    ),
                     req_id,
-                    response,
-                };
-                // Send reply first, then broadcast (so sender gets ack before broadcast)
-                ctx.ipc.send_reply(client_id, &reply).await?;
-                if let Some(envelope) = broadcast_envelope {
-                    let _ = ctx.ipc.broadcast_inbound(&envelope).await;
-                }
-                return Ok(());
-            }
-            Err(e) => {
-                let error_code = if let Some(e) = e.downcast_ref::<DaemonIpcError>() {
-                    match e {
-                        DaemonIpcError::PeerNotFound => IpcErrorCode::PeerNotFound,
-                        DaemonIpcError::SelfSend => IpcErrorCode::SelfSend,
-                        DaemonIpcError::PeerUnreachable => IpcErrorCode::PeerUnreachable,
-                        DaemonIpcError::Timeout => IpcErrorCode::Timeout,
-                        DaemonIpcError::InvalidCommand(_) => IpcErrorCode::InvalidCommand,
-                    }
-                } else {
-                    IpcErrorCode::InternalError
-                };
-                DaemonReply::Error {
-                    ok: false,
-                    message: error_code.message(),
-                    error: error_code,
-                    req_id,
+                )
+            } else {
+                // Panic-safe permit: the guard decrements the counter on scope
+                // exit AND on unwind, so a panicking handler task cannot leak
+                // slots until the budget is permanently exhausted.
+                let _slot_guard = SendSlotGuard(ctx.inflight_sends.clone());
+                let outcome = send(ctx, to, kind, payload, timeout_secs, ref_id).await;
+                match outcome {
+                    Ok((msg_id, response)) => DaemonReply::SendOk {
+                        ok: true,
+                        msg_id,
+                        req_id,
+                        response,
+                    },
+                    Err(failure) => error_reply(failure, req_id),
                 }
             }
-        },
+        }
         IpcCommand::Peers { req_id } => {
-            let peers: Vec<PeerSummary> = ctx
-                .peer_table
-                .list()
-                .await
-                .into_iter()
-                .map(|p| PeerSummary {
-                    agent_id: p.agent_id.to_string(),
-                    addr: p.addr.to_string(),
-                    status: status_str(&p.status).to_string(),
-                    rtt_ms: p.rtt_ms,
-                    source: source_str(&p.source).to_string(),
-                })
-                .collect();
+            let mut peers = Vec::new();
+            for peer in ctx.directory.list().await {
+                let connected = ctx.transport.has_connection(peer.identity.agent_id()).await;
+                let trust = match peer.trust {
+                    PeerTrust::Candidate => "candidate",
+                    PeerTrust::Enrolled => "enrolled",
+                };
+                let status = match (peer.trust, connected) {
+                    (PeerTrust::Candidate, _) => "discovered",
+                    (PeerTrust::Enrolled, true) => "connected",
+                    (PeerTrust::Enrolled, false) => "disconnected",
+                };
+                let mut locators: Vec<_> = peer
+                    .configured_locators
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect();
+                locators.extend(peer.observed_endpoints.iter().map(ToString::to_string));
+                locators.sort();
+                locators.dedup();
+                peers.push(PeerSummary {
+                    agent_id: peer.identity.agent_id().to_string(),
+                    public_key: peer.identity.public_key().to_string(),
+                    trust,
+                    locators,
+                    status,
+                    rtt_ms: None,
+                    display_name: peer.display_name.map(Into::into),
+                });
+            }
             DaemonReply::Peers {
                 ok: true,
                 peers,
                 req_id,
             }
         }
-        IpcCommand::Status { req_id } => {
-            let peers_connected = ctx
-                .peer_table
-                .list()
-                .await
-                .iter()
-                .filter(|p| p.status == ConnectionStatus::Connected)
-                .count();
-            DaemonReply::Status {
-                ok: true,
-                uptime_secs: ctx.start.elapsed().as_secs(),
-                peers_connected,
-                messages_sent: ctx.counters.sent.load(Ordering::Relaxed),
-                messages_received: ctx.counters.received.load(Ordering::Relaxed),
-                req_id,
-            }
-        }
+        IpcCommand::Status { req_id } => DaemonReply::Status {
+            ok: true,
+            uptime_secs: ctx.start.elapsed().as_secs(),
+            peers_connected: ctx.transport.connected_count().await,
+            messages_sent: ctx.counters.sent.load(Ordering::Relaxed),
+            messages_received: ctx.counters.received.load(Ordering::Relaxed),
+            req_id,
+        },
         IpcCommand::Whoami { req_id } => {
-            // Forward to IPC server which has the config info
             ctx.ipc
                 .handle_command(CommandEvent {
                     client_id,
@@ -165,89 +166,131 @@ pub(crate) async fn handle_command(cmd: CommandEvent, ctx: &DaemonContext<'_>) -
                 .await?
         }
         IpcCommand::AddPeer {
-            pubkey,
-            addr,
+            agent_id,
+            token,
             req_id,
-        } => match derive_agent_id_from_pubkey_base64(&pubkey) {
-            Err(_) => {
-                let error = IpcErrorCode::InvalidCommand;
-                DaemonReply::Error {
-                    ok: false,
-                    message: error.message(),
-                    error,
-                    req_id,
-                }
-            }
-            Ok(agent_id) => {
-                if matches!(agent_id.as_str(), id if id == ctx.local_agent_id.as_str()) {
-                    let error = IpcErrorCode::SelfSend;
-                    DaemonReply::Error {
-                        ok: false,
-                        message: error.message(),
-                        error,
+        } => match add_peer(ctx, agent_id, token).await {
+            Ok(agent_id) => DaemonReply::PeerChanged {
+                ok: true,
+                agent_id: agent_id.to_string(),
+                req_id,
+            },
+            Err(failure) => error_reply(failure, req_id),
+        },
+        IpcCommand::RemovePeer { agent_id, req_id } => {
+            match ctx.directory.remove_peer(&agent_id).await {
+                Ok(_) => {
+                    ctx.transport.close_peer(&agent_id, b"peer revoked").await;
+                    DaemonReply::PeerChanged {
+                        ok: true,
+                        agent_id: agent_id.to_string(),
                         req_id,
                     }
-                } else if ctx.peer_table.get(agent_id.as_str()).await.is_some() {
-                    let error = IpcErrorCode::InvalidCommand;
-                    DaemonReply::Error {
-                        ok: false,
-                        message: error.message(),
-                        error,
-                        req_id,
-                    }
-                } else {
-                    match resolve_static_peer(agent_id.clone(), &addr, pubkey).await {
-                        Ok(peer) => {
-                            ctx.peer_table.upsert_static(&peer).await;
-                            DaemonReply::AddPeer {
-                                ok: true,
-                                agent_id: agent_id.to_string(),
-                                req_id,
-                            }
-                        }
-                        Err(_) => {
-                            let error = IpcErrorCode::InvalidCommand;
-                            DaemonReply::Error {
-                                ok: false,
-                                message: error.message(),
-                                error,
-                                req_id,
-                            }
-                        }
-                    }
                 }
+                Err(err) => error_reply(directory_failure(err), req_id),
             }
+        }
+        IpcCommand::Serve { req_id } => match ctx.broker.register(client_id).await {
+            Ok(()) => DaemonReply::Serving {
+                ok: true,
+                serving: true,
+                req_id,
+            },
+            Err(err) => error_reply(broker_failure(err), req_id),
+        },
+        IpcCommand::Reply {
+            request_id,
+            peer,
+            kind,
+            payload,
+            req_id,
+        } => match ctx
+            .broker
+            .reply(client_id, request_id, kind.as_message_kind(), payload, peer)
+            .await
+        {
+            Ok(()) => DaemonReply::Replied {
+                ok: true,
+                request_id,
+                req_id,
+            },
+            Err(err) => error_reply(broker_failure(err), req_id),
         },
     };
 
-    ctx.ipc.send_reply(client_id, &reply).await?;
-    Ok(())
+    ctx.ipc.send_reply(client_id, &reply).await
 }
 
-// ---------------------------------------------------------------------------
-// Send helper
-// ---------------------------------------------------------------------------
+async fn add_peer(
+    ctx: &DaemonContext,
+    agent_id: Option<AgentId>,
+    token: Option<String>,
+) -> std::result::Result<AgentId, CommandFailure> {
+    match (agent_id, token) {
+        (Some(agent_id), None) => {
+            if agent_id == ctx.local_agent_id {
+                return Err(CommandFailure::new(
+                    IpcErrorCode::SelfSend,
+                    IpcErrorCode::SelfSend.message(),
+                ));
+            }
+            ctx.directory
+                .enroll_candidate(&agent_id)
+                .await
+                .map(|identity| identity.agent_id().clone())
+                .map_err(directory_failure)
+        }
+        (None, Some(token)) => {
+            let decoded = peer_token::decode(&token).map_err(|err| {
+                CommandFailure::new(IpcErrorCode::InvalidCommand, err.to_string())
+            })?;
+            let locator = PeerLocator::parse(&decoded.addr).map_err(|err| {
+                CommandFailure::new(IpcErrorCode::InvalidCommand, err.to_string())
+            })?;
+            let identity = PeerIdentity::from_parts(decoded.agent_id, &decoded.pubkey)
+                .map_err(|err| CommandFailure::new(IpcErrorCode::PeerConflict, err.to_string()))?;
+            if identity.agent_id() == &ctx.local_agent_id {
+                return Err(CommandFailure::new(
+                    IpcErrorCode::SelfSend,
+                    IpcErrorCode::SelfSend.message(),
+                ));
+            }
+            ctx.directory
+                .enroll(identity, vec![locator])
+                .await
+                .map(|identity| identity.agent_id().clone())
+                .map_err(directory_failure)
+        }
+        _ => Err(CommandFailure::new(
+            IpcErrorCode::InvalidCommand,
+            "add_peer requires exactly one of agent_id or token",
+        )),
+    }
+}
 
-async fn handle_send(
-    ctx: &DaemonContext<'_>,
-    to: String,
+async fn send(
+    ctx: &DaemonContext,
+    to: AgentId,
     kind: IpcSendKind,
     payload: serde_json::Value,
     timeout_secs: Option<u64>,
     ref_id: Option<uuid::Uuid>,
-) -> Result<(uuid::Uuid, Option<crate::message::Envelope>)> {
-    if to == ctx.local_agent_id.as_str() {
-        anyhow::bail!(DaemonIpcError::SelfSend);
+) -> std::result::Result<(uuid::Uuid, Option<Envelope>), CommandFailure> {
+    if to == ctx.local_agent_id {
+        return Err(CommandFailure::new(
+            IpcErrorCode::SelfSend,
+            IpcErrorCode::SelfSend.message(),
+        ));
     }
-
-    let peer = ctx
-        .peer_table
-        .get(&to)
-        .await
-        .ok_or_else(|| anyhow::anyhow!(DaemonIpcError::PeerNotFound))?;
-
+    if ctx.directory.get_enrolled(&to).await.is_none() {
+        return Err(CommandFailure::new(
+            IpcErrorCode::PeerNotFound,
+            IpcErrorCode::PeerNotFound.message(),
+        ));
+    }
+    let timeout = send_timeout(kind, timeout_secs)?;
     let mut envelope = Envelope::new(
-        (*ctx.local_agent_id).clone(),
+        ctx.local_agent_id.clone(),
         to.clone(),
         kind.as_message_kind(),
         payload,
@@ -255,60 +298,123 @@ async fn handle_send(
     envelope.ref_id = ref_id;
     envelope
         .validate()
-        .map_err(|e| anyhow::anyhow!(DaemonIpcError::InvalidCommand(e.to_string())))?;
-
+        .map_err(|err| CommandFailure::new(IpcErrorCode::InvalidCommand, err.to_string()))?;
     let msg_id = envelope.id;
 
-    // Timeout the send (including connection attempt) so IPC clients don't
-    // block indefinitely when the peer is unreachable over UDP/QUIC.
-    let send_timeout = match kind {
-        IpcSendKind::Request => {
-            let secs = timeout_secs.unwrap_or(REQUEST_TIMEOUT.as_secs());
-            if secs == 0 {
-                anyhow::bail!(DaemonIpcError::InvalidCommand(
-                    "timeout_secs must be >= 1".to_string()
-                ));
+    // No outer tokio::time::timeout here: dropping the send future on a
+    // deadline would skip `send_to`'s retirement of the exact failed
+    // connection and leave a stale slot registered. The budget is enforced
+    // inside the transport (dial, write, and response waits are all
+    // deadline-bounded), so every failure returns normally through the
+    // retirement path.
+    match ctx
+        .transport
+        .send_to(&ctx.directory, &to, envelope, timeout)
+        .await
+    {
+        Ok(response) => {
+            ctx.counters.sent.fetch_add(1, Ordering::Relaxed);
+            if response.is_some() {
+                ctx.counters.received.fetch_add(1, Ordering::Relaxed);
             }
-            Duration::from_secs(secs)
+            Ok((msg_id, response))
         }
-        IpcSendKind::Message => {
-            if timeout_secs.is_some() {
-                anyhow::bail!(DaemonIpcError::InvalidCommand(
-                    "timeout_secs is only valid for request kind".to_string()
-                ));
-            }
-            Duration::from_secs(10)
+        Err(err) if err.timed_out && matches!(kind, IpcSendKind::Request) => {
+            // Spec: timeouts must surface as `timeout`, never
+            // `peer_unreachable`.
+            Err(CommandFailure::new(
+                IpcErrorCode::Timeout,
+                IpcErrorCode::Timeout.message(),
+            ))
         }
-    };
-    let send_result = tokio::time::timeout(
-        send_timeout,
-        ctx.transport
-            .send_with_timeout(&peer, envelope, send_timeout),
-    )
-    .await;
-
-    match send_result {
-        Err(_elapsed) => {
-            ctx.peer_table.set_disconnected(&to).await;
-            if matches!(kind, IpcSendKind::Request) {
-                anyhow::bail!(DaemonIpcError::Timeout)
-            } else {
-                anyhow::bail!(DaemonIpcError::PeerUnreachable)
-            }
-        }
-        Ok(inner) => match inner {
-            Ok(response) => {
-                ctx.counters.sent.fetch_add(1, Ordering::Relaxed);
-                ctx.peer_table.set_connected(&to, None).await;
-                if response.is_some() {
-                    ctx.counters.received.fetch_add(1, Ordering::Relaxed);
-                }
-                Ok((msg_id, response))
-            }
-            Err(_err) => {
-                ctx.peer_table.set_disconnected(&to).await;
-                anyhow::bail!(DaemonIpcError::PeerUnreachable)
-            }
-        },
+        Err(err) => Err(CommandFailure::new(
+            IpcErrorCode::PeerUnreachable,
+            err.inner.to_string(),
+        )),
     }
 }
+
+fn send_timeout(
+    kind: IpcSendKind,
+    timeout_secs: Option<u64>,
+) -> std::result::Result<Duration, CommandFailure> {
+    match (kind, timeout_secs) {
+        (IpcSendKind::Request, Some(0)) => Err(CommandFailure::new(
+            IpcErrorCode::InvalidCommand,
+            "timeout_secs must be at least 1",
+        )),
+        // Bound before any Instant arithmetic: u64::MAX seconds would panic
+        // on `Instant::now() + timeout` inside the transport.
+        (IpcSendKind::Request, Some(secs)) if secs > MAX_REQUEST_TIMEOUT_SECS => {
+            Err(CommandFailure::new(
+                IpcErrorCode::InvalidCommand,
+                "timeout_secs exceeds the maximum allowed value",
+            ))
+        }
+        (IpcSendKind::Request, seconds) => Ok(Duration::from_secs(
+            seconds.unwrap_or(REQUEST_TIMEOUT.as_secs()),
+        )),
+        (IpcSendKind::Message, Some(_)) => Err(CommandFailure::new(
+            IpcErrorCode::InvalidCommand,
+            "timeout_secs is only valid for request kind",
+        )),
+        (IpcSendKind::Message, None) => Ok(Duration::from_secs(10)),
+    }
+}
+
+fn broker_failure(error: BrokerError) -> CommandFailure {
+    let code = match error {
+        BrokerError::HandlerBusy => IpcErrorCode::HandlerBusy,
+        BrokerError::NotHandler => IpcErrorCode::NotHandler,
+        BrokerError::RequestNotFound => IpcErrorCode::RequestNotFound,
+        BrokerError::AmbiguousRequest => IpcErrorCode::InvalidCommand,
+        BrokerError::InvalidPayload => IpcErrorCode::InvalidCommand,
+    };
+    CommandFailure::new(code, code.message())
+}
+
+fn error_reply(failure: CommandFailure, req_id: Option<String>) -> DaemonReply {
+    DaemonReply::Error {
+        ok: false,
+        error: failure.code,
+        message: failure.message,
+        req_id,
+    }
+}
+
+/// RAII holder for one reserved send-capacity slot. Dropping the guard —
+/// normally or during unwinding — releases the slot, so a panic in the send
+/// path can no longer permanently leak capacity.
+struct SendSlotGuard(std::sync::Arc<AtomicUsize>);
+
+impl Drop for SendSlotGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+/// Atomically claim one send-capacity slot. Returns `None` when the budget
+/// is exhausted. Compare-and-swap keeps the count consistent when many IPC
+/// commands race: the limit bounds exactly the sends being processed.
+fn reserve_send_slot(ctx: &DaemonContext) -> Option<()> {
+    reserve_slot(&ctx.inflight_sends, ctx.max_inflight_sends)
+}
+
+pub(crate) fn reserve_slot(counter: &AtomicUsize, max: usize) -> Option<()> {
+    loop {
+        let current = counter.load(Ordering::Relaxed);
+        if current >= max {
+            return None;
+        }
+        if counter
+            .compare_exchange_weak(current, current + 1, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+        {
+            return Some(());
+        }
+    }
+}
+
+#[cfg(test)]
+#[path = "command_handler_tests.rs"]
+mod tests;

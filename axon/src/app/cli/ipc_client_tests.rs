@@ -42,7 +42,8 @@ async fn send_ipc_rejects_oversized_command() {
         root: PathBuf::from("/tmp/axon-test-nonexistent"),
         socket: PathBuf::from("/tmp/axon-test-nonexistent/axon.sock"),
         config: PathBuf::from("/tmp/axon-test-nonexistent/config.yaml"),
-        known_peers: PathBuf::from("/tmp/axon-test-nonexistent/known_peers.json"),
+        peers: PathBuf::from("/tmp/axon-test-nonexistent/peers.json"),
+        legacy_known_peers: PathBuf::from("/tmp/axon-test-nonexistent/known_peers.json"),
         identity_key: PathBuf::from("/tmp/axon-test-nonexistent/identity.key"),
         identity_pub: PathBuf::from("/tmp/axon-test-nonexistent/identity.pub"),
     };
@@ -62,4 +63,20 @@ fn unsolicited_event_detection_uses_event_key() {
         &json!({"event": "pair_request", "agent_id": "ed25519.abc"})
     ));
     assert!(!is_unsolicited_event(&json!({"ok": true})));
+}
+
+#[test]
+fn command_line_limit_includes_the_newline() {
+    use super::validate_command_line;
+
+    // A 65,535-byte body + newline = exactly the 65,536-byte frame limit.
+    assert!(
+        validate_command_line(&"a".repeat(65_535)).is_ok(),
+        "the maximum legal body is limit-minus-one for the newline"
+    );
+    // One byte more is a 65,537-byte frame the daemon must reject; the
+    // client must refuse locally instead of sending an unframeable line.
+    assert!(validate_command_line(&"a".repeat(65_536)).is_err());
+    assert!(validate_command_line(&"a".repeat(65_537)).is_err());
+    assert!(validate_command_line("").is_ok());
 }

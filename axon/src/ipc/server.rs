@@ -7,12 +7,16 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Context, Result};
 use tokio::net::UnixListener;
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::{Mutex, broadcast, mpsc};
 use tokio_util::sync::CancellationToken;
+use tokio_util::task::TaskTracker;
 
 use super::auth;
 use super::client_handler::handle_client;
-use super::protocol::{CommandEvent, DaemonReply, IpcCommand, IpcErrorCode, WhoamiInfo};
+use super::protocol::{
+    CommandEvent, DaemonReply, EncodeLineError, IpcCommand, IpcErrorCode, WhoamiInfo,
+    encode_reply_line, error_reply_line,
+};
 use crate::message::Envelope;
 
 #[derive(Clone)]
@@ -54,6 +58,9 @@ pub struct IpcServer {
     owner_uid: u32,
     max_client_queue: usize,
     config: Arc<IpcServerConfig>,
+    disconnected_tx: broadcast::Sender<u64>,
+    cancel: CancellationToken,
+    tasks: TaskTracker,
 }
 
 impl IpcServer {
@@ -109,6 +116,7 @@ impl IpcServer {
         let owner_uid = unsafe { libc::getuid() };
         let max_client_queue = config.max_client_queue;
 
+        let (disconnected_tx, _) = broadcast::channel(256);
         let server = Self {
             socket_path,
             max_clients,
@@ -117,6 +125,9 @@ impl IpcServer {
             owner_uid,
             max_client_queue,
             config: Arc::new(config),
+            disconnected_tx,
+            cancel: CancellationToken::new(),
+            tasks: TaskTracker::new(),
         };
 
         let (cmd_tx, cmd_rx) = mpsc::channel(256);
@@ -126,8 +137,32 @@ impl IpcServer {
     }
 
     pub async fn send_reply(&self, client_id: u64, reply: &DaemonReply) -> Result<()> {
-        let line: Arc<str> =
-            Arc::from(serde_json::to_string(reply).context("failed to serialize daemon reply")?);
+        // Every outbound line passes one encoder that enforces the framed
+        // limit (newline included). An oversized reply fails EXPLICITLY:
+        // the client receives a `message_too_large` error carrying the same
+        // req_id — never a truncated payload, never a panic.
+        let line = match encode_reply_line(reply) {
+            Ok(line) => line,
+            Err(EncodeLineError::TooLarge(bytes)) => {
+                tracing::warn!(
+                    client_id,
+                    bytes,
+                    "IPC reply exceeds the line limit; delivering message_too_large instead"
+                );
+                // `error_reply_line` drops the req_id echo rather than
+                // exceed the limit: a pathological req_id (bounded at
+                // ingress, but defended here anyway) can never make the
+                // fallback itself unframeable.
+                error_reply_line(
+                    IpcErrorCode::MessageTooLarge,
+                    reply.req_id().map(str::to_string),
+                )
+                .map_err(|err| anyhow::anyhow!("failed to encode error reply: {err:?}"))?
+            }
+            Err(EncodeLineError::Serialize(err)) => {
+                anyhow::bail!("failed to serialize daemon reply: {err}")
+            }
+        };
         let tx = {
             let clients = self.clients.lock().await;
             clients.get(&client_id).map(|client| client.tx.clone())
@@ -155,23 +190,95 @@ impl IpcServer {
                 .unwrap_or_default(),
             envelope: envelope.clone(),
         };
-        let line: Arc<str> = Arc::from(serde_json::to_string(&event)?);
+        // Oversized broadcasts are dropped with a warning, never truncated:
+        // a near-limit network envelope legitimately grows past the IPC
+        // line limit once wrapped in event JSON.
+        let line = match encode_reply_line(&event) {
+            Ok(line) => line,
+            Err(EncodeLineError::TooLarge(bytes)) => {
+                tracing::warn!(
+                    bytes,
+                    msg_id = %envelope.id,
+                    "inbound envelope exceeds the IPC line limit when framed; dropping the event"
+                );
+                return Ok(());
+            }
+            Err(EncodeLineError::Serialize(err)) => {
+                anyhow::bail!("failed to serialize inbound event: {err}")
+            }
+        };
         self.broadcast_line(line).await
     }
 
-    pub async fn broadcast_pair_request(
+    pub async fn send_request_event(&self, client_id: u64, envelope: &Envelope) -> Result<()> {
+        let event = DaemonReply::RequestEvent {
+            event: "request",
+            request_id: envelope.id,
+            from: envelope
+                .from
+                .as_ref()
+                .map(ToString::to_string)
+                .unwrap_or_default(),
+            envelope: envelope.clone(),
+        };
+        // An oversized request event fails delivery explicitly: the caller
+        // (the daemon's response handler) sends the remote requester one
+        // terminal error response, per spec/IPC.md §6.2.
+        let line = match encode_reply_line(&event) {
+            Ok(line) => line,
+            Err(EncodeLineError::TooLarge(bytes)) => anyhow::bail!(
+                "IPC request event for {} exceeds the line limit ({bytes} bytes)",
+                envelope.id
+            ),
+            Err(EncodeLineError::Serialize(err)) => {
+                anyhow::bail!("failed to serialize request event: {err}")
+            }
+        };
+        let client = self.clients.lock().await.get(&client_id).cloned();
+        let Some(client) = client else {
+            anyhow::bail!("IPC request handler disconnected");
+        };
+        if client.tx.try_send(line).is_err() {
+            self.close_client(client_id).await;
+            anyhow::bail!("IPC request handler queue overflowed");
+        }
+        Ok(())
+    }
+
+    pub fn subscribe_disconnects(&self) -> broadcast::Receiver<u64> {
+        self.disconnected_tx.subscribe()
+    }
+
+    pub async fn broadcast_peer_candidate(
         &self,
         agent_id: &str,
-        pubkey: &str,
-        addr: Option<&str>,
+        public_key: &str,
+        locators: Vec<String>,
+        source: &'static str,
     ) -> Result<()> {
-        let event = DaemonReply::PairRequestEvent {
-            event: "pair_request",
+        let event = DaemonReply::PeerCandidateEvent {
+            event: "peer_candidate",
             agent_id: agent_id.to_string(),
-            pubkey: pubkey.to_string(),
-            addr: addr.map(str::to_string),
+            public_key: public_key.to_string(),
+            locators,
+            source,
         };
-        let line: Arc<str> = Arc::from(serde_json::to_string(&event)?);
+        // Same rule as inbound broadcasts: drop with a warning, never
+        // truncate. (Candidate events are small by construction; the check
+        // exists so no outbound path can bypass the framed limit.)
+        let line = match encode_reply_line(&event) {
+            Ok(line) => line,
+            Err(EncodeLineError::TooLarge(bytes)) => {
+                tracing::warn!(
+                    bytes,
+                    "peer-candidate event exceeds the IPC line limit; dropping the event"
+                );
+                return Ok(());
+            }
+            Err(EncodeLineError::Serialize(err)) => {
+                anyhow::bail!("failed to serialize peer-candidate event: {err}")
+            }
+        };
         self.broadcast_line(line).await
     }
 
@@ -191,7 +298,7 @@ impl IpcServer {
             _ => Ok(DaemonReply::Error {
                 ok: false,
                 error: IpcErrorCode::InternalError,
-                message: IpcErrorCode::InternalError.message(),
+                message: IpcErrorCode::InternalError.message().to_string(),
                 req_id: event.command.req_id().map(|s| s.to_string()),
             }),
         }
@@ -202,11 +309,18 @@ impl IpcServer {
     pub async fn close_client(&self, client_id: u64) {
         if let Some(client) = self.clients.lock().await.remove(&client_id) {
             client.cancel.cancel();
+            let _ = self.disconnected_tx.send(client_id);
         }
     }
 
     pub async fn client_count(&self) -> usize {
         self.clients.lock().await.len()
+    }
+
+    /// Ids of currently connected clients, for reconciling state that is
+    /// keyed by client when disconnect notifications are lost.
+    pub async fn connected_client_ids(&self) -> std::collections::HashSet<u64> {
+        self.clients.lock().await.keys().copied().collect()
     }
 
     pub fn socket_path(&self) -> &Path {
@@ -225,6 +339,25 @@ impl IpcServer {
         Ok(())
     }
 
+    /// Stop accepting clients, cancel every active handler, wait for owned
+    /// tasks up to the shutdown deadline, and remove the socket path.
+    pub async fn shutdown(&self) -> Result<()> {
+        self.cancel.cancel();
+        let clients = std::mem::take(&mut *self.clients.lock().await);
+        for (client_id, client) in clients {
+            client.cancel.cancel();
+            let _ = self.disconnected_tx.send(client_id);
+        }
+        self.tasks.close();
+        if tokio::time::timeout(std::time::Duration::from_secs(2), self.tasks.wait())
+            .await
+            .is_err()
+        {
+            tracing::warn!("timed out waiting for IPC tasks to stop");
+        }
+        self.cleanup_socket()
+    }
+
     async fn broadcast_line(&self, line: Arc<str>) -> Result<()> {
         let mut clients = self.clients.lock().await;
         let mut disconnected = Vec::new();
@@ -236,6 +369,7 @@ impl IpcServer {
         for client_id in disconnected {
             if let Some(client) = clients.remove(&client_id) {
                 client.cancel.cancel();
+                let _ = self.disconnected_tx.send(client_id);
             }
         }
         Ok(())
@@ -247,16 +381,26 @@ impl IpcServer {
         let max_clients = self.max_clients;
         let owner_uid = self.owner_uid;
         let max_client_queue = self.max_client_queue;
+        let disconnected_tx = self.disconnected_tx.clone();
+        let server_cancel = self.cancel.clone();
+        let tasks = self.tasks.clone();
 
-        tokio::spawn(async move {
+        self.tasks.spawn(async move {
             loop {
-                let (socket, _) = match listener.accept().await {
+                let accepted = tokio::select! {
+                    _ = server_cancel.cancelled() => break,
+                    accepted = listener.accept() => accepted,
+                };
+                let (socket, _) = match accepted {
                     Ok(v) => v,
                     Err(err) => {
                         tracing::warn!(error = %err, "failed to accept IPC connection");
                         continue;
                     }
                 };
+                if server_cancel.is_cancelled() {
+                    break;
+                }
 
                 let client_id = next_client_id.fetch_add(1, Ordering::Relaxed);
 
@@ -302,8 +446,9 @@ impl IpcServer {
 
                 let clients_for_remove = clients.clone();
                 let cmd_tx_for_client = cmd_tx.clone();
+                let disconnected_for_client = disconnected_tx.clone();
 
-                tokio::spawn(async move {
+                tasks.spawn(async move {
                     let _ = handle_client(
                         socket,
                         client_id,
@@ -315,6 +460,7 @@ impl IpcServer {
                     .await;
                     if let Some(client) = clients_for_remove.lock().await.remove(&client_id) {
                         client.cancel.cancel();
+                        let _ = disconnected_for_client.send(client_id);
                     }
                 });
             }

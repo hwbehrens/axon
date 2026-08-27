@@ -1,7 +1,11 @@
 mod config;
 mod daemon_artifacts;
-mod known_peers;
+mod peer_store;
 mod state_root;
+
+#[cfg(test)]
+#[path = "tests.rs"]
+mod tests;
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -11,7 +15,7 @@ use anyhow::{Context, Result, anyhow};
 
 pub(super) use config::check_config;
 pub(super) use daemon_artifacts::check_daemon_artifacts;
-pub(super) use known_peers::{check_duplicate_peer_addrs, check_known_peers};
+pub(super) use peer_store::check_peer_store;
 pub(super) use state_root::check_state_root;
 
 pub(super) fn backup_file_with_timestamp(path: &Path) -> Result<PathBuf> {

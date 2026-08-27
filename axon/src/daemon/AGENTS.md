@@ -8,21 +8,20 @@ Reliability > correctness > simplicity. The daemon is a lightweight router — n
 
 ## File responsibilities
 
-- `mod.rs`: Event loop, startup/shutdown, resource bounds (`MAX_CONNECTIONS`, `KEEPALIVE`, `IDLE_TIMEOUT`, `MAX_IPC_CLIENTS`, `MAX_CLIENT_QUEUE`).
+- `mod.rs`: Event loop, startup/shutdown, candidate observation, and resource bounds (`MAX_CONNECTIONS`, `KEEPALIVE`, `IDLE_TIMEOUT`, `MAX_IPC_CLIENTS`, `MAX_CLIENT_QUEUE`, `MAX_INFLIGHT_SENDS`).
 - `command_handler.rs`: IPC command dispatch to appropriate handlers.
-- `peer_events.rs`: Discovery event handling, peer table updates.
-- `reconnect.rs`: Reconnection logic with exponential backoff.
 - `lockfile.rs`: PID file management for single-instance enforcement.
 
 ## Guardrails
 
 - Do not embed protocol logic (message routing rules, envelope validation) in the daemon — that belongs in `transport/` or `message/`.
 - Maintain bounded resource usage; all constants changes require README.md update.
-- Reconnect backoff (1s initial, doubling to 30s max) must be preserved.
+- The daemon coordinates owners; peer truth belongs to `PeerDirectory`, request state to `RequestBroker`, and connection/reconnect state to `ConnectionManager`.
+- Background work must have an explicit cancellation path and be joined during bounded shutdown.
 - Lockfile semantics must prevent concurrent daemon instances.
 
 ## Test targets
 
-- Unit: `reconnect_tests.rs`, `lockfile_tests.rs`
+- Unit: `lockfile_tests.rs`
 - E2E: `axon/tests/daemon_lifecycle.rs`
 - Integration: `axon/tests/integration.rs`

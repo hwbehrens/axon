@@ -117,13 +117,12 @@ fn ipc_status_command_shape() {
     assert!(matches!(cmd, axon::ipc::IpcCommand::Status { .. }));
 }
 
-/// `spec/IPC.md` command schema: `{"cmd":"add_peer","pubkey":"...","addr":"host:port"}` is valid.
+/// `spec/IPC.md` command schema: candidate enrollment is explicit by Agent ID.
 #[test]
 fn ipc_add_peer_command_shape() {
     let cmd: axon::ipc::IpcCommand = serde_json::from_value(json!({
         "cmd": "add_peer",
-        "pubkey": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
-        "addr": "127.0.0.1:7100"
+        "agent_id": "ed25519.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
     }))
     .unwrap();
     assert!(matches!(cmd, axon::ipc::IpcCommand::AddPeer { .. }));
@@ -155,10 +154,12 @@ fn ipc_peers_response_uses_agent_id_field() {
         ok: true,
         peers: vec![axon::ipc::PeerSummary {
             agent_id: "ed25519.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
-            addr: "127.0.0.1:7100".to_string(),
-            status: "connected".to_string(),
+            public_key: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".to_string(),
+            trust: "enrolled",
+            locators: vec!["127.0.0.1:7100".to_string()],
+            status: "connected",
             rtt_ms: Some(1.23),
-            source: "static".to_string(),
+            display_name: None,
         }],
         req_id: None,
     };
@@ -174,7 +175,7 @@ fn ipc_error_response_shape() {
     let reply = axon::ipc::DaemonReply::Error {
         ok: false,
         error: axon::ipc::IpcErrorCode::PeerNotFound,
-        message: axon::ipc::IpcErrorCode::PeerNotFound.message(),
+        message: axon::ipc::IpcErrorCode::PeerNotFound.message().to_string(),
         req_id: None,
     };
     let j: Value = serde_json::to_value(&reply).unwrap();
@@ -186,25 +187,42 @@ fn ipc_error_response_shape() {
 #[test]
 fn ipc_error_codes_match_spec_table() {
     let expected = vec![
-        "invalid_command".to_string(),
-        "command_too_large".to_string(),
-        "peer_not_found".to_string(),
-        "self_send".to_string(),
-        "peer_unreachable".to_string(),
-        "timeout".to_string(),
-        "internal_error".to_string(),
+        "invalid_command",
+        "command_too_large",
+        "peer_not_found",
+        "peer_not_observed",
+        "peer_conflict",
+        "self_send",
+        "peer_unreachable",
+        "timeout",
+        "handler_busy",
+        "not_handler",
+        "request_not_found",
+        "send_capacity_exceeded",
+        "message_too_large",
+        "internal_error",
     ];
     let actual: Vec<String> = vec![
         axon::ipc::IpcErrorCode::InvalidCommand,
         axon::ipc::IpcErrorCode::CommandTooLarge,
         axon::ipc::IpcErrorCode::PeerNotFound,
+        axon::ipc::IpcErrorCode::PeerNotObserved,
+        axon::ipc::IpcErrorCode::PeerConflict,
         axon::ipc::IpcErrorCode::SelfSend,
         axon::ipc::IpcErrorCode::PeerUnreachable,
         axon::ipc::IpcErrorCode::Timeout,
+        axon::ipc::IpcErrorCode::HandlerBusy,
+        axon::ipc::IpcErrorCode::NotHandler,
+        axon::ipc::IpcErrorCode::RequestNotFound,
+        axon::ipc::IpcErrorCode::SendCapacityExceeded,
+        axon::ipc::IpcErrorCode::MessageTooLarge,
         axon::ipc::IpcErrorCode::InternalError,
     ]
     .into_iter()
-    .map(|code| code.to_string())
+    .map(|code| {
+        let value = serde_json::to_value(code).unwrap();
+        value.as_str().unwrap().to_owned()
+    })
     .collect();
 
     assert_eq!(actual, expected);
@@ -229,29 +247,30 @@ fn ipc_inbound_shape() {
     assert!(j["envelope"]["kind"].is_string());
 }
 
-/// `spec/IPC.md` pair_request events include event, agent_id, and pubkey.
+/// `spec/IPC.md` candidate events include identity, locators, and source.
 #[test]
-fn ipc_pair_request_shape() {
-    let reply = axon::ipc::DaemonReply::PairRequestEvent {
-        event: "pair_request",
+fn ipc_peer_candidate_shape() {
+    let reply = axon::ipc::DaemonReply::PeerCandidateEvent {
+        event: "peer_candidate",
         agent_id: agent_a().to_string(),
-        pubkey: "Zm9v".to_string(),
-        addr: Some("127.0.0.1:7100".to_string()),
+        public_key: "Zm9v".to_string(),
+        locators: vec!["127.0.0.1:7100".to_string()],
+        source: "mdns",
     };
     let j: Value = serde_json::to_value(&reply).unwrap();
-    assert_eq!(j["event"], "pair_request");
+    assert_eq!(j["event"], "peer_candidate");
     assert_eq!(j["agent_id"], agent_a().to_string());
-    assert_eq!(j["pubkey"], "Zm9v");
-    assert_eq!(j["addr"], "127.0.0.1:7100");
+    assert_eq!(j["public_key"], "Zm9v");
+    assert_eq!(j["locators"][0], "127.0.0.1:7100");
 }
 
 // =========================================================================
-// Config — static peers per spec §2
+// Config — local settings only
 // =========================================================================
 
-/// `spec/SPEC.md` static peer config includes agent_id, addr (ip or hostname), pubkey.
+/// `spec/SPEC.md` rejects legacy peer authority in config.yaml.
 #[tokio::test]
-async fn config_static_peers_match_spec() {
+async fn config_rejects_legacy_static_peers() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("config.yaml");
     std::fs::write(
@@ -262,25 +281,8 @@ peers:
   - agent_id: "ed25519.a1b2c3d4e5f6a7b8a1b2c3d4e5f6a7b8"
     addr: "100.64.0.5:7100"
     pubkey: "cHVia2V5MQ=="
-  - agent_id: "ed25519.b1b2c3d4e5f6a7b8a1b2c3d4e5f6a7b8"
-    addr: "localhost:7101"
-    pubkey: "cHVia2V5Mg=="
 "#,
     )
     .unwrap();
-    let config = axon::config::Config::load(&path).await.unwrap();
-    assert_eq!(config.peers.len(), 2);
-    assert_eq!(
-        config.peers[0].agent_id,
-        "ed25519.a1b2c3d4e5f6a7b8a1b2c3d4e5f6a7b8"
-    );
-    assert_eq!(config.peers[0].addr.to_string(), "100.64.0.5:7100");
-    assert_eq!(config.peers[0].pubkey, "cHVia2V5MQ==");
-    assert_eq!(
-        config.peers[1].agent_id,
-        "ed25519.b1b2c3d4e5f6a7b8a1b2c3d4e5f6a7b8"
-    );
-    assert_eq!(config.peers[1].addr.port(), 7101);
-    assert!(config.peers[1].addr.ip().is_loopback());
-    assert_eq!(config.peers[1].pubkey, "cHVia2V5Mg==");
+    assert!(axon::config::Config::load(&path).await.is_err());
 }

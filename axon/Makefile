@@ -32,7 +32,7 @@ fmt:
 
 # Lint (must be warning-free)
 lint:
-	cargo clippy -- -D warnings
+	cargo clippy --all-targets -- -D warnings
 
 # Type check only (fast)
 check:
@@ -45,7 +45,7 @@ fuzz:
 	cargo +nightly fuzz run fuzz_wire_decode -- -max_total_time=30
 	cargo +nightly fuzz run fuzz_ipc_command -- -max_total_time=30
 	cargo +nightly fuzz run fuzz_config_yaml -- -max_total_time=30
-	cargo +nightly fuzz run fuzz_known_peers -- -max_total_time=30
+	cargo +nightly fuzz run fuzz_peer_store -- -max_total_time=30
 	cargo +nightly fuzz run fuzz_envelope_roundtrip -- -max_total_time=30
 	cargo +nightly fuzz run fuzz_ipc_session -- -max_total_time=30
 	@echo "=== All fuzz targets passed ==="
@@ -71,9 +71,9 @@ coverage-lcov:
 mutants:
 	cargo mutants --timeout 120 --exclude-re 'main\.rs' -- --lib
 
-# Mutation testing (fast subset: message + config + peer_table)
+# Mutation testing (fast subset: message + config + peer directory)
 mutants-fast:
-	cargo mutants --timeout 60 --file 'src/message/**' --file 'src/config.rs' --file 'src/peer_table.rs' -- --lib
+	cargo mutants --timeout 60 --file 'src/message/**' --file 'src/config/**' --file 'src/peer_directory/**' -- --lib
 
 # Clean build artifacts
 clean:

@@ -163,7 +163,7 @@ fn config_set_port_zero_fails() {
 }
 
 #[test]
-fn connect_writes_config_and_sends_add_peer_ipc() {
+fn connect_delegates_enrollment_to_daemon_without_mutating_config() {
     let bin = axon_bin();
     let root = tempdir().expect("tempdir");
     let root_str = root.path().to_str().expect("utf8 path");
@@ -184,19 +184,19 @@ fn connect_writes_config_and_sends_add_peer_ipc() {
         run_command(Command::new(&bin).args(["--state-root", root_str, "connect", &token]));
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("Added peer"));
+    assert!(stdout.contains("Enrolled peer"));
 
     let command = server.join().expect("server thread");
     assert_eq!(command["cmd"], "add_peer");
-    assert_eq!(command["addr"], "127.0.0.1:7710");
-    assert_eq!(command["pubkey"], pubkey);
+    assert_eq!(command["token"], token);
+    assert!(command.get("addr").is_none());
+    assert!(command.get("pubkey").is_none());
 
-    let saved = fs::read_to_string(root.path().join("config.yaml")).expect("config saved");
-    assert!(saved.contains("127.0.0.1:7710"));
+    assert!(!root.path().join("config.yaml").exists());
 }
 
 #[test]
-fn connect_returns_error_when_hotload_fails_after_config_write() {
+fn connect_returns_daemon_error_without_partial_local_write() {
     let bin = axon_bin();
     let root = tempdir().expect("tempdir");
     let root_str = root.path().to_str().expect("utf8 path");
@@ -213,13 +213,10 @@ fn connect_returns_error_when_hotload_fails_after_config_write() {
 
     let output =
         run_command(Command::new(&bin).args(["--state-root", root_str, "connect", &token]));
-    assert_eq!(output.status.code(), Some(1));
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("peer saved to"));
-    assert!(stderr.contains("hot-load failed"));
-
-    let saved = fs::read_to_string(root.path().join("config.yaml")).expect("config saved");
-    assert!(saved.contains("127.0.0.1:7720"));
+    assert_eq!(output.status.code(), Some(2));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("bad peer"));
+    assert!(!root.path().join("config.yaml").exists());
 
     let command = server.join().expect("server thread");
     assert_eq!(command["cmd"], "add_peer");

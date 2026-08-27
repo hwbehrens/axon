@@ -79,7 +79,7 @@ Coverage gaps are detectable by diff when specs change.
 | Section | Topic | Primary rubric | Evidence type |
 |---|---|---|---|
 | §2 | Socket security / permissions | QUALITY §2 | test |
-| §3 | IPC commands (send, peers, status, whoami, add_peer) | QUALITY §1; DOCUMENTATION §1 | test, CLI contract |
+| §3–4 | IPC commands (send, peers, status, whoami, add/remove_peer, serve, reply) | QUALITY §1; DOCUMENTATION §1 | test, CLI contract |
 | §4 | Error codes | QUALITY §5 | test |
 | §5 | Inbound events / broadcast | QUALITY §1 | test |
 | §6 | Multiple clients / bounded queues | QUALITY §1, §4 | test |
@@ -89,10 +89,10 @@ Coverage gaps are detectable by diff when specs change.
 | Section | Topic | Primary rubric | Evidence type |
 |---|---|---|---|
 | §1 | Identity (Ed25519, agent ID) | QUALITY §1, §2 | test |
-| §2 | Discovery (mDNS, static peers) | QUALITY §1 | test, integration |
-| §3 | Transport (QUIC) | QUALITY §1, §4 | test |
-| §4 | Message format | DOCUMENTATION §1 | spec compliance |
-| §5 | Local IPC | QUALITY §1; DOCUMENTATION §1 | test |
+| §2 | Candidate discovery and explicit enrollment | QUALITY §1, §2 | test, integration |
+| §3 | Transport and connection ownership (QUIC) | QUALITY §1, §4 | test |
+| §4 | Message format and lossless kinds | DOCUMENTATION §1 | spec compliance |
+| §5 | Local IPC and request broker | QUALITY §1; DOCUMENTATION §1 | test |
 | §6 | CLI | DOCUMENTATION §2, §5 | CLI contract |
 
 ### Maintenance

@@ -10,16 +10,13 @@ Agent IDs used:
   Alice: ed25519.a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4
   Bob:   ed25519.f6e5d4c3b2a1f6e5d4c3b2a1f6e5d4c3
 
-Configuration — Static peers (config.yaml)
+Intentional peer enrollment
 ──────────────────────────────────────────────
-# ~/.axon/config.yaml (Alice's machine)
-name: alice
-peers:
-  - agent_id: "ed25519.f6e5d4c3b2a1f6e5d4c3b2a1f6e5d4c3"
-    addr: "192.168.1.42:7100"
-    pubkey: "<Bob's public_key from `axon identity --json`>"
+Bonjour discovers LAN candidates, but discovery does not grant trust:
+  1) Alice runs: axon peers
+  2) Alice runs: axon connect ed25519.f6e5d4c3b2a1f6e5d4c3b2a1f6e5d4c3
 
-Alternative one-token enrollment:
+When Bonjour is unavailable, use a token with a stable locator:
   1) Bob runs:   axon identity
   2) Alice runs: axon connect axon://<pubkey_base64url>@192.168.1.42:7100
 
@@ -35,7 +32,7 @@ $ axon daemon --port 7100
   INFO starting AXON daemon agent_id=ed25519.a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4 port=7100
 
   (The daemon binds QUIC on 0.0.0.0:7100, creates ~/.axon/axon.sock for IPC,
-   and begins connecting to any peers listed in ~/.axon/config.yaml.)
+   discovers LAN candidates, and reconnects intentionally enrolled peers.)
 
 Verbosity levels (choose based on workload):
   $ axon -q  daemon   # warn only — best for high-throughput LLM relay
@@ -54,10 +51,11 @@ $ axon peers
     "peers": [
       {{
         "agent_id": "ed25519.f6e5d4c3b2a1f6e5d4c3b2a1f6e5d4c3",
-        "addr": "192.168.1.42:7100",
+        "public_key": "<base64>",
+        "trust": "enrolled",
+        "locators": ["192.168.1.42:7100"],
         "status": "connected",
-        "rtt_ms": 1.23,
-        "source": "static"
+        "rtt_ms": 1.23
       }}
     ]
   }}
@@ -95,7 +93,8 @@ IPC Commands — Raw JSON (Unix socket)
 ──────────────────────────────────────────────
 
 All examples below are newline-delimited JSON sent over ~/.axon/axon.sock.
-All connected clients receive inbound messages as broadcast events.
+All connected clients receive fire-and-forget messages as broadcast events.
+One client may lease request handling with `serve`.
 
 # 1. Send a request (bidirectional — waits for response)
 → {{"cmd":"send","to":"ed25519.f6e5d4c3...","kind":"request","payload":{{"message":"What is 2+2?"}}}}
@@ -107,7 +106,7 @@ All connected clients receive inbound messages as broadcast events.
 
 # 3. List peers
 → {{"cmd":"peers"}}
-← {{"ok":true,"peers":[{{"agent_id":"ed25519.f6e5d4c3...","addr":"192.168.1.42:7100","status":"connected","rtt_ms":1.23,"source":"static"}}]}}
+← {{"ok":true,"peers":[{{"agent_id":"ed25519.f6e5d4c3...","public_key":"<base64>","trust":"enrolled","locators":["192.168.1.42:7100"],"status":"connected","rtt_ms":1.23}}]}}
 
 # 4. Daemon status
 → {{"cmd":"status"}}
@@ -117,13 +116,23 @@ All connected clients receive inbound messages as broadcast events.
 → {{"cmd":"whoami"}}
 ← {{"ok":true,"agent_id":"ed25519.a1b2...","public_key":"<base64>","name":"my-agent","version":"<version>","uptime_secs":3600}}
 
-# 6. Inbound message event (broadcast to connected clients; lagging clients may be disconnected)
-← {{"event":"inbound","from":"ed25519.f6e5d4c3...","envelope":{{"id":"880e8400-...","kind":"request","payload":{{"question":"Hello?"}}}}}}
+# 6. Acquire the single inbound request-handler lease
+→ {{"cmd":"serve"}}
+← {{"ok":true,"serving":true}}
+
+# 7. Answer a delivered request on its original QUIC stream
+← {{"event":"request","request_id":"880e8400-...","from":"ed25519.f6e5d4c3...","envelope":{{"id":"880e8400-...","kind":"request","payload":{{"question":"Hello?"}}}}}}
+→ {{"cmd":"reply","request_id":"880e8400-...","kind":"response","payload":{{"answer":"Hi"}}}}
+← {{"ok":true,"request_id":"880e8400-..."}}
+
+# 8. Inbound fire-and-forget event (broadcast; lagging clients are disconnected)
+← {{"event":"inbound","from":"ed25519.f6e5d4c3...","envelope":{{"id":"990e8400-...","kind":"message","payload":{{"state":"ready"}}}}}}
 
 ──────────────────────────────────────────────
 Notes
 ──────────────────────────────────────────────
 - Either side can initiate the QUIC connection; duplicates are resolved automatically.
+- Unknown peers are rejected during TLS; Bonjour candidates require explicit enrollment.
 - Messages are framed by QUIC stream FIN (no length prefix).
 - Bidirectional streams are used for request/response patterns (kind: "request").
 - Unidirectional streams are used for fire-and-forget messages (kind: "message").

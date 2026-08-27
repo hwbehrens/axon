@@ -1,5 +1,5 @@
-use super::fixtures::{make_transport_pair, make_transport_pair_with_options, peer_record};
-use crate::message::{Envelope, MessageKind};
+use super::fixtures::{make_transport_pair, make_transport_pair_with_options};
+use crate::message::{AgentId, Envelope, MessageKind};
 use crate::transport::{ResponseHandlerFn, default_error_response};
 use serde_json::json;
 use std::sync::Arc;
@@ -8,19 +8,23 @@ use std::time::Duration;
 #[tokio::test]
 async fn send_request_bidirectional_default_error() {
     let pair = make_transport_pair().await;
-    let addr_b = pair.transport_b.local_addr().expect("local_addr b");
-    let peer_b = peer_record(&pair.id_b, addr_b);
+    let peer_b = AgentId::parse(pair.id_b.agent_id()).unwrap();
 
     let request = Envelope::new(
-        pair.id_a.agent_id().to_string(),
-        pair.id_b.agent_id().to_string(),
+        AgentId::parse(pair.id_a.agent_id()).unwrap(),
+        AgentId::parse(pair.id_b.agent_id()).unwrap(),
         MessageKind::Request,
         json!({"question": "test?"}),
     );
 
     let result = pair
         .transport_a
-        .send(&peer_b, request.clone())
+        .send_to(
+            &pair.directory_a,
+            &peer_b,
+            request.clone(),
+            Duration::from_secs(5),
+        )
         .await
         .expect("send");
     let response = result.expect("expected response");
@@ -33,32 +37,36 @@ async fn send_request_rejects_invalid_bidirectional_reply() {
     let handler: ResponseHandlerFn = Arc::new(|request| {
         Box::pin(async move {
             Some(Envelope::new(
-                request.to.as_deref().unwrap().to_string(),
-                request.from.as_deref().unwrap().to_string(),
+                request.to.clone().unwrap(),
+                request.from.clone().unwrap(),
                 MessageKind::Message,
                 json!({"unexpected": true}),
             ))
         })
     });
     let pair = make_transport_pair_with_options(128, 128, Some(handler)).await;
-    let addr_b = pair.transport_b.local_addr().expect("local_addr b");
-    let peer_b = peer_record(&pair.id_b, addr_b);
+    let peer_b = AgentId::parse(pair.id_b.agent_id()).unwrap();
 
     let request = Envelope::new(
-        pair.id_a.agent_id().to_string(),
-        pair.id_b.agent_id().to_string(),
+        AgentId::parse(pair.id_a.agent_id()).unwrap(),
+        AgentId::parse(pair.id_b.agent_id()).unwrap(),
         MessageKind::Request,
         json!({"question": "test?"}),
     );
 
     let err = pair
         .transport_a
-        .send(&peer_b, request)
+        .send_to(&pair.directory_a, &peer_b, request, Duration::from_secs(5))
         .await
         .expect_err("invalid bidirectional reply should be rejected");
+    eprintln!("DEBUG err: {err:#}");
     assert!(
         err.to_string()
             .contains("bidirectional reply must use response|error kind")
+    );
+    assert!(
+        !pair.transport_a.has_connection(&peer_b).await,
+        "failed exchange must invalidate the connection slot"
     );
 }
 
@@ -74,20 +82,31 @@ async fn send_with_timeout_honors_custom_request_timeout() {
         })
     });
     let pair = make_transport_pair_with_options(128, 128, Some(handler)).await;
-    let addr_b = pair.transport_b.local_addr().expect("local_addr b");
-    let peer_b = peer_record(&pair.id_b, addr_b);
+    let peer_b = AgentId::parse(pair.id_b.agent_id()).unwrap();
 
     let request = Envelope::new(
-        pair.id_a.agent_id().to_string(),
-        pair.id_b.agent_id().to_string(),
+        AgentId::parse(pair.id_a.agent_id()).unwrap(),
+        AgentId::parse(pair.id_b.agent_id()).unwrap(),
         MessageKind::Request,
         json!({"question": "test?"}),
     );
 
     let err = pair
         .transport_a
-        .send_with_timeout(&peer_b, request, Duration::from_millis(50))
+        .send_to(
+            &pair.directory_a,
+            &peer_b,
+            request,
+            Duration::from_millis(50),
+        )
         .await
         .expect_err("custom request timeout should be enforced");
-    assert!(err.to_string().contains("request timed out after 50ms"));
+    // The whole exchange (including the refresh-and-retry dial) is bounded
+    // by the one budget, so exhaustion may surface either as the response
+    // wait timing out or as a refused redial — both are timeout failures.
+    assert!(err.timed_out, "expected a timeout failure, got: {err}");
+    assert!(
+        !pair.transport_a.has_connection(&peer_b).await,
+        "timed-out exchange must invalidate the connection slot"
+    );
 }

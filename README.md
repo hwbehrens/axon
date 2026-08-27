@@ -47,9 +47,9 @@ Agent ←→ [Unix Socket IPC] ←→ AXON Daemon ←→ [QUIC/UDP] ←→ AXON 
 Each machine runs a lightweight daemon (<5 MB RSS, negligible CPU when idle). Agents connect to it over a Unix socket and exchange structured JSON messages. The daemon handles everything else:
 
 - **Identity** — Ed25519 keypair generated on first run. `identity.key` stores a base64-encoded 32-byte seed (strictly required; non-base64 or raw legacy formats are rejected). Agent ID derived from the public key. Self-signed X.509 cert for QUIC/TLS 1.3.
-- **Discovery** — mDNS on LAN (zero-config) or static peers in `config.yaml` for VPN/Tailscale setups.
+- **Discovery** — Bonjour/mDNS finds LAN candidates; candidates remain untrusted until explicitly enrolled.
 - **Transport** — QUIC with TLS 1.3 and forward secrecy.
-- **Security** — Mutual TLS peer pinning — unknown peers rejected at the transport layer.
+- **Security** — Mutual TLS peer pinning from one durable peer directory; unknown peers are rejected during TLS.
 
 ## Quickstart
 
@@ -73,22 +73,38 @@ Use `--state-root <DIR>` (aliases: `--state`, `--root`) to override the state di
 
 ### Connect agents on a LAN
 
-If machines are on the same local network, mDNS handles everything automatically:
+If machines are on the same local network, mDNS advertises and discovers peer candidates:
 
 ```sh
 # Machine A                          # Machine B
 axon daemon                          axon daemon
 ```
 
-Within seconds they discover each other. Verify:
+Within seconds they discover each other. Inspect the candidates:
 
 ```sh
 axon peers
 ```
 
+Enrollment is intentionally explicit. On each machine, enroll the other candidate by the Agent ID shown by `axon peers`:
+
+```sh
+axon connect ed25519.<32-hex-characters>
+```
+
+Discovery alone never changes the TLS trust set.
+
+For an opt-in host-network check of the real Bonjour boundary, run:
+
+```sh
+cargo test --manifest-path axon/Cargo.toml --test mdns_live -- --ignored
+```
+
+This requires a usable non-loopback interface with local-link multicast DNS. The normal `make verify` gate remains deterministic and does not run this test.
+
 ### Connect agents over Tailscale / VPN
 
-When mDNS isn't available, configure static peers:
+When mDNS isn't available, use an identity token containing the public key and a stable VPN/DNS locator:
 
 ```sh
 # On each machine, get the share token:
@@ -96,16 +112,11 @@ axon identity
 # → axon://<pubkey_base64url>@<host-or-ip>:7100
 ```
 
-Enroll each remote peer token:
-
-```sh
-axon connect axon://<pubkey_base64url>@<peer-host-or-ip>:7100
-```
-
-Then start:
+Start the daemons with LAN discovery disabled, then enroll each remote peer token:
 
 ```sh
 axon daemon --disable-mdns
+axon connect axon://<pubkey_base64url>@<peer-host-or-ip>:7100
 ```
 
 ### Send messages
@@ -125,6 +136,12 @@ axon notify --json <agent_id> '{"state":"ready"}'
 
 # Enroll a peer from an axon:// token
 axon connect axon://<pubkey_base64url>@<host>:<port>
+
+# Enroll a currently observed LAN candidate
+axon connect ed25519.<32-hex-characters>
+
+# Revoke an enrollment and close its connection
+axon forget ed25519.<32-hex-characters>
 
 # List peers
 axon peers
@@ -185,6 +202,7 @@ axon --help
 - IPC inbound event delivery:
   - connected clients receive inbound broadcast events
   - per-client delivery uses bounded queues; lagging clients are disconnected instead of silently dropped
+  - one client may acquire the `serve` lease for inbound requests; correlated `reply` commands answer on the original QUIC stream
 - Global verbosity override:
   - `--quiet` / `-q` suppresses per-message logs (warn level only)
   - *(no flag)* — default: `info` level (logs each inbound message summary)
@@ -203,7 +221,8 @@ axon --help
   - `axon doctor` runs local health checks and prints a human-readable checklist
   - `axon doctor --json` prints the structured report (`checks`, `fixes_applied`, `ok`)
   - `axon doctor --fix` applies safe local repairs; `--rekey` (requires `--fix`) allows identity reset when key data is unrecoverable (including non-base64/legacy raw `identity.key` contents)
-  - `axon doctor` also detects duplicate peer addresses in `known_peers.json`; `--fix` prunes stale entries (keeping static or most-recently-seen peers) after creating a timestamped backup
+  - `axon doctor` validates `peers.json` without resetting corrupt trust state; malformed peer state fails closed
+  - unsupported legacy `known_peers.json` state is reported; `--fix` moves it to a timestamped backup and requires intentional re-enrollment
   - returns exit code `2` when unresolved check failures remain (`ok: false`)
 
 ### Example interaction
@@ -219,13 +238,13 @@ axon examples    # prints a full annotated example interaction
 | `request` | Bidirectional | Send a request, get a `response` or `error` |
 | `response` | Bidirectional | Reply to a request |
 | `message` | Unidirectional | Fire-and-forget |
-| `error` | Bidirectional or Unidirectional | Error reply or unsolicited error |
+| `error` | Bidirectional | Error reply to a request |
 
 See [`spec/MESSAGE_TYPES.md`](./spec/MESSAGE_TYPES.md) for message kinds and stream mapping, and [`spec/WIRE_FORMAT.md`](./spec/WIRE_FORMAT.md) for the normative wire format.
 
 ## Configuration Reference
 
-All settings are optional. AXON uses sensible defaults; you only need `config.yaml` to configure static peers or override defaults.
+All settings are optional. `config.yaml` contains local daemon settings only; peer authority is managed through the running daemon.
 
 ### `config.yaml`
 
@@ -237,26 +256,21 @@ Located at `~/.axon/config.yaml` by default (or `<state_root>/config.yaml` when 
 | `port` | `u16` | `7100` | QUIC listen port. CLI `--port` overrides this. |
 | `advertise_addr` | `String` | _(none)_ | Optional `host:port` override used by `axon identity` URI output. |
 
-#### Static peers
+Example:
 
 ```yaml
 name: alice
 port: 7100
 advertise_addr: "alice.tailnet:7100" # optional
-peers:
-  - agent_id: "ed25519.<hex>"
-    addr: "10.0.0.5:7100"            # IP:port
-    pubkey: "<base64-encoded-ed25519-public-key>"
-  - agent_id: "ed25519.<hex>"
-    addr: "my-peer.example.net:7100" # hostname:port
-    pubkey: "<base64-encoded-ed25519-public-key>"
 ```
 
-Hostname peers are resolved at startup/config load time (IPv4 preferred). Unresolvable peers are skipped with warning logs.
+Legacy `peers:` entries are rejected rather than silently imported.
 
-### Dynamic peer cache
+### Peer enrollments
 
-`known_peers.json` is an auto-managed cache for non-static peers only. Static peers remain authoritative in `config.yaml` and are not mirrored into the cache. If AXON encounters an older cache file without source metadata, it ignores that file and rebuilds the cache from fresh discovery/runtime state.
+`peers.json` is the sole durable peer-authority file. It is bounded, versioned, mode `0600`, and replaced atomically after each successful enrollment or revocation. It stores validated Agent ID/public-key bindings plus user-supplied locators. Bonjour observations, resolved DNS addresses, liveness, RTT, connection status, and retry state are ephemeral. Configured hostnames are resolved on every new connection attempt so DNS rotation is naturally refreshed.
+
+There is deliberately no legacy migration layer: remove or back up `known_peers.json`, then re-enroll peers. Do not edit `peers.json` while the daemon is running; use `axon connect` and `axon forget`.
 
 ### Internal constants
 
@@ -266,19 +280,34 @@ These are compile-time constants and cannot be changed via configuration.
 |----------|-------|----------|-------------|
 | `MAX_MESSAGE_SIZE` | `65536` (64 KB) | `message/envelope.rs` | Maximum encoded envelope size. Messages exceeding this are rejected. |
 | `REQUEST_TIMEOUT` | `30s` | `transport/mod.rs` | Timeout for bidirectional request/response exchanges. |
-| `STALE_TIMEOUT` | `60s` | `peer_table/mod.rs` | Discovered (non-static, non-cached) peers with no activity for this duration are removed. |
+| `OBSERVATION_STALE_TIMEOUT` | `60s` | `peer_directory/mod.rs` | Live discovery observations expire after this duration. Enrollments remain. |
+| `MAX_ENROLLED_PEERS` | `256` | `peer_directory/mod.rs` | Maximum durable peer enrollments. |
+| `MAX_CANDIDATE_PEERS` | `256` | `peer_directory/mod.rs` | Maximum simultaneous untrusted candidates. |
+| `MAX_LOCATORS_PER_PEER` | `8` | `peer_directory/mod.rs` | Maximum configured locators per enrollment. |
+| `MAX_OBSERVATIONS_PER_PEER` | `16` | `peer_directory/mod.rs` | Maximum live observations retained per peer. |
 | `MAX_IPC_LINE_LENGTH` | `64 KB` | `ipc/protocol.rs` | Maximum length of a single IPC command line. Overlong lines are rejected with `command_too_large`. |
 | `MAX_CONNECTIONS` | `128` | `daemon/mod.rs` | Maximum simultaneous QUIC peer connections. |
 | `KEEPALIVE` | `15s` | `daemon/mod.rs` | QUIC keepalive interval. |
 | `IDLE_TIMEOUT` | `60s` | `daemon/mod.rs` | QUIC idle timeout. Connections with no traffic for this duration are closed. |
 | `INBOUND_READ_TIMEOUT` | `10s` | `daemon/mod.rs` | Maximum time to wait for data on an inbound QUIC stream. |
+| `INBOUND_REQUEST_TIMEOUT` | `30s` | `daemon/mod.rs` | Maximum time an IPC request handler may take to reply. |
+| `MAX_PENDING_REQUESTS` | `1024` | `request_broker/mod.rs` | Maximum inbound requests awaiting the single IPC handler. |
+| `MAX_COMPLETED_CACHE_ENTRIES` | `256` | `request_broker/mod.rs` | Maximum completed-request responses retained for replay of retried exchanges. |
+| `MAX_COMPLETED_CACHE_BYTES` | `4 MiB` | `request_broker/mod.rs` | Aggregate byte budget for the completed-response replay cache. |
+| `ADMISSION_GATE_BUDGET` | `5s` | `transport/quic_transport.rs` | Upper bound on one connection-admission gate evaluation (registry lock wait + enrollment lookup); a stalled gate fails closed instead of blocking admission forever. Outbound dials use the caller's remaining exchange budget when smaller. |
+| `DIAL_TIMEOUT` | `10s` | `transport/mod.rs` | Maximum time for a single outbound QUIC dial including handshake. Also bounds how long a fresh preferred-direction candidate may replace a healthy connection-slot incumbent (the simultaneous cross-dial race window). |
+| `MAX_TRACKED_SERVICES` | `1024` | `discovery/mod.rs` | Maximum mDNS service instances tracked for stale-observation diffing; overflow evicts the oldest-inserted service and emits lost events. |
+| `MAX_REQUEST_TIMEOUT_SECS` | `3600` | `daemon/command_handler.rs` | Upper bound for caller-supplied `timeout_secs`; larger values are rejected with `invalid_command` instead of overflowing deadline arithmetic. |
 | `MAX_IPC_CLIENTS` | `64` | `daemon/mod.rs` | Maximum simultaneous IPC client connections. |
+| `IPC_OVERLONG_DRAIN_TIMEOUT` | `2s` | `ipc/client_handler.rs` | Maximum time to drain an overlong IPC line before closing the client so the error reply can be delivered. |
+| `MAX_REQ_ID_BYTES` | `1,024` | `ipc/protocol.rs` | Upper bound on the echoed `req_id`; commands with a longer `req_id` are rejected with `invalid_command` so replies stay within the framed line limit. |
+| `MAX_PEER_STORE_BYTES` | `1 MiB` | `peer_directory/store.rs` | Maximum peer-store file size on load. Non-regular files and larger stores are rejected without unbounded reads. |
 | `MAX_CLIENT_QUEUE` | `1024` | `daemon/mod.rs` | Per-IPC-client outbound message queue depth; overflow disconnects lagging clients. |
-| `RECONNECT_MAX_BACKOFF` | `30s` | `daemon/mod.rs` | Maximum backoff between reconnection attempts. Backoff starts at 1s and doubles. |
-| Save interval | `60s` | `daemon/mod.rs` | How often the daemon persists `known_peers.json` to disk. |
+| `MAX_INFLIGHT_SENDS` | `256` | `daemon/mod.rs` | Maximum concurrent outbound IPC send operations; excess `send` commands are rejected with `send_capacity_exceeded`, while control commands remain responsive. |
+| Maximum reconnect backoff | `30s` | `transport/reconnect.rs` | Maximum delay between versioned reconnect attempts. |
 | Stale cleanup interval | `5s` | `daemon/mod.rs` | How often the daemon checks for and removes stale discovered peers. |
 | Reconnect interval | `1s` | `daemon/mod.rs` | How often the daemon checks for peers needing reconnection. |
-| Initial reconnect backoff | `1s` | `daemon/reconnect.rs` | First reconnect attempt delay after a connection failure. Doubles up to `RECONNECT_MAX_BACKOFF`. |
+| Initial reconnect backoff | `1s` | `transport/reconnect.rs` | Delay after the first failed reconnect attempt; doubles to 30s. |
 
 ## Documentation
 

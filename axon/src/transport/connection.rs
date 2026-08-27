@@ -1,19 +1,18 @@
-use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use rustls::pki_types::CertificateDer;
 use serde_json::json;
-use tokio::sync::OwnedSemaphorePermit;
-use tokio::sync::{RwLock, broadcast};
+use tokio::sync::broadcast;
+use tokio::task::JoinSet;
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 use uuid::Uuid;
 
-use crate::message::{Envelope, MessageKind};
+use crate::message::{AgentId, Envelope, MessageKind};
 
 use super::MAX_MESSAGE_SIZE_USIZE;
 use super::quic_transport::ResponseHandlerFn;
@@ -43,55 +42,175 @@ pub(crate) async fn read_framed(stream: &mut quinn::RecvStream) -> Result<Vec<u8
     Ok(buf)
 }
 
+/// A transport send failure annotated with delivery ambiguity.
+///
+/// `ambiguous` is true once payload bytes may already have reached the peer:
+/// retrying such a send can duplicate application delivery, which violates
+/// AXON's documented at-most-once guarantee for fire-and-forget messages.
+/// Failures that occur before any payload byte is written are provably
+/// undelivered and safe to refresh-and-retry.
+///
+/// `timed_out` marks budget exhaustion so callers can surface the distinct
+/// `timeout` contract instead of `peer_unreachable` (spec/IPC.md §5).
+#[derive(Debug)]
+pub struct SendError {
+    /// Underlying failure.
+    pub inner: anyhow::Error,
+    /// True once payload bytes may already have reached the peer.
+    pub ambiguous: bool,
+    /// True when the failure was budget exhaustion rather than an error.
+    pub timed_out: bool,
+}
+
+impl SendError {
+    pub(crate) fn pre_send(inner: anyhow::Error) -> Self {
+        Self {
+            inner,
+            ambiguous: false,
+            timed_out: false,
+        }
+    }
+
+    fn ambiguous(inner: anyhow::Error) -> Self {
+        Self {
+            inner,
+            ambiguous: true,
+            timed_out: false,
+        }
+    }
+
+    /// Budget exhaustion before delivery (dial/handshake/write deadlines).
+    pub(crate) fn pre_send_timeout(inner: anyhow::Error) -> Self {
+        Self {
+            inner,
+            ambiguous: false,
+            timed_out: true,
+        }
+    }
+
+    /// Budget exhaustion after bytes may have been written.
+    fn timeout(inner: anyhow::Error) -> Self {
+        Self {
+            inner,
+            ambiguous: true,
+            timed_out: true,
+        }
+    }
+}
+
+impl std::fmt::Display for SendError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.inner)
+    }
+}
+
+/// Whether a failed exchange may be retried on a refreshed connection.
+/// Requests keep the single documented transport-level retry (DEC-016):
+/// their reply correlation is specified as at-most-one-reply, not
+/// exactly-once execution. Fire-and-forget kinds may only be retried when
+/// the failure is provably pre-delivery.
+pub(crate) fn retry_permitted(kind: &MessageKind, error: &SendError) -> bool {
+    kind.expects_response() || !error.ambiguous
+}
+
+/// Remaining budget before an absolute exchange deadline.
+///
+/// Recomputed immediately before EVERY await so no phase receives a fresh
+/// full budget: dialing, stream open, frame write, and response read all
+/// share one whole-exchange deadline. A caller asking for a 1-second
+/// exchange must never wait longer than 1 second in total.
+pub(crate) fn remaining_budget(
+    deadline: Instant,
+    phase: &'static str,
+) -> Result<Duration, SendError> {
+    deadline
+        .checked_duration_since(Instant::now())
+        .ok_or_else(|| SendError::pre_send_timeout(anyhow!("send budget exhausted before {phase}")))
+}
+
 pub(crate) async fn send_unidirectional(
     connection: &quinn::Connection,
     envelope: Envelope,
-) -> Result<()> {
+    deadline: Instant,
+) -> Result<(), SendError> {
     let bytes = envelope
         .wire_encode()
-        .context("failed to serialize envelope for wire")?;
+        .map_err(|err| SendError::pre_send(err.context("failed to serialize envelope for wire")))?;
 
-    let mut stream = connection
-        .open_uni()
-        .await
-        .context("failed to open uni stream")?;
-    write_framed(&mut stream, &bytes).await?;
-    stream.finish().context("failed to finish uni stream")?;
+    let mut stream = tokio::time::timeout(
+        remaining_budget(deadline, "uni stream open")?,
+        connection.open_uni(),
+    )
+    .await
+    .map_err(|_| SendError::timeout(anyhow!("uni stream open exceeded send budget")))?
+    .map_err(|err| {
+        SendError::pre_send(anyhow::Error::new(err).context("failed to open uni stream"))
+    })?;
+    // Past this point the payload may reach the peer: every failure is
+    // classified ambiguous.
+    tokio::time::timeout(
+        remaining_budget(deadline, "uni frame write")?,
+        write_framed(&mut stream, &bytes),
+    )
+    .await
+    .map_err(|_| SendError::timeout(anyhow!("uni frame write exceeded send budget")))?
+    .map_err(|err| SendError::ambiguous(err.context("uni frame write failed")))?;
+    stream.finish().map_err(|err| {
+        SendError::ambiguous(anyhow::Error::new(err).context("failed to finish uni stream"))
+    })?;
     Ok(())
 }
 
 pub(crate) async fn send_request(
     connection: &quinn::Connection,
     envelope: Envelope,
-    local_agent_id: &str,
-    request_timeout: Duration,
-) -> Result<Envelope> {
+    local_agent_id: &AgentId,
+    deadline: Instant,
+) -> Result<Envelope, SendError> {
     let bytes = envelope
         .wire_encode()
-        .context("failed to serialize request for wire")?;
+        .map_err(|err| SendError::pre_send(err.context("failed to serialize request for wire")))?;
 
-    let (mut send, mut recv) = connection
-        .open_bi()
-        .await
-        .context("failed to open bidi stream")?;
-    write_framed(&mut send, &bytes).await?;
-    send.finish().context("failed to finish request stream")?;
+    let (mut send, mut recv) = tokio::time::timeout(
+        remaining_budget(deadline, "bidi stream open")?,
+        connection.open_bi(),
+    )
+    .await
+    .map_err(|_| SendError::timeout(anyhow!("bidi stream open exceeded send budget")))?
+    .map_err(|err| {
+        SendError::pre_send(anyhow::Error::new(err).context("failed to open bidi stream"))
+    })?;
+    // Stream credits are peer-controlled: an unbounded write here would let
+    // a trusted peer stall the exchange past its deadline.
+    tokio::time::timeout(
+        remaining_budget(deadline, "request frame write")?,
+        write_framed(&mut send, &bytes),
+    )
+    .await
+    .map_err(|_| SendError::timeout(anyhow!("request frame write exceeded send budget")))?
+    .map_err(|err| SendError::ambiguous(err.context("request frame write failed")))?;
+    send.finish().map_err(|err| {
+        SendError::ambiguous(anyhow::Error::new(err).context("failed to finish request stream"))
+    })?;
 
-    let timeout_label = if request_timeout.as_millis() < 1000 {
-        format!("{}ms", request_timeout.as_millis())
+    let response_budget = remaining_budget(deadline, "response read")?;
+    let timeout_label = if response_budget.as_millis() < 1000 {
+        format!("{}ms", response_budget.as_millis())
     } else {
-        format!("{}s", request_timeout.as_secs())
+        format!("{}s", response_budget.as_secs())
     };
-    let response_bytes = timeout(request_timeout, read_framed(&mut recv))
+    let response_bytes = timeout(response_budget, read_framed(&mut recv))
         .await
-        .with_context(|| format!("request timed out after {timeout_label}"))??;
-    let mut response = serde_json::from_slice::<Envelope>(&response_bytes)
-        .context("failed to decode response envelope")?;
+        .map_err(|_| SendError::timeout(anyhow!("request timed out after {timeout_label}")))?
+        .map_err(SendError::ambiguous)?;
+    let mut response = serde_json::from_slice::<Envelope>(&response_bytes).map_err(|err| {
+        SendError::ambiguous(anyhow::Error::new(err).context("failed to decode response envelope"))
+    })?;
     response
         .validate()
-        .context("response envelope failed validation")?;
-    validate_bidi_response(&response, envelope.id)?;
-    let peer_id = derive_peer_id_from_connection(connection)?;
+        .map_err(|err| SendError::ambiguous(err.context("response envelope failed validation")))?;
+    validate_bidi_response(&response, envelope.id).map_err(SendError::ambiguous)?;
+    let peer_id = derive_peer_id_from_connection(connection).map_err(SendError::ambiguous)?;
     overwrite_authenticated_identity(&mut response, &peer_id, local_agent_id);
     Ok(response)
 }
@@ -122,7 +241,7 @@ fn validate_bidi_response(response: &Envelope, request_id: Uuid) -> Result<()> {
 pub fn default_error_response(request: &Envelope, local_agent_id: &str) -> Envelope {
     Envelope::response_to(
         request,
-        local_agent_id.to_string(),
+        AgentId::parse(local_agent_id).expect("transport local Agent ID is validated at bind"),
         MessageKind::Error,
         json!({
             "code": "unhandled",
@@ -157,7 +276,7 @@ pub(crate) fn extract_peer_pubkey_base64_from_connection(
     Ok(STANDARD.encode(key))
 }
 
-fn derive_peer_id_from_connection(connection: &quinn::Connection) -> Result<String> {
+pub(crate) fn derive_peer_id_from_connection(connection: &quinn::Connection) -> Result<String> {
     let peer_cert_pubkey_b64 = extract_peer_pubkey_base64_from_connection(connection)?;
     let pubkey_bytes = STANDARD
         .decode(&peer_cert_pubkey_b64)
@@ -165,177 +284,15 @@ fn derive_peer_id_from_connection(connection: &quinn::Connection) -> Result<Stri
     Ok(derive_agent_id_from_pubkey_bytes(&pubkey_bytes))
 }
 
-fn overwrite_authenticated_identity(envelope: &mut Envelope, peer_id: &str, local_agent_id: &str) {
-    envelope.from = Some(peer_id.into());
-    envelope.to = Some(local_agent_id.into());
-}
-
-// ---------------------------------------------------------------------------
-// Connection context — shared state for stream handlers
-// ---------------------------------------------------------------------------
-
-#[derive(Clone)]
-struct ConnectionContext {
-    connection: quinn::Connection,
-    local_agent_id: String,
-    inbound_tx: broadcast::Sender<Arc<Envelope>>,
-    connections: Arc<RwLock<HashMap<String, quinn::Connection>>>,
-    response_handler: Option<ResponseHandlerFn>,
-    inbound_read_timeout: Duration,
-}
-
-// ---------------------------------------------------------------------------
-// Unidirectional stream handler
-// ---------------------------------------------------------------------------
-
-async fn handle_uni_stream(ctx: &ConnectionContext, peer_id: &str, mut recv: quinn::RecvStream) {
-    match timeout(ctx.inbound_read_timeout, read_framed(&mut recv)).await {
-        Ok(Ok(bytes)) => match serde_json::from_slice::<Envelope>(&bytes) {
-            Ok(mut envelope) => {
-                overwrite_authenticated_identity(&mut envelope, peer_id, &ctx.local_agent_id);
-                if envelope.kind.expects_response() {
-                    debug!("dropping request kind on uni stream");
-                } else if let Err(err) = envelope.validate() {
-                    debug!(error = %err, "dropping invalid uni envelope");
-                } else {
-                    let _ = ctx.inbound_tx.send(Arc::new(envelope));
-                }
-            }
-            Err(err) => {
-                debug!(error = %err, "dropping malformed uni envelope");
-            }
-        },
-        Ok(Err(err)) => {
-            warn!(error = %err, peer = peer_id, "failed reading uni stream");
-        }
-        Err(_) => {
-            warn!(peer = peer_id, "uni stream read timed out");
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Bidirectional stream handler
-// ---------------------------------------------------------------------------
-
-/// Handle an authenticated bidi request.
-async fn handle_authenticated_bidi(
-    ctx: &ConnectionContext,
-    request: Envelope,
-    mut send: quinn::SendStream,
-) {
-    if request.kind == MessageKind::Unknown {
-        let response = Envelope::response_to(
-            &request,
-            ctx.local_agent_id.clone(),
-            MessageKind::Error,
-            json!({
-                "code": "unknown_kind",
-                "message": "unknown message kind on bidirectional stream",
-                "retryable": false,
-            }),
-        );
-        send_response(&mut send, &response).await;
-    } else if !request.kind.expects_response() {
-        // Fire-and-forget kind on a bidi stream — accept it gracefully
-        if let Err(err) = request.validate() {
-            debug!(error = %err, "dropping invalid bidi fire-and-forget envelope");
-        } else {
-            let _ = ctx.inbound_tx.send(Arc::new(request));
-        }
-        let _ = send.finish();
-    } else if let Err(err) = request.validate() {
-        let response = Envelope::response_to(
-            &request,
-            ctx.local_agent_id.clone(),
-            MessageKind::Error,
-            json!({
-                "code": "invalid_envelope",
-                "message": format!("envelope validation failed: {err}"),
-                "retryable": false,
-            }),
-        );
-        send_response(&mut send, &response).await;
-    } else {
-        let request_arc = Arc::new(request.clone());
-        let _ = ctx.inbound_tx.send(request_arc.clone());
-        let response = if let Some(ref handler) = ctx.response_handler {
-            match handler(request_arc).await {
-                Some(resp) => resp,
-                None => default_error_response(&request, &ctx.local_agent_id),
-            }
-        } else {
-            default_error_response(&request, &ctx.local_agent_id)
-        };
-        send_response(&mut send, &response).await;
-    }
-}
-
-async fn handle_bidi_stream(
-    ctx: &ConnectionContext,
+pub(super) fn overwrite_authenticated_identity(
+    envelope: &mut Envelope,
     peer_id: &str,
-    send: quinn::SendStream,
-    mut recv: quinn::RecvStream,
+    local_agent_id: &AgentId,
 ) {
-    let mut request = match timeout(ctx.inbound_read_timeout, read_framed(&mut recv)).await {
-        Ok(Ok(bytes)) => match serde_json::from_slice::<Envelope>(&bytes) {
-            Ok(r) => r,
-            Err(err) => {
-                debug!(error = %err, "dropping malformed bidi envelope");
-                return;
-            }
-        },
-        Ok(Err(err)) => {
-            warn!(error = %err, peer = peer_id, "failed reading bidi stream");
-            return;
-        }
-        Err(_) => {
-            warn!(peer = peer_id, "bidi stream read timed out");
-            return;
-        }
-    };
-
-    overwrite_authenticated_identity(&mut request, peer_id, &ctx.local_agent_id);
-    handle_authenticated_bidi(ctx, request, send).await;
-}
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-async fn send_response(send: &mut quinn::SendStream, response: &Envelope) {
-    if let Ok(response_bytes) = response.wire_encode()
-        && write_framed(send, &response_bytes).await.is_ok()
-    {
-        let _ = send.finish();
-    }
-}
-
-async fn register_connection(
-    connections: &Arc<RwLock<HashMap<String, quinn::Connection>>>,
-    peer_id: &str,
-    connection: &quinn::Connection,
-) -> usize {
-    let stable_id = connection.stable_id();
-    connections
-        .write()
-        .await
-        .insert(peer_id.to_string(), connection.clone());
-    stable_id
-}
-
-async fn unregister_connection_if_current(
-    connections: &Arc<RwLock<HashMap<String, quinn::Connection>>>,
-    peer_id: &str,
-    stable_id: usize,
-) {
-    let mut conns = connections.write().await;
-    if conns
-        .get(peer_id)
-        .is_some_and(|c| c.stable_id() == stable_id)
-    {
-        conns.remove(peer_id);
-    }
+    envelope.from = Some(
+        AgentId::parse(peer_id).expect("peer Agent ID is derived from authenticated key material"),
+    );
+    envelope.to = Some(local_agent_id.clone());
 }
 
 // ---------------------------------------------------------------------------
@@ -345,13 +302,11 @@ async fn unregister_connection_if_current(
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_connection(
     connection: quinn::Connection,
-    local_agent_id: String,
+    local_agent_id: AgentId,
     inbound_tx: broadcast::Sender<Arc<Envelope>>,
-    connections: Arc<RwLock<HashMap<String, quinn::Connection>>>,
     cancel: CancellationToken,
     response_handler: Option<ResponseHandlerFn>,
     inbound_read_timeout: Duration,
-    _connection_permit: Option<OwnedSemaphorePermit>,
 ) {
     let peer_id = match derive_peer_id_from_connection(&connection) {
         Ok(peer_id) => peer_id,
@@ -362,15 +317,12 @@ pub(crate) async fn run_connection(
     };
 
     let ctx = Arc::new(ConnectionContext {
-        connection: connection.clone(),
         local_agent_id,
         inbound_tx,
-        connections,
         response_handler,
         inbound_read_timeout,
     });
-
-    let my_stable_id = register_connection(&ctx.connections, &peer_id, &ctx.connection).await;
+    let mut streams = JoinSet::new();
 
     loop {
         tokio::select! {
@@ -383,7 +335,7 @@ pub(crate) async fn run_connection(
                     Ok(recv) => {
                         let ctx = ctx.clone();
                         let peer_id = peer_id.clone();
-                        tokio::spawn(async move {
+                        streams.spawn(async move {
                             handle_uni_stream(&ctx, &peer_id, recv).await;
                         });
                     }
@@ -395,20 +347,33 @@ pub(crate) async fn run_connection(
                     Ok((send, recv)) => {
                         let ctx = ctx.clone();
                         let peer_id = peer_id.clone();
-                        tokio::spawn(async move {
+                        streams.spawn(async move {
                             handle_bidi_stream(&ctx, &peer_id, send, recv).await;
                         });
                     }
                     Err(_) => break,
                 }
             }
+            finished = streams.join_next(), if !streams.is_empty() => {
+                // Reap completed stream tasks so handles cannot accumulate
+                // over a long-lived connection's lifetime.
+                match finished {
+                    Some(Ok(())) => {}
+                    Some(Err(err)) => warn!(error = %err, "stream task failed"),
+                    None => {}
+                }
+            }
         }
     }
 
-    // Only remove our entry if we're still the registered connection.
-    // Another connection loop (from a simultaneous dial) may have replaced us.
-    unregister_connection_if_current(&ctx.connections, &peer_id, my_stable_id).await;
+    streams.abort_all();
+    while streams.join_next().await.is_some() {}
 }
+
+#[path = "connection_streams.rs"]
+mod streams;
+
+use streams::{ConnectionContext, handle_bidi_stream, handle_uni_stream};
 
 #[cfg(test)]
 #[path = "connection_tests.rs"]

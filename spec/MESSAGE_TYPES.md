@@ -6,7 +6,7 @@ _Feb 16, 2026. Simplified architecture: 4 message kinds, opaque payloads, no han
 
 ## Message Kinds
 
-AXON defines four message kinds plus a forward-compatibility sentinel:
+AXON defines exactly four known message kinds. Receivers also retain unrecognized strings as a lossless forward-compatibility representation:
 
 | Kind | Stream Type | Expects Response? | Purpose |
 |------|-------------|-------------------|---------|
@@ -15,9 +15,9 @@ AXON defines four message kinds plus a forward-compatibility sentinel:
 | `message` | Unidirectional | No | Fire-and-forget notification |
 | `error` | Bidirectional (reply) or Unidirectional (unsolicited) | No | Failure reply to a `request`, or unsolicited error |
 
-### Forward Compatibility: `unknown`
+### Forward Compatibility: unknown strings
 
-The `MessageKind` enum uses `#[serde(other)]` to deserialize any unrecognized kind string as `Unknown`. This allows older implementations to receive messages with kinds defined in future protocol versions without failing to parse. Unknown-kind messages received on a **bidirectional** stream receive a default error response (see §Default Error Response). Unknown-kind messages received on a **unidirectional** stream are forwarded to IPC clients, allowing applications to decide how to handle future message kinds.
+An unrecognized `kind` value is not a fifth protocol kind and MUST retain its exact UTF-8 string when decoded and re-encoded. Collapsing all values to an `"unknown"` sentinel is non-conforming because it destroys forwarding information. Unknown-kind messages received on a **bidirectional** stream receive an `unsupported_kind` error containing the original bounded kind string. Unknown-kind messages received on a **unidirectional** stream are forwarded to IPC clients unchanged, allowing applications to inspect or relay future message kinds.
 
 ---
 
@@ -119,6 +119,7 @@ The `code` field is a snake\_case string. Applications may define their own erro
 | Code | Meaning |
 |------|---------|
 | `unhandled` | No handler registered for the request |
+| `unsupported_kind` | The receiver cannot apply bidirectional semantics to the supplied kind |
 
 Error messages **SHOULD** be instructive — not just "failed" but an explanation of what went wrong and what the caller might try instead.
 
@@ -169,7 +170,7 @@ AXON must be usable by any LLM agent with NO pre-existing training on the protoc
 
 1. **Self-describing CLI.** `axon --help` and `axon <command> --help` must be clear enough that an LLM reading the output can use the tool correctly. Use full English words, not abbreviations.
 
-2. **Connection bootstrap is automatic.** When two daemons discover each other (via mDNS or static config), they connect over QUIC with mutual TLS. No handshake or version negotiation is needed — the connection is ready for application messages immediately.
+2. **Discovery and trust are distinct.** Bonjour finds candidates without an address; a local `axon connect` action enrolls one. Enrolled peers then connect over QUIC with mutual TLS. No application handshake or version negotiation is needed after transport authentication.
 
 3. **Only four kinds.** `request`, `response`, `message`, `error`. An agent can learn the entire protocol in seconds. Requests get responses. Messages are fire-and-forget. Errors report failures.
 

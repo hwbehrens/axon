@@ -6,9 +6,9 @@ use anyhow::{Context, Result, anyhow};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use rcgen::{CertificateParams, DistinguishedName, DnType, KeyPair, PKCS_ED25519};
-use sha2::{Digest, Sha256};
 
 use crate::config::AxonPaths;
+use crate::message::AgentId;
 
 #[derive(Debug, Clone)]
 pub struct Identity {
@@ -157,9 +157,9 @@ fn ed25519_pkcs8_v2(seed: &[u8; 32], public_key: &[u8; 32]) -> Vec<u8> {
 }
 
 pub fn derive_agent_id(verifying_key: &VerifyingKey) -> String {
-    let digest = Sha256::digest(verifying_key.to_bytes());
-    let hex: String = digest[..16].iter().map(|b| format!("{b:02x}")).collect();
-    format!("ed25519.{hex}")
+    AgentId::from_pubkey_bytes(&verifying_key.to_bytes())
+        .expect("Ed25519 verifying keys are exactly 32 bytes")
+        .to_string()
 }
 
 #[cfg(test)]

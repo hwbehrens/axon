@@ -7,6 +7,10 @@ use axon::config::AxonPaths;
 mod checks;
 mod identity_check;
 
+#[cfg(test)]
+#[path = "artifacts_machine.rs"]
+mod artifacts_machine_tests;
+
 #[derive(Debug, Clone, Args)]
 pub struct DoctorArgs {
     /// Print machine-readable JSON report.
@@ -74,11 +78,14 @@ impl DoctorReport {
 pub async fn run(paths: &AxonPaths, args: &DoctorArgs) -> Result<DoctorReport> {
     let mut report = DoctorReport::new(paths, args.fix);
 
-    checks::check_state_root(paths, args, &mut report)?;
+    // A rejected symlinked state root means every later check would operate
+    // through an attacker-controlled directory: stop before touching it.
+    if !checks::check_state_root(paths, args, &mut report)? {
+        return Ok(report);
+    }
     identity_check::check_identity(paths, args, &mut report)?;
     checks::check_daemon_artifacts(paths, args, &mut report)?;
-    checks::check_known_peers(paths, args, &mut report).await?;
-    checks::check_duplicate_peer_addrs(paths, args, &mut report).await?;
+    checks::check_peer_store(paths, args, &mut report).await?;
     checks::check_config(paths, args, &mut report).await?;
 
     Ok(report)

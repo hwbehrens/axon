@@ -14,8 +14,8 @@ pub fn render_peers_human(response: &Value) -> Option<String> {
             .and_then(Value::as_str)
             .unwrap_or("?")
             .to_string();
-        let addr = peer
-            .get("addr")
+        let trust = peer
+            .get("trust")
             .and_then(Value::as_str)
             .unwrap_or("?")
             .to_string();
@@ -24,20 +24,27 @@ pub fn render_peers_human(response: &Value) -> Option<String> {
             .and_then(Value::as_str)
             .unwrap_or("?")
             .to_string();
-        let rtt_ms = peer
-            .get("rtt_ms")
-            .and_then(Value::as_f64)
-            .map(|v| format!("{v:.2}"))
+        let locators = peer
+            .get("locators")
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .collect::<Vec<_>>()
+                    .join(",")
+            })
+            .filter(|value| !value.is_empty())
             .unwrap_or_else(|| "-".to_string());
-        let source = peer
-            .get("source")
+        let display_name = peer
+            .get("display_name")
             .and_then(Value::as_str)
-            .unwrap_or("?")
+            .unwrap_or("-")
             .to_string();
-        rows.push([agent_id, addr, status, rtt_ms, source]);
+        rows.push([agent_id, trust, status, locators, display_name]);
     }
 
-    let mut widths = [8usize, 4usize, 6usize, 6usize, 6usize];
+    let mut widths = [8usize, 5usize, 6usize, 8usize, 4usize];
     for row in &rows {
         for (idx, cell) in row.iter().enumerate() {
             widths[idx] = widths[idx].max(cell.len());
@@ -46,12 +53,12 @@ pub fn render_peers_human(response: &Value) -> Option<String> {
 
     let mut out = String::new();
     out.push_str(&format!(
-        "{:<w0$}  {:<w1$}  {:<w2$}  {:>w3$}  {:<w4$}\n",
+        "{:<w0$}  {:<w1$}  {:<w2$}  {:<w3$}  {:<w4$}\n",
         "AGENT_ID",
-        "ADDR",
+        "TRUST",
         "STATUS",
-        "RTT_MS",
-        "SOURCE",
+        "LOCATORS",
+        "NAME",
         w0 = widths[0],
         w1 = widths[1],
         w2 = widths[2],
@@ -70,7 +77,7 @@ pub fn render_peers_human(response: &Value) -> Option<String> {
 
     for row in rows {
         out.push_str(&format!(
-            "{:<w0$}  {:<w1$}  {:<w2$}  {:>w3$}  {:<w4$}\n",
+            "{:<w0$}  {:<w1$}  {:<w2$}  {:<w3$}  {:<w4$}\n",
             row[0],
             row[1],
             row[2],

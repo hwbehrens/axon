@@ -2,9 +2,11 @@ use std::fmt;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Result, bail};
-use serde::{Deserialize, Serialize};
+use base64::{Engine as _, engine::general_purpose::STANDARD};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 use serde_json::value::RawValue;
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 /// AXON message kind — determines stream mapping.
@@ -13,49 +15,128 @@ use uuid::Uuid;
 /// - `Response` → bidirectional stream (reply to a `Request`)
 /// - `Message` → unidirectional stream (fire-and-forget)
 /// - `Error` → bidirectional stream (error reply to a `Request`)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum MessageKind {
     Request,
     Response,
     Message,
     Error,
-    #[serde(other)]
-    Unknown,
+    Unknown(Box<str>),
 }
 
 impl MessageKind {
-    pub fn expects_response(self) -> bool {
+    pub fn expects_response(&self) -> bool {
         matches!(self, MessageKind::Request)
     }
 
-    pub fn is_response(self) -> bool {
+    pub fn is_response(&self) -> bool {
         matches!(self, MessageKind::Response | MessageKind::Error)
+    }
+
+    pub fn is_allowed_on_unidirectional(&self) -> bool {
+        matches!(
+            self,
+            MessageKind::Message | MessageKind::Error | MessageKind::Unknown(_)
+        )
+    }
+
+    pub fn unknown(value: impl Into<Box<str>>) -> Self {
+        Self::Unknown(value.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        match self {
+            MessageKind::Request => "request",
+            MessageKind::Response => "response",
+            MessageKind::Message => "message",
+            MessageKind::Error => "error",
+            MessageKind::Unknown(value) => value,
+        }
     }
 }
 
 impl fmt::Display for MessageKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let s = match self {
-            MessageKind::Request => "request",
-            MessageKind::Response => "response",
-            MessageKind::Message => "message",
-            MessageKind::Error => "error",
-            MessageKind::Unknown => "unknown",
-        };
-        f.write_str(s)
+        f.write_str(self.as_str())
+    }
+}
+
+impl Serialize for MessageKind {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for MessageKind {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Ok(match value.as_str() {
+            "request" => Self::Request,
+            "response" => Self::Response,
+            "message" => Self::Message,
+            "error" => Self::Error,
+            _ => Self::Unknown(value.into_boxed_str()),
+        })
     }
 }
 
 /// Typed agent identity string (e.g. `ed25519.<32 hex chars>`).
 ///
-/// See `spec/SPEC.md` §1 and `spec/WIRE_FORMAT.md` §3 for derivation rules.
+/// See `spec/SPEC.md` §1 and `spec/WIRE_FORMAT.md` §2.2 for derivation rules.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct AgentId(String);
 
 impl AgentId {
-    pub fn new(id: String) -> Self {
-        Self(id)
+    pub const PREFIX: &'static str = "ed25519.";
+    pub const HEX_LENGTH: usize = 32;
+
+    pub fn parse(input: &str) -> Result<Self> {
+        let (prefix, hex) = input
+            .split_once('.')
+            .ok_or_else(|| anyhow::anyhow!("agent_id must contain an algorithm prefix"))?;
+        if !prefix.eq_ignore_ascii_case("ed25519") {
+            bail!("unsupported agent_id algorithm '{prefix}'");
+        }
+        if hex.len() != Self::HEX_LENGTH || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+            bail!("agent_id must contain exactly 32 hexadecimal characters");
+        }
+        Ok(Self(format!(
+            "{}{}",
+            Self::PREFIX,
+            hex.to_ascii_lowercase()
+        )))
+    }
+
+    pub fn from_pubkey_bytes(pubkey: &[u8]) -> Result<Self> {
+        if pubkey.len() != 32 {
+            bail!(
+                "Ed25519 public key must contain exactly 32 bytes, got {}",
+                pubkey.len()
+            );
+        }
+        let digest = Sha256::digest(pubkey);
+        let hex: String = digest[..16]
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        Ok(Self(format!("{}{hex}", Self::PREFIX)))
+    }
+
+    pub fn from_pubkey_base64(pubkey: &str) -> Result<Self> {
+        let bytes = STANDARD
+            .decode(pubkey.trim())
+            .map_err(|err| anyhow::anyhow!("public key is not valid base64: {err}"))?;
+        Self::from_pubkey_bytes(&bytes)
+    }
+
+    pub fn matches_pubkey_base64(&self, pubkey: &str) -> Result<bool> {
+        Ok(*self == Self::from_pubkey_base64(pubkey)?)
     }
 
     pub fn as_str(&self) -> &str {
@@ -69,15 +150,19 @@ impl std::fmt::Display for AgentId {
     }
 }
 
-impl From<String> for AgentId {
-    fn from(s: String) -> Self {
-        Self(s)
+impl TryFrom<String> for AgentId {
+    type Error = anyhow::Error;
+
+    fn try_from(value: String) -> Result<Self> {
+        Self::parse(&value)
     }
 }
 
-impl From<&str> for AgentId {
-    fn from(s: &str) -> Self {
-        Self(s.to_string())
+impl TryFrom<&str> for AgentId {
+    type Error = anyhow::Error;
+
+    fn try_from(value: &str) -> Result<Self> {
+        Self::parse(value)
     }
 }
 
@@ -131,7 +216,8 @@ impl<'de> serde::Deserialize<'de> for AgentId {
     fn deserialize<D: serde::Deserializer<'de>>(
         deserializer: D,
     ) -> std::result::Result<Self, D::Error> {
-        String::deserialize(deserializer).map(Self)
+        let raw = String::deserialize(deserializer)?;
+        Self::parse(&raw).map_err(serde::de::Error::custom)
     }
 }
 
@@ -181,25 +267,20 @@ impl Envelope {
         Ok(serde_json::from_str(self.payload.get())?)
     }
 
-    pub fn new(
-        from: impl Into<AgentId>,
-        to: impl Into<AgentId>,
-        kind: MessageKind,
-        payload: Value,
-    ) -> Self {
+    pub fn new(from: AgentId, to: AgentId, kind: MessageKind, payload: Value) -> Self {
         Self {
             id: Uuid::new_v4(),
             kind,
             ref_id: None,
             payload: Self::raw_json(&payload),
-            from: Some(from.into()),
-            to: Some(to.into()),
+            from: Some(from),
+            to: Some(to),
         }
     }
 
     pub fn response_to(
         request: &Envelope,
-        from: impl Into<AgentId>,
+        from: AgentId,
         kind: MessageKind,
         payload: Value,
     ) -> Self {
@@ -208,7 +289,7 @@ impl Envelope {
             kind,
             ref_id: Some(request.id),
             payload: Self::raw_json(&payload),
-            from: Some(from.into()),
+            from: Some(from),
             to: request.from.clone(),
         }
     }

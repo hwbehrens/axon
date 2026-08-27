@@ -3,7 +3,6 @@ use base64::{
     Engine as _,
     engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
 };
-use sha2::{Digest, Sha256};
 
 use crate::message::AgentId;
 
@@ -96,9 +95,8 @@ fn validate_addr(addr: &str) -> Result<()> {
 }
 
 fn derive_agent_id(key_bytes: &[u8]) -> AgentId {
-    let digest = Sha256::digest(key_bytes);
-    let hex: String = digest[..16].iter().map(|b| format!("{b:02x}")).collect();
-    AgentId::from(format!("ed25519.{hex}"))
+    AgentId::from_pubkey_bytes(key_bytes)
+        .expect("peer token public key length is validated before derivation")
 }
 
 #[cfg(test)]

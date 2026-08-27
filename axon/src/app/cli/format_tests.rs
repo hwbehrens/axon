@@ -8,16 +8,20 @@ fn peers_renderer_outputs_table_headers() {
         "ok": true,
         "peers": [{
             "agent_id": "ed25519.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-            "addr": "127.0.0.1:7100",
+            "public_key": "Zm9v",
+            "trust": "enrolled",
+            "locators": ["127.0.0.1:7100"],
             "status": "connected",
-            "rtt_ms": 1.25,
-            "source": "static"
+            "display_name": "alice"
         }]
     }))
     .expect("table output");
 
     assert!(output.contains("AGENT_ID"));
+    assert!(output.contains("TRUST"));
+    assert!(output.contains("enrolled"));
     assert!(output.contains("127.0.0.1:7100"));
+    assert!(output.contains("alice"));
 }
 
 #[test]

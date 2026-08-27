@@ -1,177 +1,112 @@
-//! Daemon lifecycle integration tests.
-//!
-//! These tests exercise full daemon startup, shutdown, and reconnection
-//! behaviors. They spin up real daemon instances in spawned tasks with
-//! temp directories and CancellationTokens for controlled lifecycle.
-//!
-//! These are longer-running e2e tests (~10s).
-
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::Duration;
 
-use axon::config::{AxonPaths, StaticPeerConfig};
+use axon::config::AxonPaths;
 use axon::daemon::{DaemonOptions, run_daemon};
-use axon::identity::Identity;
 use serde_json::{Value, json};
 use tempfile::tempdir;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
-use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 
-#[path = "daemon_lifecycle/basic.rs"]
-mod basic;
-#[path = "daemon_lifecycle/messaging.rs"]
-mod messaging;
-
-// =========================================================================
-// Helpers
-// =========================================================================
-
-/// Bind a UDP socket to port 0 and return the OS-assigned port.
-fn pick_free_port() -> u16 {
-    let sock = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
-    sock.local_addr().unwrap().port()
+fn free_port() -> u16 {
+    std::net::UdpSocket::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
 }
 
-fn axon_bin() -> PathBuf {
-    if let Some(bin) = std::env::var_os("CARGO_BIN_EXE_axon") {
-        return PathBuf::from(bin);
+async fn wait_for_socket(path: &std::path::Path) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while !path.exists() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "socket did not appear"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
     }
-
-    let current = std::env::current_exe().expect("resolve current test executable");
-    let debug_dir = current
-        .parent()
-        .and_then(Path::parent)
-        .expect("resolve target debug dir");
-    let fallback = if cfg!(windows) {
-        debug_dir.join("axon.exe")
-    } else {
-        debug_dir.join("axon")
-    };
-    assert!(
-        fallback.exists(),
-        "failed to locate axon binary via CARGO_BIN_EXE_axon and fallback path {}",
-        fallback.display()
-    );
-    fallback
 }
 
-/// Start a daemon in a background task, returning its cancel token and paths.
-fn spawn_daemon(
-    dir: &std::path::Path,
-    port: u16,
-    disable_mdns: bool,
-    peers: Vec<StaticPeerConfig>,
-) -> (
-    CancellationToken,
-    AxonPaths,
-    tokio::task::JoinHandle<anyhow::Result<()>>,
-) {
+async fn ipc(path: &std::path::Path, command: Value) -> Value {
+    let mut stream = UnixStream::connect(path).await.unwrap();
+    stream
+        .write_all(format!("{command}\n").as_bytes())
+        .await
+        .unwrap();
+    let mut line = String::new();
+    BufReader::new(stream).read_line(&mut line).await.unwrap();
+    serde_json::from_str(&line).unwrap()
+}
+
+#[tokio::test]
+async fn daemon_starts_serves_ipc_and_shuts_down_cleanly() {
+    let root = tempdir().unwrap();
+    let paths = AxonPaths::from_root(PathBuf::from(root.path()));
     let cancel = CancellationToken::new();
-    let paths = AxonPaths::from_root(PathBuf::from(dir));
+    let task_cancel = cancel.clone();
+    let root_path = root.path().to_path_buf();
+    let task = tokio::spawn(async move {
+        run_daemon(DaemonOptions {
+            port: Some(free_port()),
+            disable_mdns: true,
+            axon_root: Some(root_path),
+            cancel: Some(task_cancel),
+            max_inflight_sends: None,
+        })
+        .await
+    });
+    wait_for_socket(&paths.socket).await;
+    let reply = ipc(&paths.socket, json!({"cmd": "whoami"})).await;
+    assert_eq!(reply["ok"], true);
+    assert!(reply["agent_id"].as_str().unwrap().starts_with("ed25519."));
+
+    cancel.cancel();
+    tokio::time::timeout(Duration::from_secs(5), task)
+        .await
+        .expect("shutdown timeout")
+        .expect("daemon task")
+        .expect("daemon result");
+    assert!(!paths.socket.exists());
+}
+
+#[tokio::test]
+async fn daemon_rejects_legacy_peer_cache_without_importing_it() {
+    let root = tempdir().unwrap();
+    let paths = AxonPaths::from_root(PathBuf::from(root.path()));
     paths.ensure_root_exists().unwrap();
+    std::fs::write(&paths.legacy_known_peers, b"[]").unwrap();
+    let error = run_daemon(DaemonOptions {
+        port: Some(free_port()),
+        disable_mdns: true,
+        axon_root: Some(root.path().to_path_buf()),
+        cancel: Some(CancellationToken::new()),
+        max_inflight_sends: None,
+    })
+    .await
+    .expect_err("legacy state must fail closed");
+    assert!(error.to_string().contains("re-enroll"));
+    assert!(!paths.peers.exists());
+}
 
-    // Write static peer config if any.
-    if !peers.is_empty() {
-        let config = axon::config::Config {
-            port: Some(port),
-            peers,
-            ..Default::default()
-        };
-        let yaml = serde_yaml::to_string(&config).unwrap();
-        std::fs::write(&paths.config, yaml).unwrap();
-    }
+#[tokio::test]
+async fn transport_bind_failure_cleans_up_ipc_and_lock() {
+    let root = tempdir().unwrap();
+    let paths = AxonPaths::from_root(PathBuf::from(root.path()));
+    let occupied = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    let port = occupied.local_addr().unwrap().port();
 
-    let opts = DaemonOptions {
+    let error = run_daemon(DaemonOptions {
         port: Some(port),
-        disable_mdns,
-        axon_root: Some(PathBuf::from(dir)),
-        cancel: Some(cancel.clone()),
-    };
+        disable_mdns: true,
+        axon_root: Some(root.path().to_path_buf()),
+        cancel: Some(CancellationToken::new()),
+        max_inflight_sends: None,
+    })
+    .await
+    .expect_err("occupied QUIC port must fail startup");
 
-    let handle = tokio::spawn(async move { run_daemon(opts).await });
-
-    (cancel, paths, handle)
-}
-
-/// Wait until the IPC socket file appears, with a timeout.
-async fn wait_for_socket(paths: &AxonPaths, timeout_dur: Duration) -> bool {
-    let deadline = tokio::time::Instant::now() + timeout_dur;
-    loop {
-        if paths.socket.exists() {
-            return true;
-        }
-        if tokio::time::Instant::now() >= deadline {
-            return false;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-}
-
-/// Poll the peers IPC command until a specific peer is NOT "connected", with a timeout.
-async fn wait_for_peer_disconnected(
-    socket_path: &std::path::Path,
-    peer_agent_id: &str,
-    timeout_dur: Duration,
-) -> bool {
-    let deadline = tokio::time::Instant::now() + timeout_dur;
-    loop {
-        if tokio::time::Instant::now() >= deadline {
-            return false;
-        }
-        if let Ok(resp) = ipc_command(socket_path, json!({"cmd": "peers"})).await {
-            if let Some(peers) = resp["peers"].as_array() {
-                let is_connected = peers.iter().any(|p| {
-                    p["agent_id"].as_str() == Some(peer_agent_id)
-                        && p["status"].as_str() == Some("connected")
-                });
-                if !is_connected {
-                    return true;
-                }
-            }
-        }
-        tokio::time::sleep(Duration::from_millis(200)).await;
-    }
-}
-
-/// Poll the peers IPC command until a specific peer shows as "connected", with a timeout.
-async fn wait_for_peer_connected(
-    socket_path: &std::path::Path,
-    peer_agent_id: &str,
-    timeout_dur: Duration,
-) -> bool {
-    let deadline = tokio::time::Instant::now() + timeout_dur;
-    loop {
-        if tokio::time::Instant::now() >= deadline {
-            return false;
-        }
-        if let Ok(resp) = ipc_command(socket_path, json!({"cmd": "peers"})).await {
-            if let Some(peers) = resp["peers"].as_array() {
-                if peers.iter().any(|p| {
-                    p["agent_id"].as_str() == Some(peer_agent_id)
-                        && p["status"].as_str() == Some("connected")
-                }) {
-                    return true;
-                }
-            }
-        }
-        tokio::time::sleep(Duration::from_millis(200)).await;
-    }
-}
-
-/// Send a JSON command over IPC and read one response line.
-async fn ipc_command(socket_path: &std::path::Path, command: Value) -> anyhow::Result<Value> {
-    let mut stream = UnixStream::connect(socket_path).await?;
-    let line = serde_json::to_string(&command)?;
-    stream.write_all(line.as_bytes()).await?;
-    stream.write_all(b"\n").await?;
-
-    let mut reader = BufReader::new(stream);
-    let mut response = String::new();
-    let bytes = timeout(Duration::from_secs(5), reader.read_line(&mut response)).await??;
-    if bytes == 0 {
-        anyhow::bail!("daemon closed connection");
-    }
-    Ok(serde_json::from_str(response.trim())?)
+    assert!(error.to_string().contains("bind"));
+    assert!(!paths.socket.exists());
+    assert!(!root.path().join("daemon.pid").exists());
 }

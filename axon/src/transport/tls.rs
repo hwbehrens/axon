@@ -11,14 +11,13 @@ use rustls::DistinguishedName;
 use rustls::client::danger::{ServerCertVerified, ServerCertVerifier};
 use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer, ServerName};
 use rustls::server::danger::{ClientCertVerified, ClientCertVerifier};
-use sha2::{Digest, Sha256};
 use tokio::sync::broadcast;
 use tracing::warn;
 use x509_parser::prelude::*;
 
 use crate::identity::QuicCertificate;
-use crate::message::Envelope;
-use crate::peer_table::PubkeyMap;
+use crate::message::{AgentId, Envelope};
+use crate::peer_directory::PinningSnapshotHandle;
 use crate::transport::PairRequest;
 
 static CRYPTO_PROVIDER: OnceLock<()> = OnceLock::new();
@@ -35,29 +34,7 @@ fn ensure_crypto_provider() {
 }
 
 fn canonicalize_agent_id(input: &str) -> Option<String> {
-    let (prefix, hex) = input.split_once('.')?;
-    if hex.len() != 32 || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
-        return None;
-    }
-    Some(format!(
-        "{}.{}",
-        prefix.to_ascii_lowercase(),
-        hex.to_ascii_lowercase()
-    ))
-}
-
-fn lookup_expected_pubkey<'a>(
-    expected: &'a HashMap<String, String>,
-    canonical_agent_id: &str,
-) -> Option<&'a String> {
-    expected.get(canonical_agent_id).or_else(|| {
-        expected.iter().find_map(|(agent_id, pubkey)| {
-            canonicalize_agent_id(agent_id)
-                .as_deref()
-                .is_some_and(|id| id == canonical_agent_id)
-                .then_some(pubkey)
-        })
-    })
+    AgentId::parse(input).ok().map(|id| id.to_string())
 }
 
 pub(crate) async fn with_handshake_remote_addr<F, T>(addr: SocketAddr, fut: F) -> T
@@ -74,7 +51,7 @@ fn current_handshake_remote_addr() -> Option<SocketAddr> {
 pub(crate) fn build_endpoint(
     bind_addr: SocketAddr,
     cert: &QuicCertificate,
-    expected_pubkeys: PubkeyMap,
+    expected_pubkeys: PinningSnapshotHandle,
     keepalive: Duration,
     idle_timeout: Duration,
 ) -> Result<(
@@ -153,14 +130,14 @@ pub(crate) fn build_endpoint(
 
 #[derive(Debug)]
 struct PeerCertVerifier {
-    expected_pubkeys: PubkeyMap,
+    expected_pubkeys: PinningSnapshotHandle,
     pair_request_tx: broadcast::Sender<PairRequest>,
     pair_request_seen: Arc<Mutex<HashMap<String, Instant>>>,
 }
 
 #[derive(Debug)]
 struct PeerClientCertVerifier {
-    expected_pubkeys: PubkeyMap,
+    expected_pubkeys: PinningSnapshotHandle,
     roots: Vec<DistinguishedName>,
     pair_request_tx: broadcast::Sender<PairRequest>,
     pair_request_seen: Arc<Mutex<HashMap<String, Instant>>>,
@@ -177,13 +154,16 @@ fn maybe_emit_pair_request(
 ) {
     let now = Instant::now();
     let should_emit = match seen.lock() {
-        Ok(mut guard) => match guard.get(agent_id) {
-            Some(last) if now.duration_since(*last) < PAIR_REQUEST_LOG_WINDOW => false,
-            _ => {
-                guard.insert(agent_id.to_string(), now);
-                true
+        Ok(mut guard) => {
+            guard.retain(|_, last| now.duration_since(*last) < PAIR_REQUEST_LOG_WINDOW);
+            match guard.get(agent_id) {
+                Some(_) => false,
+                None => {
+                    guard.insert(agent_id.to_string(), now);
+                    true
+                }
             }
-        },
+        }
         Err(_) => true,
     };
 
@@ -234,10 +214,10 @@ impl ServerCertVerifier for PeerCertVerifier {
             .expected_pubkeys
             .read()
             .map_err(|_| rustls::Error::General("expected peer table lock poisoned".to_string()))?;
-        if let Some(expected_pubkey_b64) = lookup_expected_pubkey(&expected, &expected_agent_id) {
+        if let Some(expected_pubkey_b64) = expected.get(&expected_agent_id) {
             if cert_key_b64 != *expected_pubkey_b64 {
                 return Err(rustls::Error::General(
-                    "server cert public key mismatch against discovery data".to_string(),
+                    "server cert public key mismatch against enrolled pin".to_string(),
                 ));
             }
         } else {
@@ -249,8 +229,8 @@ impl ServerCertVerifier for PeerCertVerifier {
                 current_handshake_remote_addr().map(|addr| addr.to_string()),
             );
             return Err(rustls::Error::General(format!(
-                "rejecting unknown server peer {expected_agent_id}: no public key on record from discovery. \
-                 Add this peer to config.yaml (or run `axon connect <token>`) or ensure mDNS discovery has seen it first."
+                "rejecting unknown server peer {expected_agent_id}: no enrolled public key. \
+                 Inspect candidates and run `axon connect <agent_id-or-token>` before retrying."
             )));
         }
 
@@ -314,10 +294,10 @@ impl ClientCertVerifier for PeerClientCertVerifier {
             .expected_pubkeys
             .read()
             .map_err(|_| rustls::Error::General("expected peer table lock poisoned".to_string()))?;
-        if let Some(expected_pubkey_b64) = lookup_expected_pubkey(&expected, &agent_id) {
+        if let Some(expected_pubkey_b64) = expected.get(&agent_id) {
             if &cert_pubkey_b64 != expected_pubkey_b64 {
                 return Err(rustls::Error::General(
-                    "client cert public key does not match discovered peer key".to_string(),
+                    "client cert public key does not match enrolled pin".to_string(),
                 ));
             }
         } else {
@@ -329,8 +309,8 @@ impl ClientCertVerifier for PeerClientCertVerifier {
                 current_handshake_remote_addr().map(|addr| addr.to_string()),
             );
             return Err(rustls::Error::General(format!(
-                "rejecting unknown client peer {agent_id}: no public key on record from discovery. \
-                 Add this peer to config.yaml (or run `axon connect <token>`) or ensure mDNS discovery has seen it first."
+                "rejecting unknown client peer {agent_id}: no enrolled public key. \
+                 Inspect candidates and run `axon connect <agent_id-or-token>` before retrying."
             )));
         }
 
@@ -395,9 +375,9 @@ fn extract_subject_dn_from_cert_der(cert_der: &[u8]) -> Result<Vec<u8>> {
 }
 
 pub(crate) fn derive_agent_id_from_pubkey_bytes(pubkey: &[u8]) -> String {
-    let digest = Sha256::digest(pubkey);
-    let hex: String = digest[..16].iter().map(|b| format!("{b:02x}")).collect();
-    format!("ed25519.{hex}")
+    AgentId::from_pubkey_bytes(pubkey)
+        .expect("certificate verifier requires a 32-byte Ed25519 public key")
+        .to_string()
 }
 
 #[cfg(test)]

@@ -4,8 +4,9 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 
 use serde_json::json;
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::{Mutex, broadcast, mpsc};
 use tokio_util::sync::CancellationToken;
+use tokio_util::task::TaskTracker;
 
 use super::*;
 use crate::message::MessageKind;
@@ -31,6 +32,9 @@ fn test_server_with_clients(clients: HashMap<u64, mpsc::Sender<Arc<str>>>) -> Ip
         owner_uid: 0,
         max_client_queue: 8,
         config: Arc::new(IpcServerConfig::default()),
+        disconnected_tx: broadcast::channel(8).0,
+        cancel: CancellationToken::new(),
+        tasks: TaskTracker::new(),
     }
 }
 
@@ -49,8 +53,8 @@ async fn broadcast_inbound_disconnects_full_client_queue() {
     let server = test_server_with_clients(clients);
 
     let envelope = Envelope::new(
-        "ed25519.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        "ed25519.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        crate::message::AgentId::parse("ed25519.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").unwrap(),
+        crate::message::AgentId::parse("ed25519.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb").unwrap(),
         MessageKind::Message,
         json!({"data": "x"}),
     );
@@ -96,6 +100,9 @@ async fn close_client_cancels_client_handle() {
         owner_uid: 0,
         max_client_queue: 8,
         config: Arc::new(IpcServerConfig::default()),
+        disconnected_tx: broadcast::channel(8).0,
+        cancel: CancellationToken::new(),
+        tasks: TaskTracker::new(),
     };
 
     server.close_client(7).await;
@@ -108,7 +115,7 @@ async fn close_client_cancels_client_handle() {
 }
 
 #[tokio::test]
-async fn broadcast_pair_request_reaches_connected_clients() {
+async fn broadcast_peer_candidate_reaches_connected_clients() {
     let (tx_a, mut rx_a) = mpsc::channel::<Arc<str>>(8);
     let (tx_b, mut rx_b) = mpsc::channel::<Arc<str>>(8);
 
@@ -118,10 +125,11 @@ async fn broadcast_pair_request_reaches_connected_clients() {
     let server = test_server_with_clients(clients);
 
     server
-        .broadcast_pair_request(
+        .broadcast_peer_candidate(
             "ed25519.cccccccccccccccccccccccccccccccc",
             "cHVia2V5",
-            Some("127.0.0.1:7100"),
+            vec!["127.0.0.1:7100".to_string()],
+            "handshake",
         )
         .await
         .expect("pair request broadcast");
@@ -129,8 +137,146 @@ async fn broadcast_pair_request_reaches_connected_clients() {
     let line_a = rx_a.recv().await.expect("client A event");
     let line_b = rx_b.recv().await.expect("client B event");
 
-    assert!(line_a.contains("\"event\":\"pair_request\""));
-    assert!(line_a.contains("\"pubkey\":\"cHVia2V5\""));
-    assert!(line_b.contains("\"event\":\"pair_request\""));
+    assert!(line_a.contains("\"event\":\"peer_candidate\""));
+    assert!(line_a.contains("\"public_key\":\"cHVia2V5\""));
+    assert!(line_b.contains("\"event\":\"peer_candidate\""));
     assert!(line_b.contains("\"agent_id\":\"ed25519.cccccccccccccccccccccccccccccccc\""));
+}
+
+// ---------------------------------------------------------------------------
+// Round-seven review pins (DEC-022): every outbound line passes one encoder
+// enforcing the framed limit (newline included). Oversized broadcasts are
+// dropped with a warning, never truncated; oversized replies fail
+// explicitly with `message_too_large`; oversized handler deliveries fail so
+// the broker can send the remote requester a terminal error.
+// ---------------------------------------------------------------------------
+
+fn agent_a() -> crate::message::AgentId {
+    crate::message::AgentId::parse("ed25519.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").unwrap()
+}
+
+fn agent_b() -> crate::message::AgentId {
+    crate::message::AgentId::parse("ed25519.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb").unwrap()
+}
+
+fn single_client_server() -> (IpcServer, mpsc::Receiver<Arc<str>>) {
+    let (tx, rx) = mpsc::channel::<Arc<str>>(8);
+    let mut clients = HashMap::new();
+    clients.insert(1u64, tx);
+    (test_server_with_clients(clients), rx)
+}
+
+#[tokio::test]
+async fn oversized_inbound_event_is_dropped_never_truncated() {
+    let (server, mut rx) = single_client_server();
+
+    let huge = Envelope::new(
+        agent_a(),
+        agent_b(),
+        MessageKind::Message,
+        json!({"pad": "x".repeat(70_000)}),
+    );
+    server
+        .broadcast_inbound(&huge)
+        .await
+        .expect("an oversized broadcast is a logged drop, not an error");
+    assert!(
+        rx.try_recv().is_err(),
+        "no truncated or oversized event may be delivered"
+    );
+
+    // Healthy events still flow afterwards.
+    let small = Envelope::new(
+        agent_a(),
+        agent_b(),
+        MessageKind::Message,
+        json!({"data": 1}),
+    );
+    server
+        .broadcast_inbound(&small)
+        .await
+        .expect("small broadcast");
+    let line = rx.recv().await.expect("small event delivered");
+    assert!(line.len() < crate::ipc::MAX_IPC_LINE_LENGTH);
+}
+
+#[tokio::test]
+async fn oversized_reply_fails_explicitly_with_message_too_large() {
+    let (server, mut rx) = single_client_server();
+
+    let huge = DaemonReply::SendOk {
+        ok: true,
+        msg_id: uuid::Uuid::new_v4(),
+        req_id: Some("req-7".to_string()),
+        response: Some(Envelope::new(
+            agent_a(),
+            agent_b(),
+            MessageKind::Response,
+            json!({"pad": "x".repeat(70_000)}),
+        )),
+    };
+    server
+        .send_reply(1, &huge)
+        .await
+        .expect("oversized reply delivery itself succeeds");
+
+    let line = rx
+        .recv()
+        .await
+        .expect("explicit error reply replaces the payload");
+    let decoded: serde_json::Value = serde_json::from_str(&line).expect("error reply is JSON");
+    assert_eq!(decoded["ok"], json!(false));
+    assert_eq!(decoded["error"], json!("message_too_large"));
+    assert_eq!(
+        decoded["req_id"],
+        json!("req-7"),
+        "correlation must survive"
+    );
+}
+
+#[tokio::test]
+async fn oversized_request_event_fails_delivery_explicitly() {
+    let (server, mut rx) = single_client_server();
+
+    let huge_request = Envelope::new(
+        agent_a(),
+        agent_b(),
+        MessageKind::Request,
+        json!({"pad": "x".repeat(70_000)}),
+    );
+    let result = server.send_request_event(1, &huge_request).await;
+    assert!(
+        result.is_err(),
+        "oversized handler delivery must fail so the broker sends the \
+         remote requester one terminal error response"
+    );
+    assert!(rx.try_recv().is_err(), "nothing may be delivered");
+}
+
+#[tokio::test]
+async fn oversized_reply_fallback_never_panics_even_with_pathological_req_id() {
+    let (server, mut rx) = single_client_server();
+
+    // A reply whose req_id alone would overflow the line limit. The
+    // message_too_large fallback must never itself be oversized: it drops
+    // the echo instead of panicking (round-eight P1).
+    let pathological = DaemonReply::Error {
+        ok: false,
+        error: IpcErrorCode::InternalError,
+        message: "x".repeat(200),
+        req_id: Some("r".repeat(70_000)),
+    };
+    server
+        .send_reply(1, &pathological)
+        .await
+        .expect("reply delivery must not panic");
+
+    let line = rx.recv().await.expect("a fitting error line is delivered");
+    assert!(line.len() < crate::ipc::MAX_IPC_LINE_LENGTH);
+    let decoded: serde_json::Value = serde_json::from_str(&line).expect("json");
+    assert_eq!(decoded["error"], "message_too_large");
+    assert!(
+        decoded.get("req_id").is_none(),
+        "the overbound echo is dropped, never truncated"
+    );
 }
