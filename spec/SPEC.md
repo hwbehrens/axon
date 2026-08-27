@@ -270,6 +270,7 @@ CLI execution contracts:
 ├── identity.pub        # Ed25519 public key (base64)
 ├── config.yaml         # Optional local daemon settings
 ├── peers.json          # Canonical enrolled-peer store (daemon-managed)
+├── daemon.pid          # Runtime single-instance lock (removed on clean shutdown)
 └── axon.sock           # Unix domain socket (runtime only)
 ```
 

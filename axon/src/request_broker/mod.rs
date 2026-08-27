@@ -177,7 +177,10 @@ impl RequestBroker {
             return BeginRequest::Respond(self.error_response(
                 &request,
                 "unhandled",
-                "no application handler is registered",
+                format!(
+                    "no application handler registered for request '{}'",
+                    request.id
+                ),
                 false,
             ));
         };
@@ -431,9 +434,10 @@ impl RequestBroker {
         &self,
         request: &Envelope,
         code: &'static str,
-        message: &'static str,
+        message: impl Into<String>,
         retryable: bool,
     ) -> Envelope {
+        let message = message.into();
         Envelope::response_to(
             request,
             self.local_agent_id.clone(),

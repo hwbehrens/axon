@@ -124,7 +124,7 @@ axon/                      Rust implementation (Cargo crate)
 Client (OpenClaw/CLI) ←→ [Unix Socket IPC] ←→ AXON Daemon ←→ [QUIC/UDP] ←→ AXON Daemon ←→ [Unix Socket IPC] ←→ Client
 ```
 
-- **Identity**: Ed25519 signing keypair. Agent ID derived from SHA-256 of public key. Self-signed X.509 cert generated on each startup for QUIC TLS.
+- **Identity**: Ed25519 signing keypair. Agent ID is `ed25519.` plus the first 16 bytes of SHA-256 of the public key. Self-signed X.509 cert generated on each startup for QUIC TLS.
 - **Discovery**: Bonjour/mDNS (`_axon._udp.local.`) broadcasts Agent ID and public key on the local link. Observations create untrusted candidates only; WAN rendezvous is out of scope.
 - **Peer authority**: `PeerDirectory` is the only logical owner of enrolled identities, configured locators, live observations, the atomic `peers.json` store, and derived pin/query views.
 - **Transport**: `ConnectionManager` exclusively owns QUIC handles, one generation-checked slot per peer, cross-dial selection, tracked tasks, and reconnect backoff.
@@ -154,7 +154,7 @@ Use this to navigate quickly; for the full "change → file(s)" table, see `CONT
 These are load-bearing. Do not change behavior without updating spec + tests. Full list: `CONTRIBUTING.md`.
 
 - **Configuration reference**: when adding or changing a configurable setting (in `Config` / `config.yaml`) or an internal constant (timeout, limit, interval, etc.), update the Configuration Reference tables in `README.md`.
-- **Agent ID = SHA-256(pubkey)**: peer identity must match TLS certificate/public key; reject mismatches.
+- **Agent ID = `ed25519.` + first 16 bytes of SHA-256(pubkey)**: peer identity must match the TLS certificate/public key; reject mismatches.
 - **Intentional peer pinning**: discovery never authorizes TLS. Only explicitly enrolled peers appear in immutable pinning snapshots; revocation persists before transport authority is removed.
 - **Ownership**: `PeerDirectory` owns logical peer state, `ConnectionManager` owns physical connection state, and `RequestBroker` owns request correlation. Do not introduce a parallel mutable representation.
 - **Locator conflicts**: conflicting observations are quarantined and excluded from dialing; a trusted identity is never evicted because an address was reused.
@@ -189,10 +189,10 @@ make mutants          # broader mutation testing (slower)
 
 Detailed requirements and recipes live in `CONTRIBUTING.md`. Key conventions:
 
-- **Unit tests live in sibling `*_tests.rs` files**, wired from the module via:
+- **Unit tests live inside their module directory**: directory modules use `tests.rs`, while leaf modules may use `<name>_tests.rs`; wire them from the implementation via:
   ```rust
   #[cfg(test)]
-  #[path = "foo_tests.rs"]
+  #[path = "tests.rs"]
   mod tests;
   ```
 - **Integration/spec/adversarial/e2e tests** are in `axon/tests/`:

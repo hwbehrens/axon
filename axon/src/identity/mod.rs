@@ -28,6 +28,7 @@ impl Identity {
         paths.ensure_root_exists()?;
 
         let signing_key = if paths.identity_key.exists() {
+            enforce_private_key_permissions(&paths.identity_key)?;
             let raw = fs::read(&paths.identity_key)
                 .with_context(|| format!("failed to read {}", paths.identity_key.display()))?;
             let text = std::str::from_utf8(&raw).map_err(|_| {
@@ -130,6 +131,12 @@ fn write_seed_as_base64(path: &Path, seed: &[u8; 32]) -> Result<()> {
     let key_b64 = STANDARD.encode(seed);
     fs::write(path, &key_b64)
         .with_context(|| format!("failed to write private key: {}", path.display()))?;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+        .with_context(|| format!("failed to set key permissions: {}", path.display()))?;
+    Ok(())
+}
+
+fn enforce_private_key_permissions(path: &Path) -> Result<()> {
     fs::set_permissions(path, fs::Permissions::from_mode(0o600))
         .with_context(|| format!("failed to set key permissions: {}", path.display()))?;
     Ok(())

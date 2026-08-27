@@ -107,4 +107,8 @@ fn deserialize_unknown_kind() {
     });
     let env: Envelope = serde_json::from_value(j).unwrap();
     assert_eq!(env.kind, MessageKind::unknown("future_kind_v99"));
+    assert_eq!(
+        serde_json::to_value(&env).unwrap()["kind"],
+        "future_kind_v99"
+    );
 }

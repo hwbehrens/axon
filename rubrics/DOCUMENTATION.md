@@ -44,7 +44,7 @@ Is `README.md` accurate for users and agents?
 - Quickstart steps still work (build/run/send examples).
 - Message type summary remains correct (kind ↔ stream mapping / purpose) and aligned with `spec/MESSAGE_TYPES.md`.
 - **Configuration Reference tables are updated** when config keys or internal constants change:
-  - `config.toml` keys table
+  - `config.yaml` keys table
   - internal constants table (e.g., `MAX_MESSAGE_SIZE`, timeouts, caps)
 - Documentation links remain valid and well-scoped.
 

@@ -75,7 +75,7 @@ $ axon request ed25519.f6e5d4c3b2a1f6e5d4c3b2a1f6e5d4c3 "What is the capital of 
     "id": "660e8400-e29b-41d4-a716-446655440001",
     "kind": "error",
     "ref": "550e8400-e29b-41d4-a716-446655440000",
-    "payload": {{"code":"unhandled","message":"no application handler installed"}}
+    "payload": {{"code":"unhandled","message":"no application handler registered for request '550e8400-e29b-41d4-a716-446655440000'","retryable":false}}
   }}
   (If the remote agent has an app handler, it may return a normal "response" instead.)
 
@@ -98,7 +98,7 @@ One client may lease request handling with `serve`.
 
 # 1. Send a request (bidirectional — waits for response)
 → {{"cmd":"send","to":"ed25519.f6e5d4c3...","kind":"request","payload":{{"message":"What is 2+2?"}}}}
-← {{"ok":true,"msg_id":"550e8400-...","response":{{"id":"660e8400-...","kind":"error","ref":"550e8400-...","payload":{{"code":"unhandled","message":"no application handler installed"}}}}}}
+← {{"ok":true,"msg_id":"550e8400-...","response":{{"id":"660e8400-...","kind":"error","ref":"550e8400-...","payload":{{"code":"unhandled","message":"no application handler registered for request '550e8400-...'","retryable":false}}}}}}
 
 # 2. Send a fire-and-forget message (unidirectional)
 → {{"cmd":"send","to":"ed25519.f6e5d4c3...","kind":"message","payload":{{"data":{{"state":"ready"}}}}}}

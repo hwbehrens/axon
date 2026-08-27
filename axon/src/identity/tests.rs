@@ -51,6 +51,26 @@ fn private_key_file_permissions() {
 }
 
 #[test]
+fn existing_private_key_permissions_are_normalized() {
+    let dir = tempdir().expect("tempdir");
+    let paths = AxonPaths::from_root(PathBuf::from(dir.path()));
+    paths.ensure_root_exists().expect("ensure root");
+
+    let seed = [9u8; 32];
+    fs::write(&paths.identity_key, STANDARD.encode(seed)).expect("write key");
+    fs::set_permissions(&paths.identity_key, fs::Permissions::from_mode(0o644))
+        .expect("set permissive mode");
+
+    Identity::load_or_generate(&paths).expect("load existing key");
+
+    let mode = fs::metadata(&paths.identity_key)
+        .unwrap()
+        .permissions()
+        .mode();
+    assert_eq!(mode & 0o777, 0o600);
+}
+
+#[test]
 fn public_key_file_is_valid_base64() {
     let dir = tempdir().expect("tempdir");
     let paths = AxonPaths::from_root(PathBuf::from(dir.path()));

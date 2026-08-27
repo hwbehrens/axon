@@ -33,16 +33,24 @@ async fn one_connection_owns_handler_lease() {
 #[tokio::test]
 async fn no_handler_returns_immediate_unhandled_error() {
     let broker = RequestBroker::new(agent('b'));
+    let request = request();
+    let request_id = request.id;
 
-    let BeginRequest::Respond(response) = broker.begin(request(), REQUEST_TTL).await else {
+    let BeginRequest::Respond(response) = broker.begin(request, REQUEST_TTL).await else {
         panic!("request should not be delivered without a handler");
     };
 
     assert_eq!(response.kind, MessageKind::Error);
+    let payload = response.payload_value().expect("payload");
+    assert_eq!(payload["code"], "unhandled");
     assert_eq!(
-        response.payload_value().expect("payload")["code"],
-        "unhandled"
+        payload["message"],
+        json!(format!(
+            "no application handler registered for request '{}'",
+            request_id
+        ))
     );
+    assert_eq!(payload["retryable"], json!(false));
 }
 
 #[tokio::test]
