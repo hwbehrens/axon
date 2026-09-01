@@ -13,14 +13,6 @@ pub(super) struct DirectoryState {
     pub(super) enrolled: BTreeMap<AgentId, EnrolledPeer>,
     pub(super) candidates: BTreeMap<AgentId, CandidatePeer>,
     pub(super) observation_index: HashMap<ObservationId, AgentId>,
-    /// Monotonic counter bumped by every persistent transaction
-    /// (`enroll_candidate`, `enroll`, `remove_peer`), all of which run under
-    /// the save gate across build, save, and apply (see `persistence.rs`).
-    /// Because the gate serializes transactions end to end, the counter
-    /// cannot move between a transaction's snapshot and its apply; it is
-    /// kept as a defensive invariant tripwire. Ephemeral-only mutations
-    /// (`observe`, expiry) never touch it.
-    pub(super) persist_generation: u64,
 }
 
 #[derive(Debug, Clone)]

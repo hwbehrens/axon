@@ -16,8 +16,8 @@ use crate::identity::Identity;
 use crate::peer_directory::{PeerDirectory, PeerIdentity, PeerStore};
 use crate::transport::tls::{build_endpoint, with_handshake_remote_addr};
 
-fn gate_ok() -> std::future::Ready<bool> {
-    std::future::ready(true)
+fn gate_ok() -> bool {
+    true
 }
 
 struct TestNode {
@@ -136,7 +136,7 @@ async fn empty_slot_admits_nonpreferred_direction() {
         .admit_gated(peer.clone(), inbound.clone(), Direction::Inbound, gate_ok)
         .await;
     assert!(matches!(admission, Admission::Accepted { .. }));
-    assert!(registry.current(&peer).await.is_some());
+    assert!(registry.live_slot(&peer).await.is_some());
 }
 
 #[tokio::test]
@@ -173,7 +173,7 @@ async fn fresh_cross_dial_candidate_with_preferred_direction_replaces_incumbent(
         "preferred-direction candidate inside the window must win"
     );
 
-    let current = registry.current(&peer).await.expect("authoritative slot");
+    let current = registry.live_slot(&peer).await.expect("authoritative slot");
     assert_eq!(current.stable_id(), racer_conn.stable_id());
 
     // The displaced loser must be closed so both sides converge on one
@@ -233,6 +233,6 @@ async fn aged_healthy_incumbent_rejects_late_preferred_direction_candidate() {
     }
 
     // The authoritative slot is untouched.
-    let current = registry.current(&peer).await.expect("incumbent survives");
+    let current = registry.live_slot(&peer).await.expect("incumbent survives");
     assert_eq!(current.stable_id(), incumbent_conn.stable_id());
 }

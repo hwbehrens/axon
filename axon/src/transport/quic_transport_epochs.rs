@@ -1,4 +1,4 @@
-//! Per-peer enrollment epochs and the deadline-bounded admission gate for
+//! Per-peer enrollment epochs and the synchronous admission gate for
 //! [`ConnectionManager`].
 //!
 //! Split from `quic_transport.rs` for file-length limits. This is a child
@@ -6,16 +6,13 @@
 //! private fields.
 
 use std::collections::HashMap;
-use std::future::Future;
 use std::sync::{
     Arc,
     atomic::{AtomicU64, Ordering},
 };
-use std::time::Instant;
 
 use crate::message::AgentId;
 
-use super::ADMISSION_GATE_BUDGET;
 use super::ConnectionManager;
 
 impl ConnectionManager {
@@ -54,21 +51,28 @@ impl ConnectionManager {
     }
 
     /// Build the two-part admission gate: the peer's enrollment epoch must be
-    /// unchanged since `captured_epoch`, and the peer must currently be
-    /// enrolled. The enrollment lookup is deadline-bounded (`deadline`, or
-    /// [`ADMISSION_GATE_BUDGET`] for inbound handshakes without a caller
-    /// deadline) and fails CLOSED: a stalled lookup rejects the connection
-    /// rather than admitting it unexamined or blocking the registry lock
-    /// forever.
-    pub(super) fn admission_gate(
-        &self,
-        peer: AgentId,
-        captured_epoch: u64,
-        deadline: Option<Instant>,
-    ) -> impl Future<Output = bool> + Send + 'static {
-        let directory = self.directory.clone();
+    /// unchanged since `captured_epoch`, and the peer must currently appear
+    /// in the published pinning snapshot. Both reads are synchronous (std
+    /// locks), so the gate runs entirely inside the registry's write-lock
+    /// critical section: nothing can hold the registry lock across an await,
+    /// no stall can block admission, and no lock-ordering rule between the
+    /// registry and the directory is required.
+    ///
+    /// The pin snapshot is the SAME immutable trust oracle the TLS verifiers
+    /// consume. It is republished after every persistent enrollment commit,
+    /// so it can lag live directory state only between a commit's apply and
+    /// its pins publish. In that window:
+    /// - a just-enrolled peer may be briefly refused (conservative; the
+    ///   reconnect maintenance retries within one second), and
+    /// - a just-revoked peer may be briefly admitted, but `remove_peer`'s
+    ///   caller always follows with `close_peer`, which removes the freshly
+    ///   installed slot. The documented revocation guarantee is unchanged:
+    ///   either the gate refuses, or the revocation itself tears the slot
+    ///   down.
+    pub(super) fn admission_gate(&self, peer: AgentId, captured_epoch: u64) -> impl Fn() -> bool {
+        let pins = self.directory.pinning_snapshot();
         let epochs = self.enrollment_epochs.clone();
-        async move {
+        move || {
             let current = epochs
                 .lock()
                 .expect("enrollment epoch lock")
@@ -78,13 +82,9 @@ impl ConnectionManager {
             if current != captured_epoch {
                 return false;
             }
-            let budget = match deadline {
-                Some(deadline) => deadline
-                    .checked_duration_since(Instant::now())
-                    .unwrap_or_default(),
-                None => ADMISSION_GATE_BUDGET,
-            };
-            tokio::time::timeout(budget, directory.is_enrolled(&peer)).await == Ok(true)
+            pins.read()
+                .map(|pins| pins.contains_key(peer.as_str()))
+                .unwrap_or(false)
         }
     }
 }

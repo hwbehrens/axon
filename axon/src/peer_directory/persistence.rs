@@ -12,21 +12,24 @@
 //!   read-lock snapshot and the write-lock apply, guarded only by the save
 //!   gate.
 //! - **One fully serialized transaction per edit**: the save gate is held
-//!   across build, save, AND apply. Building under the gate means the
-//!   persist generation cannot move between snapshot and apply, so there
-//!   are no lost races to retry, no speculative saves to heal, and no
-//!   interleaving — including caller cancellation, which is shielded by the
-//!   owned transaction worker — that can leave disk and memory divergent.
+//!   across build, save, AND apply. Because every mutation of the persistent
+//!   set (`enrolled`) happens inside this serialized section, the state
+//!   observed at build time is still current at apply time. There are no
+//!   lost races to retry, no speculative saves to heal, and no interleaving
+//!   — including caller cancellation, which is shielded by the owned
+//!   transaction worker — that can leave disk and memory divergent.
 //!   (Rounds six and seven used save-then-apply with a generation retry
 //!   loop and a heal path; both carried windows where disk could end up
-//!   older than memory, and the retry budget failed under contention.)
+//!   older than memory, and the retry budget failed under contention. The
+//!   retry loop, heal path, and the defensive generation tripwire they
+//!   required were all removed once transactions became fully serialized.)
 //! - **`store.save` never errors after its rename**: post-rename failures
 //!   are durability warnings, so an `Err` always means the file is
 //!   unchanged and the edit must not be applied to memory.
 
 use anyhow::anyhow;
 use tokio::task::JoinHandle;
-use tracing::{debug, warn};
+use tracing::debug;
 
 use super::state::DirectoryState;
 use super::types::DirectoryError;
@@ -90,11 +93,10 @@ impl PeerDirectory {
     /// Run one persistent edit as a fully serialized transaction.
     ///
     /// The save gate is acquired FIRST and held across build, save, and
-    /// apply. Because every mutation of `persist_generation` happens under
-    /// the gate, the generation observed at build time is still current at
-    /// apply time: no lost-race retries exist. The generation check that
-    /// remains is a defensive invariant guard against future refactors
-    /// mutating state outside the gate.
+    /// apply. Every mutation of the persistent set (`enrolled`) happens
+    /// under this gate, so the state built from the snapshot is still
+    /// current when the delta is applied — no retry loop exists to fail, and
+    /// no generation counter is needed to detect a race.
     ///
     /// Lock ordering is strictly gate -> state lock; no path takes a state
     /// lock and then the gate, so no deadlock is possible. Disk I/O runs
@@ -107,27 +109,16 @@ impl PeerDirectory {
         // The guard is held (by binding) to the end of the transaction:
         // build, save, apply all run under the gate.
         let _gate = self.save_lock.lock().await;
-        let (plan, generation) = {
+        let plan = {
             let state = self.state.read().await;
-            (build(&state)?, state.persist_generation)
+            build(&state)?
         };
         self.store
             .save(plan.saved_state.stored_peers())
             .await
             .map_err(DirectoryError::Persist)?;
         let mut state = self.state.write().await;
-        if state.persist_generation != generation {
-            // Defensive only: the gate makes this unreachable today. If a
-            // future change mutates the generation outside the gate, refuse
-            // to apply rather than corrupt the store silently.
-            warn!("peer-directory persist generation moved outside the transaction gate");
-            return Err(DirectoryError::Persist(anyhow!(
-                "persist-generation invariant violated: generation moved outside \
-                 the transaction gate"
-            )));
-        }
         (plan.apply)(&mut state);
-        state.persist_generation += 1;
         let pins = state.pinning_snapshot();
         drop(state);
         self.publish_pins(pins);

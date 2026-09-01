@@ -68,14 +68,6 @@ pub struct ConnectionManager {
     enrollment_epochs: Arc<StdMutex<HashMap<AgentId, Arc<AtomicU64>>>>,
 }
 
-/// Upper bound on one admission-gate evaluation (the registry lock wait plus
-/// the directory enrollment lookup). Both critical sections are short and —
-/// since peer-directory persistence moved outside the directory lock — free
-/// of disk I/O; the bound exists so a pathological stall fails the gate
-/// CLOSED instead of stalling connection admission forever. Outbound dials
-/// use the caller's whole-exchange budget instead when it is smaller.
-pub(crate) const ADMISSION_GATE_BUDGET: Duration = Duration::from_secs(5);
-
 impl ConnectionManager {
     pub async fn bind(
         bind_addr: SocketAddr,
@@ -149,7 +141,7 @@ impl ConnectionManager {
     }
 
     pub async fn has_connection(&self, agent_id: &AgentId) -> bool {
-        self.registry.current(agent_id).await.is_some()
+        self.registry.live_slot(agent_id).await.is_some()
     }
 
     pub async fn connected_count(&self) -> usize {
@@ -181,7 +173,7 @@ impl ConnectionManager {
             directory.enrolled_agent_ids().await.into_iter().collect();
         self.reconnect.retain(&enrolled).await;
         for peer in enrolled {
-            if self.registry.current(&peer).await.is_some() {
+            if self.registry.live_slot(&peer).await.is_some() {
                 continue;
             }
             if directory.dial_targets(&peer).await.is_empty() {
@@ -405,9 +397,12 @@ impl ConnectionManager {
         let gate_peer = peer.clone();
         let admission = self
             .registry
-            .admit_gated(peer.clone(), connection.clone(), Direction::Inbound, || {
-                self.admission_gate(gate_peer.clone(), captured_epoch, None)
-            })
+            .admit_gated(
+                peer.clone(),
+                connection.clone(),
+                Direction::Inbound,
+                self.admission_gate(gate_peer, captured_epoch),
+            )
             .await;
         if let Admission::Accepted { generation } = admission {
             self.spawn_connection_loop(peer, generation, connection, permit);

@@ -110,7 +110,7 @@ async fn admission_gate_refuses_and_closes_when_not_enrolled() {
             agent_b.clone(),
             connection.clone(),
             Direction::Outbound,
-            || async { true },
+            || true,
         )
         .await;
     assert!(matches!(admitted, Admission::Existing(_)));
@@ -124,7 +124,7 @@ async fn admission_gate_refuses_and_closes_when_not_enrolled() {
             agent_b.clone(),
             connection.clone(),
             Direction::Outbound,
-            || async { false },
+            || false,
         )
         .await;
     assert!(matches!(refused, Admission::Rejected));

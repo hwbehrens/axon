@@ -40,7 +40,7 @@ impl ConnectionManager {
         peer: &AgentId,
         deadline: Instant,
     ) -> Result<quinn::Connection, SendError> {
-        if let Some(existing) = self.registry.current(peer).await {
+        if let Some(existing) = self.registry.live_slot(peer).await {
             return Ok(existing);
         }
         let dial_cancel = self.dial_token(peer).await;
@@ -148,7 +148,7 @@ impl ConnectionManager {
     /// so a caller's 1-second exchange can never spend its whole budget on
     /// the lock wait and then receive a fresh full budget for the handshake.
     async fn dial(&self, peer: &DialPeer, deadline: Instant) -> Result<quinn::Connection> {
-        if let Some(existing) = self.registry.current(&peer.agent_id).await {
+        if let Some(existing) = self.registry.live_slot(&peer.agent_id).await {
             return Ok(existing);
         }
         // Attempt token: capture THIS peer's enrollment epoch before anything
@@ -188,7 +188,7 @@ impl ConnectionManager {
                 })?
             }
         };
-        if let Some(existing) = self.registry.current(&peer.agent_id).await {
+        if let Some(existing) = self.registry.live_slot(&peer.agent_id).await {
             return Ok(existing);
         }
         let permit = self
@@ -226,13 +226,13 @@ impl ConnectionManager {
             );
         }
         // Revocation race guard: the handshake may have started before the
-        // peer was revoked. Two gates run under the registry's admission lock
-        // (see `admit_gated`), linearized against `remove_peer`: unchanged
+        // peer was revoked. Two gates run inside the registry's admission
+        // lock (see `admit_gated`), linearized against `remove_peer`: unchanged
         // per-peer enrollment epoch AND current enrollment. Either the gates
         // observe the revocation, or the subsequent `close_peer` tears the
         // fresh slot down. A pre-revocation attempt is never admitted against
-        // restored trust; it must re-dial. The gate is bounded by the whole-
-        // exchange deadline and fails closed (see `admission_gate`).
+        // restored trust; it must re-dial. The gate is synchronous, so it
+        // cannot stall the registry lock.
         let gate_agent_id = peer.agent_id.clone();
         match self
             .registry
@@ -240,7 +240,7 @@ impl ConnectionManager {
                 peer.agent_id.clone(),
                 connection.clone(),
                 Direction::Outbound,
-                || self.admission_gate(gate_agent_id.clone(), epoch_at_dial_start, Some(deadline)),
+                self.admission_gate(gate_agent_id, epoch_at_dial_start),
             )
             .await
         {

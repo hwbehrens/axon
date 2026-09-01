@@ -237,16 +237,6 @@ impl PeerDirectory {
             .map(|peer| peer.identity.clone())
     }
 
-    /// Enrollment predicate used as the transport's connection-admission
-    /// gate. It shares the directory state lock with `remove_peer`'s short
-    /// commit section, so a result observed under the registry's admission
-    /// lock is linearized against revocation (see
-    /// `ConnectionRegistry::admit_gated`). Persistence runs outside this
-    /// lock, so the gate can never be stalled by peer-store disk I/O.
-    pub async fn is_enrolled(&self, agent_id: &AgentId) -> bool {
-        self.state.read().await.enrolled.contains_key(agent_id)
-    }
-
     pub async fn enrolled_agent_ids(&self) -> Vec<AgentId> {
         self.state.read().await.enrolled.keys().cloned().collect()
     }

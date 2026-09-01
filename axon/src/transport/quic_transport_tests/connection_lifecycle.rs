@@ -103,23 +103,16 @@ async fn revoking_one_peer_does_not_reject_an_unrelated_peers_handshake() {
         .await;
 
     // B's pre-revocation attempt (captured epoch 0) is rejected...
-    assert!(
-        !trio
-            .transport_a
-            .admission_gate(trio.agent_b.clone(), 0, None)
-            .await
-    );
+    assert!(!trio.transport_a.admission_gate(trio.agent_b.clone(), 0)());
     // ...while C's equally-old in-flight attempt remains fully admissible:
     // its epoch did not move and it is still enrolled.
     assert_eq!(
         trio.transport_a.peer_enrollment_epoch(&trio.agent_c),
         captured_c
     );
-    assert!(
-        trio.transport_a
-            .admission_gate(trio.agent_c.clone(), captured_c, None)
-            .await
-    );
+    assert!(trio
+        .transport_a
+        .admission_gate(trio.agent_c.clone(), captured_c)());
 
     // End to end: A↔C exchange works after B's revocation.
     let message = Envelope::new(
@@ -149,20 +142,13 @@ async fn stale_epoch_attempt_is_rejected_while_fresh_capture_is_admissible() {
 
     // Stale pre-revocation attempt: rejected by the epoch mismatch even
     // though the directory still lists B as enrolled.
-    assert!(
-        !trio
-            .transport_a
-            .admission_gate(trio.agent_b.clone(), 0, None)
-            .await
-    );
+    assert!(!trio.transport_a.admission_gate(trio.agent_b.clone(), 0)());
     // An attempt that started after the revocation committed captures the
     // new epoch. Trust removal itself is the directory's authority
     // (`remove_peer`); while B remains enrolled there, such an attempt is
     // admissible — but it can never be confused with the pre-revocation
     // generation (no ABA reuse of epoch 0).
-    assert!(
-        trio.transport_a
-            .admission_gate(trio.agent_b.clone(), bumped, None)
-            .await
-    );
+    assert!(trio
+        .transport_a
+        .admission_gate(trio.agent_b.clone(), bumped)());
 }

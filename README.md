@@ -296,7 +296,6 @@ These are compile-time constants and cannot be changed via configuration.
 | `MAX_PENDING_REQUESTS` | `1024` | `request_broker/mod.rs` | Maximum inbound requests awaiting the single IPC handler. |
 | `MAX_COMPLETED_CACHE_ENTRIES` | `256` | `request_broker/mod.rs` | Maximum completed-request responses retained for replay of retried exchanges. |
 | `MAX_COMPLETED_CACHE_BYTES` | `4 MiB` | `request_broker/mod.rs` | Aggregate byte budget for the completed-response replay cache. |
-| `ADMISSION_GATE_BUDGET` | `5s` | `transport/quic_transport.rs` | Upper bound on one connection-admission gate evaluation (registry lock wait + enrollment lookup); a stalled gate fails closed instead of blocking admission forever. Outbound dials use the caller's remaining exchange budget when smaller. |
 | `DIAL_TIMEOUT` | `10s` | `transport/mod.rs` | Maximum time for a single outbound QUIC dial including handshake. Also bounds how long a fresh preferred-direction candidate may replace a healthy connection-slot incumbent (the simultaneous cross-dial race window). |
 | `MAX_TRACKED_SERVICES` | `1024` | `discovery/mod.rs` | Maximum mDNS service instances tracked for stale-observation diffing; overflow evicts the oldest-inserted service and emits lost events. |
 | `MAX_REQUEST_TIMEOUT_SECS` | `3600` | `daemon/command_handler.rs` | Upper bound for caller-supplied `timeout_secs`; larger values are rejected with `invalid_command` instead of overflowing deadline arithmetic. |
