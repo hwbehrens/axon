@@ -285,7 +285,7 @@ impl IpcServer {
     /// Identity metadata served by the `whoami` command. The daemon's
     /// command handler composes the reply from this; `IpcServer` owns the
     /// config the reply is built from but does not dispatch commands.
-    pub(crate) fn whoami_info(&self) -> WhoamiInfo {
+    pub fn whoami_info(&self) -> WhoamiInfo {
         WhoamiInfo {
             agent_id: self.config.agent_id.clone(),
             public_key: self.config.public_key.clone(),

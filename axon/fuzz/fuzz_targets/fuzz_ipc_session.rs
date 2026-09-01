@@ -1,5 +1,6 @@
-//! Fuzz target: parse newline-delimited IPC commands and exercise IPC server
-//! command handling/broadcast surfaces. Must not panic regardless of input.
+//! Fuzz target: parse newline-delimited IPC commands and exercise the IPC
+//! server's reply-encoding, whoami-composition, and broadcast surfaces.
+//! Must not panic regardless of input.
 
 #![no_main]
 
@@ -8,7 +9,7 @@ use std::sync::Arc;
 
 use libfuzzer_sys::fuzz_target;
 
-use axon::ipc::{CommandEvent, IpcCommand, IpcServer, IpcServerConfig};
+use axon::ipc::{IpcCommand, IpcErrorCode, IpcServer, IpcServerConfig, error_reply_line};
 use axon::message::{Envelope, MessageKind};
 
 fuzz_target!(|data: &[u8]| {
@@ -73,13 +74,17 @@ fuzz_target!(|data: &[u8]| {
         let _ = server.broadcast_inbound(&envelope).await;
 
         for command in commands {
-            let _ = server
-                .handle_command(CommandEvent {
-                    client_id: 1,
-                    command,
-                })
-                .await;
+            // The daemon's command handler composes replies; the
+            // panic-prone surface is the shared outbound encoder with
+            // fuzzer-controlled req_ids (the DEC-023 oversized-echo
+            // fallback) plus whoami composition. The no-echo fallback must
+            // keep every error reply encodable without panicking.
+            let _ = error_reply_line(
+                IpcErrorCode::InternalError,
+                command.req_id().map(str::to_string),
+            );
         }
+        let _ = server.whoami_info();
 
         let _ = server.cleanup_socket();
         let _ = std::fs::remove_file(&socket_path);
