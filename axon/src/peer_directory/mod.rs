@@ -33,6 +33,12 @@ pub type PinningSnapshotHandle = Arc<StdRwLock<PinningSnapshot>>;
 pub struct PeerDirectory {
     local_agent_id: AgentId,
     state: Arc<RwLock<DirectoryState>>,
+    /// Published pin/enrollment snapshot. Long-lived consumers (the TLS
+    /// verifiers, the connection-admission gate) capture the
+    /// `PinningSnapshotHandle` once and read it on every use, so publication
+    /// MUST mutate the lock's contents in place (`publish_pins`) and must
+    /// never swap this field for a new `Arc` — a swap would silently freeze
+    /// every captured handle on a stale snapshot.
     pins: PinningSnapshotHandle,
     store: PeerStore,
     /// Transaction gate for persistent edits (see `persistence.rs`): held
