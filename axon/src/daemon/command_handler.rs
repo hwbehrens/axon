@@ -157,14 +157,11 @@ pub(crate) async fn handle_command(cmd: CommandEvent, ctx: &DaemonContext) -> Re
             messages_received: ctx.counters.received.load(Ordering::Relaxed),
             req_id,
         },
-        IpcCommand::Whoami { req_id } => {
-            ctx.ipc
-                .handle_command(CommandEvent {
-                    client_id,
-                    command: IpcCommand::Whoami { req_id },
-                })
-                .await?
-        }
+        IpcCommand::Whoami { req_id } => DaemonReply::Whoami {
+            ok: true,
+            info: ctx.ipc.whoami_info(),
+            req_id,
+        },
         IpcCommand::AddPeer {
             agent_id,
             token,
