@@ -126,10 +126,11 @@ impl PeerDirectory {
     }
 
     /// Publish the new snapshot by mutating the shared lock's contents in
-    /// place. Consumers capture the handle once (TLS verifiers at bind,
-    /// the admission gate per dial) and keep reading it forever, so swapping
-    /// the `pins` field with a new `Arc<StdRwLock<..>>` would strand them on
-    /// a frozen snapshot. See the field doc on `PeerDirectory::pins`.
+    /// place. Consumers capture the handle once (TLS verifiers at bind, the
+    /// admission gate per outbound dial and per inbound handshake) and keep
+    /// reading it forever, so swapping the `pins` field with a new
+    /// `Arc<StdRwLock<..>>` would strand them on a frozen snapshot. See the
+    /// field doc on `PeerDirectory::pins`.
     fn publish_pins(&self, pins: PinningSnapshot) {
         match self.pins.write() {
             Ok(mut guard) => *guard = pins,

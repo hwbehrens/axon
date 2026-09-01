@@ -227,12 +227,14 @@ impl ConnectionManager {
         }
         // Revocation race guard: the handshake may have started before the
         // peer was revoked. Two gates run inside the registry's admission
-        // lock (see `admit_gated`), linearized against `remove_peer`: unchanged
-        // per-peer enrollment epoch AND current enrollment. Either the gates
-        // observe the revocation, or the subsequent `close_peer` tears the
-        // fresh slot down. A pre-revocation attempt is never admitted against
-        // restored trust; it must re-dial. The gate is synchronous, so it
-        // cannot stall the registry lock.
+        // lock (see `admit_gated`): unchanged per-peer enrollment epoch AND
+        // current enrollment in the published pins. The enrollment half
+        // linearizes against the pin publication that completes
+        // `remove_peer`; the epoch half against `close_peer`'s epoch bump.
+        // Either the gates observe the revocation, or the subsequent
+        // `close_peer` tears the fresh slot down. A pre-revocation attempt
+        // is never admitted against restored trust; it must re-dial. The
+        // gate is synchronous, so it cannot stall the registry lock.
         let gate_agent_id = peer.agent_id.clone();
         match self
             .registry

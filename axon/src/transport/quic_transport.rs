@@ -387,12 +387,14 @@ impl ConnectionManager {
         debug!(peer = %peer, remote = ?connection.remote_address(), "accepted QUIC connection");
         // TLS pinning already rejects unknown peers, but a handshake that
         // started before revocation committed can still complete. Two gates
-        // run under the registry's admission lock, linearized against
-        // `remove_peer`'s `close_peer`: unchanged per-peer enrollment epoch
-        // (captured before THIS peer's handshake began) AND current
-        // enrollment. A stale handshake either fails the gate or is closed
-        // moments later by the revocation itself — never left live, and
-        // never admitted against restored trust.
+        // run under the registry's admission lock: unchanged per-peer
+        // enrollment epoch (captured before THIS peer's handshake began) AND
+        // current enrollment in the published pins. The epoch half
+        // linearizes against `close_peer`'s epoch bump; the enrollment half
+        // against the pin publication that completes `remove_peer`. A stale
+        // handshake either fails the gate or is closed moments later by the
+        // revocation itself — never left live, and never admitted against
+        // restored trust.
         let captured_epoch = epochs_at_handshake_start.get(&peer).copied().unwrap_or(0);
         let gate_peer = peer.clone();
         let admission = self
