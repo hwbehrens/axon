@@ -168,9 +168,9 @@ impl ConnectionManager {
         // Waiting for the per-peer dial lock is part of the exchange budget:
         // without this bound a contended lock could stall the caller past
         // its deadline indefinitely. The wait is also cancellation-aware:
-        // `remove_peer` retires the dial token, so a queued dial for a
-        // revoked peer aborts immediately rather than taking its turn and
-        // discovering the revocation afterwards.
+        // `close_peer` (reached via `revoke_peer`) retires the dial token,
+        // so a queued dial for a revoked peer aborts immediately rather
+        // than taking its turn and discovering the revocation afterwards.
         let _guard = tokio::select! {
             _ = dial_cancel.cancelled() => {
                 bail!("dial to {} was cancelled", peer.agent_id);
