@@ -16,6 +16,8 @@ pub struct AxonPaths {
     pub peers: PathBuf,
     pub legacy_known_peers: PathBuf,
     pub socket: PathBuf,
+    /// Runtime single-instance lock file (`daemon.pid`).
+    pub daemon_lock: PathBuf,
 }
 
 impl AxonPaths {
@@ -44,6 +46,7 @@ impl AxonPaths {
             peers: root.join("peers.json"),
             legacy_known_peers: root.join("known_peers.json"),
             socket: root.join("axon.sock"),
+            daemon_lock: root.join("daemon.pid"),
             root,
         }
     }

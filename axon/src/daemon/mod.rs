@@ -54,7 +54,7 @@ pub async fn run_daemon(opts: DaemonOptions) -> Result<()> {
     };
     paths.ensure_root_exists()?;
     paths.reject_legacy_peer_state()?;
-    let mut daemon_lock = DaemonLock::acquire(&paths.root)?;
+    let mut daemon_lock = DaemonLock::acquire(&paths.daemon_lock)?;
     let config = Config::load(&paths.config).await?;
     let port = config.effective_port(opts.port);
     let identity = Identity::load_or_generate(&paths)?;

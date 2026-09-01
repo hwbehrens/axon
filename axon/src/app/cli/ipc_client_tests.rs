@@ -46,6 +46,7 @@ async fn send_ipc_rejects_oversized_command() {
         legacy_known_peers: PathBuf::from("/tmp/axon-test-nonexistent/known_peers.json"),
         identity_key: PathBuf::from("/tmp/axon-test-nonexistent/identity.key"),
         identity_pub: PathBuf::from("/tmp/axon-test-nonexistent/identity.pub"),
+        daemon_lock: PathBuf::from("/tmp/axon-test-nonexistent/daemon.pid"),
     };
 
     let big_payload = "x".repeat(70_000);
