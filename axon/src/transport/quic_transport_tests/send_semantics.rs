@@ -14,6 +14,7 @@ use serde_json::json;
 
 use super::fixtures::make_transport_pair;
 use crate::message::{AgentId, Envelope, MessageKind};
+use crate::peer_directory::DirectoryError;
 use crate::transport::DialPeer;
 use crate::transport::connection_registry::{Admission, Direction};
 
@@ -148,11 +149,11 @@ async fn revoked_peer_is_closed_and_never_redialled() {
         .expect("initial send");
     assert!(pair.transport_a.has_connection(&agent_b).await);
 
-    // Revoke exactly as the daemon does: commit the directory change, then
-    // close the live slot.
-    pair.directory_a.remove_peer(&agent_b).await.unwrap();
-    pair.transport_a.close_peer(&agent_b, b"peer revoked").await;
+    // Revoke through the sanctioned paired path: directory commit followed
+    // by transport teardown (what the daemon's remove_peer command calls).
+    pair.transport_a.revoke_peer(&agent_b).await.unwrap();
     assert!(!pair.transport_a.has_connection(&agent_b).await);
+    assert!(pair.directory_a.get_enrolled(&agent_b).await.is_none());
 
     // Neither an explicit send nor reconnect maintenance may re-establish
     // the revoked peer.
@@ -175,6 +176,27 @@ async fn revoked_peer_is_closed_and_never_redialled() {
         !pair.transport_a.has_connection(&agent_b).await,
         "maintenance must not redial a revoked peer"
     );
+}
+
+#[tokio::test]
+async fn failed_revoke_leaves_transport_state_untouched() {
+    let pair = make_transport_pair().await;
+    let agent_a = AgentId::parse(pair.id_a.agent_id()).unwrap();
+    let agent_b = AgentId::parse(pair.id_b.agent_id()).unwrap();
+
+    let first = Envelope::new(agent_a, agent_b.clone(), MessageKind::Message, json!({}));
+    pair.transport_a
+        .send_to(&pair.directory_a, &agent_b, first, Duration::from_secs(5))
+        .await
+        .expect("initial send");
+
+    // Revoking an unenrolled peer fails and must not tear down unrelated
+    // state: transport authority follows trust, never leads it.
+    let stranger = AgentId::parse("ed25519.cccccccccccccccccccccccccccccccc").unwrap();
+    let err = pair.transport_a.revoke_peer(&stranger).await.unwrap_err();
+    assert!(matches!(err, DirectoryError::NotEnrolled(_)));
+    assert!(pair.transport_a.has_connection(&agent_b).await);
+    assert!(pair.directory_a.get_enrolled(&agent_b).await.is_some());
 }
 
 #[tokio::test]

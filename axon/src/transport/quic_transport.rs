@@ -13,7 +13,7 @@ use tracing::{debug, info, warn};
 
 use crate::identity::Identity;
 use crate::message::{AgentId, Envelope};
-use crate::peer_directory::PeerDirectory;
+use crate::peer_directory::{DirectoryError, PeerDirectory, PeerIdentity};
 use crate::transport::PairRequest;
 
 use super::DIAL_TIMEOUT;
@@ -146,6 +146,24 @@ impl ConnectionManager {
 
     pub async fn connected_count(&self) -> usize {
         self.registry.count().await
+    }
+
+    /// Revoke a peer through the single sanctioned pairing: commit trust
+    /// removal to the directory first, THEN tear down transport state. The
+    /// admission gate's revocation guarantee — either the gate refuses a
+    /// handshake that raced the revocation, or the subsequent `close_peer`
+    /// tears the freshly installed slot down — requires `close_peer` to
+    /// follow every successful directory commit. This method exists so the
+    /// pairing cannot be skipped by a future caller: a bare
+    /// `PeerDirectory::remove_peer` without a paired `close_peer` could
+    /// leave a just-admitted connection live against revoked trust.
+    ///
+    /// On a failed commit (peer not enrolled, persistence error) nothing is
+    /// torn down: transport authority follows trust, never leads it.
+    pub async fn revoke_peer(&self, agent_id: &AgentId) -> Result<PeerIdentity, DirectoryError> {
+        let identity = self.directory.remove_peer(agent_id).await?;
+        self.close_peer(agent_id, b"peer revoked").await;
+        Ok(identity)
     }
 
     pub async fn close_peer(&self, agent_id: &AgentId, reason: &'static [u8]) {

@@ -10,6 +10,7 @@ Each entry: ID, date, subsystem, one-paragraph summary covering motivation, deci
 
 | ID | Date | Subsystem | Title |
 |---|---|---|---|
+| DEC-025 | 2026-09-01 | transport, daemon | Structural revocation pairing (`revoke_peer`) and fail-closed epoch-lock poisoning |
 | DEC-024 | 2026-08-26 | transport, peer_directory, ipc, daemon | Maintainability simplification: synchronous pin-snapshot admission gate, tripwire removal, registry read-path clarity, whoami flattening |
 | DEC-023 | 2026-08-26 | peer_directory, ipc, daemon | Round-eight re-review hardening: serialized persistence transactions, bounded req_id, encoder-gated client-handler errors, capacity-modeling Hegel machine |
 | DEC-022 | 2026-08-26 | peer_directory, ipc, daemon, transport | Round-seven review hardening: ghost-free revocation, framed outbound IPC, transactional persistence, typed directory errors |
@@ -38,6 +39,10 @@ Each entry: ID, date, subsystem, one-paragraph summary covering motivation, deci
 ---
 
 ## Entries
+
+### DEC-025: Structural revocation pairing (`revoke_peer`) and fail-closed epoch-lock poisoning
+
+Two Low findings from the swarm review of DEC-024's simplification pass, hardened without changing protocol behavior. **(1) Structural revocation pairing:** the revocation guarantee — either the admission gate refuses a handshake that raced the revocation, or the subsequent `close_peer` tears the freshly installed slot down — previously depended on every caller pairing `PeerDirectory::remove_peer` with `ConnectionManager::close_peer`, enforced only by convention at the single production call site. `ConnectionManager::revoke_peer` now performs the paired sequence (directory commit, then teardown) and the daemon's `remove_peer` IPC command is its only caller. On a failed commit (peer not enrolled, persistence error) nothing is torn down: transport authority follows trust, never leads it. `PeerDirectory::remove_peer` remains public for directory-level tests, but the daemon runtime no longer calls it directly, so a future caller cannot silently skip the teardown half. **(2) Fail-closed epoch poisoning:** every enrollment-epoch access previously panicked via `.expect` on lock poison — including inside the admission gate while it holds the registry write lock, cascading poison to all registry users. Poisoning now fails closed: the gate rejects every admission while the lock is poisoned (the lock is never recovered or cleared), epoch captures default to the never-revoked zero, and `close_peer` skips the bump with a warning. The slot-teardown half of revocation is unaffected, so a revocation racing a poisoned lock still tears down live slots; captures taken during poisoning can never be admitted because the gate reads the same poisoned lock. A poisoned lock is permanent until restart — refusing new connections after unexplained internal corruption is the conservative choice for a daemon whose new connections are security-relevant.
 
 ### DEC-024: Maintainability simplification: synchronous pin-snapshot admission gate, tripwire removal, registry read-path clarity, whoami flattening
 

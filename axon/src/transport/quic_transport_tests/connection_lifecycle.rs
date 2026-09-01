@@ -1,3 +1,5 @@
+use std::panic::AssertUnwindSafe;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use serde_json::json;
@@ -130,6 +132,34 @@ async fn revoking_one_peer_does_not_reject_an_unrelated_peers_handshake() {
         )
         .await
         .expect("send to unrelated peer must succeed after revoking B");
+}
+
+#[tokio::test]
+async fn poisoned_epoch_lock_fails_admission_closed() {
+    let trio = make_transport_trio().await;
+    let manager = &trio.transport_a;
+
+    // Poison the epoch lock: a holder panics while holding it.
+    let epochs = Arc::clone(&manager.enrollment_epochs);
+    let _ = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        let _guard = epochs.lock().expect("lock before poisoning");
+        panic!("intentional: poison the enrollment epoch lock");
+    }));
+
+    // Admission fails CLOSED for every captured epoch while poisoned.
+    assert!(!manager.admission_gate(trio.agent_b.clone(), 0)());
+    let captured = manager.peer_enrollment_epoch(&trio.agent_c);
+    assert!(!manager.admission_gate(trio.agent_c.clone(), captured)());
+
+    // Captures default safely instead of panicking.
+    assert_eq!(manager.peer_enrollment_epoch(&trio.agent_c), 0);
+    assert!(manager.capture_enrollment_epochs().is_empty());
+
+    // close_peer (epoch bump + registry teardown) must not panic while
+    // poisoned; the bump is skipped with a warning and the gate keeps
+    // failing closed.
+    manager.close_peer(&trio.agent_c, b"poison test").await;
+    assert!(!manager.admission_gate(trio.agent_c.clone(), 0)());
 }
 
 #[tokio::test]

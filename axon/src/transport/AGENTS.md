@@ -30,6 +30,8 @@ TLS security > protocol correctness > performance.
 - Every send-path await is either deadline-bounded or selects on a cancellation token; DNS resolution abandons its `spawn_blocking` worker on cancel/timeout (the worker's result is dropped, never consumed).
 - Handshake attempts capture THEIR OWN PEER's enrollment epoch before they start (inbound handshakes snapshot all peers pre-handshake); admission re-checks that peer's epoch against revocations, so revoking one peer never rejects another's in-flight handshake. Epoch entries are never pruned (pruning would allow ABA reuse against restored trust).
 - Admission consumes the published pinning snapshot as its enrollment oracle (the same snapshot TLS verification reads) — never live directory state under the registry lock.
+- Revocations MUST go through `ConnectionManager::revoke_peer`: the directory commit and `close_peer` teardown are an inseparable pair (a bare `PeerDirectory::remove_peer` could leave a just-admitted connection live against revoked trust).
+- Enrollment-epoch lock poisoning fails closed at the admission gate; never recover a poisoned epoch lock and never panic on it.
 - Every accepted connection and stream task must be owned and joined on shutdown.
 
 ## Test targets
