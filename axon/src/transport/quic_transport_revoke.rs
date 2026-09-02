@@ -47,25 +47,22 @@ impl ConnectionManager {
     /// ownership means `close_all` joins in-flight revocations at shutdown
     /// instead of aborting them mid-pair. The pair deliberately does NOT
     /// observe shutdown cancellation — once the commit lands, teardown must
-    /// follow — and `close_all`'s bounded wait drains normal-speed pairs.
-    /// Residual exposure: a pathologically stalled (>2s) pair at runtime
-    /// shutdown can still be dropped mid-pair; the connection dies with the
-    /// runtime, so at most a stale in-memory registry entry on an already
-    /// failing environment remains. A `JoinError` (runtime shutdown or task
-    /// panic) surfaces as [`DirectoryError::Persist`].
+    /// follow.
+    ///
+    /// A revocation racing shutdown may commit durably after `close_all`'s
+    /// wait has returned (the check-then-spawn window is not synchronized).
+    /// This is safe by construction: `close_all` closes the endpoint before
+    /// waiting, so no live connection exists to strand, the directory
+    /// remains consistent (its commit is atomic once started), and a
+    /// post-shutdown `close_peer` is a no-op on an empty registry. The
+    /// pairing's obligation — no live connection under revoked trust — is
+    /// defined against LIVE transport; after shutdown there is nothing to
+    /// tear down. A `JoinError` (runtime shutdown or task panic) surfaces
+    /// as [`DirectoryError::Persist`].
     ///
     /// On a failed commit (peer not enrolled, persistence error) nothing is
     /// torn down: transport authority follows trust, never leads it.
     pub async fn revoke_peer(&self, agent_id: &AgentId) -> Result<PeerIdentity, DirectoryError> {
-        // No-new-revocations boundary: after `close_all` has closed the
-        // tracker (shutdown wait completed), a revocation started now would
-        // never be joined and could commit trust removal after transport
-        // shutdown. Refuse instead; the caller may retry before shutdown.
-        if self.tasks.is_closed() {
-            return Err(DirectoryError::Persist(anyhow!(
-                "transport is shutting down; revocation refused"
-            )));
-        }
         let manager = self.clone();
         let agent_id = agent_id.clone();
         self.tasks
