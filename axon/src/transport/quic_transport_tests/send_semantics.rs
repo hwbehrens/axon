@@ -193,34 +193,41 @@ async fn cancelled_revoke_still_tears_down_transport() {
         .expect("initial send");
     assert!(transport.has_connection(&agent_b).await);
 
-    // Abort the caller mid-revocation. The directory's persistent edit is
-    // detached and completes once started, so without revoke_peer running
-    // the pair on its own detached task, trust would be removed while the
-    // live connection survived. The pair task is detached from the aborted
-    // caller and must land BOTH halves.
+    // Arm the gate, then abort the caller while the pair is parked EXACTLY
+    // between the directory commit and transport teardown. Trust removal is
+    // detached and completes once started, so without revoke_peer owning
+    // the pair on its own tracked task, teardown would be skipped. The pair
+    // task is detached from the aborted caller and must land both halves.
+    super::super::revocation_test_gate::arm();
     let revoker = tokio::spawn({
         let transport = transport.clone();
         let agent_b = agent_b.clone();
         async move { transport.revoke_peer(&agent_b).await }
     });
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    revoker.abort();
 
+    // Wait for the commit to land: the pair is now parked at the gate.
     let deadline = Instant::now() + Duration::from_secs(5);
-    while (transport.has_connection(&agent_b).await
-        || directory.get_enrolled(&agent_b).await.is_some())
-        && Instant::now() < deadline
-    {
-        tokio::time::sleep(Duration::from_millis(10)).await;
+    while directory.get_enrolled(&agent_b).await.is_some() && Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(1)).await;
     }
     assert!(
         directory.get_enrolled(&agent_b).await.is_none(),
-        "trust removal must complete despite caller abort"
+        "directory commit must have landed while the pair is gated"
     );
+
+    // Abort the caller inside the pairing window, then release the pair.
+    revoker.abort();
+    super::super::revocation_test_gate::disarm_and_release();
+
+    // Teardown must still land.
+    while transport.has_connection(&agent_b).await && Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
     assert!(
         !transport.has_connection(&agent_b).await,
         "transport teardown must complete despite caller abort"
     );
+    assert!(directory.get_enrolled(&agent_b).await.is_none());
 }
 
 #[tokio::test]

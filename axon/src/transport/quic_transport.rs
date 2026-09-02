@@ -68,6 +68,39 @@ pub struct ConnectionManager {
     enrollment_epochs: Arc<StdMutex<HashMap<AgentId, Arc<AtomicU64>>>>,
 }
 
+/// Test-only determinism gate for [`ConnectionManager::revoke_peer`]: when
+/// armed, an in-flight revocation pauses between the directory commit and
+/// transport teardown, so tests can cancel the caller inside the pairing
+/// window deterministically instead of racing a fixed sleep.
+#[cfg(test)]
+pub(super) mod revocation_test_gate {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use tokio::sync::Notify;
+
+    static ARMED: AtomicBool = AtomicBool::new(false);
+    static NOTIFY: std::sync::LazyLock<Notify> = std::sync::LazyLock::new(Notify::new);
+
+    /// Arm the gate; the NEXT revocation to reach the post-commit point
+    /// (and any later ones while armed) pauses until disarmed.
+    pub fn arm() {
+        ARMED.store(true, Ordering::Release);
+    }
+
+    /// Disarm and release any paused revocation. `notify_one` stores a
+    /// permit, so a revocation that has not reached the gate yet passes
+    /// immediately.
+    pub fn disarm_and_release() {
+        ARMED.store(false, Ordering::Release);
+        NOTIFY.notify_one();
+    }
+
+    pub(super) async fn pause_if_armed() {
+        if ARMED.load(Ordering::Acquire) {
+            NOTIFY.notified().await;
+        }
+    }
+}
+
 impl ConnectionManager {
     pub async fn bind(
         bind_addr: SocketAddr,
@@ -159,29 +192,34 @@ impl ConnectionManager {
     /// without a paired `close_peer` could leave a just-admitted connection
     /// live against revoked trust.
     ///
-    /// The pair runs on a task detached from this future's caller. The
-    /// directory's persistent edit is itself shielded from cancellation
-    /// (its transaction worker completes save-plus-apply once started), so
-    /// a caller cancelled between commit and teardown would otherwise
-    /// strand a live connection against revoked trust. Once this method's
-    /// body has started, the pair completes regardless of what happens to
-    /// the caller; a `JoinError` (runtime shutdown or task panic) surfaces
-    /// as [`DirectoryError::Persist`].
+    /// The pair runs on a task owned by the manager's task tracker and
+    /// detached from this future's caller. The directory's persistent edit
+    /// is itself shielded from cancellation (its transaction worker
+    /// completes save-plus-apply once started), so a caller cancelled
+    /// between commit and teardown would otherwise strand a live connection
+    /// against revoked trust. Once this method's body has started, the pair
+    /// completes regardless of what happens to the caller; tracker
+    /// ownership means `close_all` joins in-flight revocations at shutdown
+    /// instead of aborting them mid-pair. A `JoinError` (runtime shutdown
+    /// or task panic) surfaces as [`DirectoryError::Persist`].
     ///
     /// On a failed commit (peer not enrolled, persistence error) nothing is
     /// torn down: transport authority follows trust, never leads it.
     pub async fn revoke_peer(&self, agent_id: &AgentId) -> Result<PeerIdentity, DirectoryError> {
         let manager = self.clone();
         let agent_id = agent_id.clone();
-        tokio::spawn(async move {
-            let identity = manager.directory.remove_peer(&agent_id).await?;
-            manager.close_peer(&agent_id, b"peer revoked").await;
-            Ok(identity)
-        })
-        .await
-        .map_err(|err| {
-            DirectoryError::Persist(anyhow!("revocation task failed before teardown: {err}"))
-        })?
+        self.tasks
+            .spawn(async move {
+                let identity = manager.directory.remove_peer(&agent_id).await?;
+                #[cfg(test)]
+                revocation_test_gate::pause_if_armed().await;
+                manager.close_peer(&agent_id, b"peer revoked").await;
+                Ok(identity)
+            })
+            .await
+            .map_err(|err| {
+                DirectoryError::Persist(anyhow!("revocation task failed before teardown: {err}"))
+            })?
     }
 
     pub async fn close_peer(&self, agent_id: &AgentId, reason: &'static [u8]) {
