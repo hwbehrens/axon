@@ -16,8 +16,8 @@ fuzz_target!(|data: &[u8]| {
     // A manifest that parses must satisfy every invariant the daemon relies
     // on: bounded service count, encoded size within the wire budget, and
     // successful re-encoding (the describe response path).
-    assert!(!manifest.services.is_empty());
-    assert!(manifest.services.len() <= 64);
+    assert!(!manifest.services().is_empty());
+    assert!(manifest.service_count() <= 64);
     let size = manifest
         .encoded_size()
         .expect("a parsed manifest always re-encodes");

@@ -133,6 +133,18 @@ impl Manifest {
         Ok(manifest)
     }
 
+    /// Read-only view of the validated service list. External consumers
+    /// (fuzz targets, tooling) inspect through this accessor; construction
+    /// remains confined to validated paths.
+    pub fn services(&self) -> &[ServiceEntry] {
+        &self.services
+    }
+
+    /// Number of validated services (1..=[`MAX_SERVICES`]).
+    pub fn service_count(&self) -> usize {
+        self.services.len()
+    }
+
     /// Encoded JSON size, used for the [`MAX_MANIFEST_BYTES`] bound.
     pub fn encoded_size(&self) -> Result<usize> {
         Ok(serde_json::to_vec(self)?.len())
