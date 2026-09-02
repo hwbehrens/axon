@@ -228,7 +228,18 @@ impl PeerDirectory {
             .await
     }
 
-    pub async fn remove_peer(&self, agent_id: &AgentId) -> Result<PeerIdentity, DirectoryError> {
+    /// Revoke a peer: remove the durable record and republish pins.
+    ///
+    /// Crate-private BY DESIGN: trust removal must be paired with transport
+    /// teardown (the admission gate's revocation guarantee depends on
+    /// `close_peer` following every successful commit), so runtime callers
+    /// — in-crate or library — must use
+    /// [`crate::transport::ConnectionManager::revoke_peer`]. Directory-level
+    /// tests reach this method from inside the module tree.
+    pub(crate) async fn remove_peer(
+        &self,
+        agent_id: &AgentId,
+    ) -> Result<PeerIdentity, DirectoryError> {
         let agent_id = agent_id.clone();
         self.commit_persistent(move |current| remove_peer_plan(current, &agent_id))
             .await

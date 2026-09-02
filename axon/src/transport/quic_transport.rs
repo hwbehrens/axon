@@ -155,15 +155,33 @@ impl ConnectionManager {
     /// tears the freshly installed slot down — requires `close_peer` to
     /// follow every successful directory commit. This method exists so the
     /// pairing cannot be skipped by a future caller: a bare
-    /// `PeerDirectory::remove_peer` without a paired `close_peer` could
-    /// leave a just-admitted connection live against revoked trust.
+    /// `PeerDirectory::remove_peer` (crate-private for exactly this reason)
+    /// without a paired `close_peer` could leave a just-admitted connection
+    /// live against revoked trust.
+    ///
+    /// The pair runs on a task detached from this future's caller. The
+    /// directory's persistent edit is itself shielded from cancellation
+    /// (its transaction worker completes save-plus-apply once started), so
+    /// a caller cancelled between commit and teardown would otherwise
+    /// strand a live connection against revoked trust. Once this method's
+    /// body has started, the pair completes regardless of what happens to
+    /// the caller; a `JoinError` (runtime shutdown or task panic) surfaces
+    /// as [`DirectoryError::Persist`].
     ///
     /// On a failed commit (peer not enrolled, persistence error) nothing is
     /// torn down: transport authority follows trust, never leads it.
     pub async fn revoke_peer(&self, agent_id: &AgentId) -> Result<PeerIdentity, DirectoryError> {
-        let identity = self.directory.remove_peer(agent_id).await?;
-        self.close_peer(agent_id, b"peer revoked").await;
-        Ok(identity)
+        let manager = self.clone();
+        let agent_id = agent_id.clone();
+        tokio::spawn(async move {
+            let identity = manager.directory.remove_peer(&agent_id).await?;
+            manager.close_peer(&agent_id, b"peer revoked").await;
+            Ok(identity)
+        })
+        .await
+        .map_err(|err| {
+            DirectoryError::Persist(anyhow!("revocation task failed before teardown: {err}"))
+        })?
     }
 
     pub async fn close_peer(&self, agent_id: &AgentId, reason: &'static [u8]) {

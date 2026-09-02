@@ -8,7 +8,7 @@
 //! - Fire-and-forget retries must preserve at-most-once delivery (P1):
 //!   ambiguous failures are not retried for non-request kinds.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::json;
 
@@ -175,6 +175,51 @@ async fn revoked_peer_is_closed_and_never_redialled() {
     assert!(
         !pair.transport_a.has_connection(&agent_b).await,
         "maintenance must not redial a revoked peer"
+    );
+}
+
+#[tokio::test]
+async fn cancelled_revoke_still_tears_down_transport() {
+    let pair = make_transport_pair().await;
+    let agent_a = AgentId::parse(pair.id_a.agent_id()).unwrap();
+    let agent_b = AgentId::parse(pair.id_b.agent_id()).unwrap();
+    let transport = pair.transport_a.clone();
+    let directory = pair.directory_a.clone();
+
+    let first = Envelope::new(agent_a, agent_b.clone(), MessageKind::Message, json!({}));
+    transport
+        .send_to(&directory, &agent_b, first, Duration::from_secs(5))
+        .await
+        .expect("initial send");
+    assert!(transport.has_connection(&agent_b).await);
+
+    // Abort the caller mid-revocation. The directory's persistent edit is
+    // detached and completes once started, so without revoke_peer running
+    // the pair on its own detached task, trust would be removed while the
+    // live connection survived. The pair task is detached from the aborted
+    // caller and must land BOTH halves.
+    let revoker = tokio::spawn({
+        let transport = transport.clone();
+        let agent_b = agent_b.clone();
+        async move { transport.revoke_peer(&agent_b).await }
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    revoker.abort();
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while (transport.has_connection(&agent_b).await
+        || directory.get_enrolled(&agent_b).await.is_some())
+        && Instant::now() < deadline
+    {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(
+        directory.get_enrolled(&agent_b).await.is_none(),
+        "trust removal must complete despite caller abort"
+    );
+    assert!(
+        !transport.has_connection(&agent_b).await,
+        "transport teardown must complete despite caller abort"
     );
 }
 
