@@ -73,12 +73,26 @@ impl ManifestCache {
     }
 
     /// Return the cached manifest regardless of age (advisory display only).
+    /// Entries are connection-scoped — [`ManifestCache::retain_connected`]
+    /// evicts entries when a peer is no longer connected and [`remove`]
+    /// evicts on revocation — so this reflects the last manifest observed
+    /// while the peer was connected, never a permanently stale record.
     pub async fn get(&self, agent_id: &AgentId) -> Option<Arc<Manifest>> {
         let state = self.state.lock().await;
         state.map.get(agent_id).map(|c| Arc::clone(&c.manifest))
     }
 
-    /// Drop one peer's entry (e.g. on revocation or disconnect).
+    /// Evict entries for peers not in `connected`, keeping the cache
+    /// connection-scoped: entries exist only for peers observed connected at
+    /// the most recent `who_can` query and disappear on disconnect or
+    /// revocation.
+    pub async fn retain_connected(&self, connected: &[AgentId]) {
+        let mut state = self.state.lock().await;
+        state.map.retain(|id, _| connected.contains(id));
+        state.order.retain(|id| connected.contains(id));
+    }
+
+    /// Drop one peer's entry (on revocation or disconnect).
     pub async fn remove(&self, agent_id: &AgentId) {
         let mut state = self.state.lock().await;
         state.map.remove(agent_id);
@@ -93,3 +107,7 @@ impl ManifestCache {
         self.len().await == 0
     }
 }
+
+#[cfg(test)]
+#[path = "cache_tests.rs"]
+mod tests;

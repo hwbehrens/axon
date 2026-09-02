@@ -237,7 +237,7 @@ Reusable structured review and interrogation protocols in `prompts/`:
 ## Specs to Read First
 
 1. `spec/SPEC.md` — architecture + lifecycle (identity, discovery, transport)
-2. `spec/MESSAGE_TYPES.md` — message kinds (4), stream mapping
+2. `spec/MESSAGE_TYPES.md` — message kinds (5: request, response, message, error, describe), stream mapping
 3. `spec/WIRE_FORMAT.md` — normative interoperable wire format
 4. `spec/IPC.md` — IPC protocol, Unix socket commands
 5. `CONTRIBUTING.md` — contribution workflow, full module map, invariants, testing requirements

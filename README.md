@@ -239,6 +239,7 @@ axon examples    # prints a full annotated example interaction
 | `response` | Bidirectional | Reply to a request |
 | `message` | Unidirectional | Fire-and-forget |
 | `error` | Bidirectional | Error reply to a request |
+| `describe` | Bidirectional | Capability query, answered by the daemon from its registered manifest |
 
 See [`spec/MESSAGE_TYPES.md`](./spec/MESSAGE_TYPES.md) for message kinds and stream mapping, and [`spec/WIRE_FORMAT.md`](./spec/WIRE_FORMAT.md) for the normative wire format.
 

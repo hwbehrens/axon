@@ -40,6 +40,11 @@ pub(super) async fn handle(ctx: &DaemonContext, query: Option<String>) -> Daemon
     }
     connected.sort();
 
+    // Connection-scoped cache: entries for peers no longer connected (or
+    // revoked) are evicted here, so advisory `services` summaries can never
+    // outlive the connection that produced them.
+    ctx.manifest_cache.retain_connected(&connected).await;
+
     // Refresh stale or missing entries concurrently; fresh entries answer
     // from cache without waking the network.
     let mut pulls = tokio::task::JoinSet::new();
@@ -116,14 +121,33 @@ async fn pull_manifest(ctx: &DaemonContext, agent_id: &AgentId) -> PullOutcome {
         .send_to(&ctx.directory, agent_id, envelope, WHO_CAN_PULL_TIMEOUT)
         .await
     {
-        Ok(Some(response)) if response.kind == MessageKind::Response => {
-            match response.payload_as::<Manifest>() {
+        Ok(Some(response)) => match response.kind {
+            MessageKind::Response => match response.payload_as::<Manifest>() {
                 Ok(manifest) => PullOutcome::Manifest(agent_id.clone(), manifest),
-                Err(_) => PullOutcome::Declined(agent_id.clone()),
+                // A `response` whose payload is not a valid manifest is a
+                // failed capability pull, not a declined one.
+                Err(_) => PullOutcome::Unreachable(agent_id.clone()),
+            },
+            MessageKind::Error => {
+                // Expected, explicit declines: nothing published, or an older
+                // peer that cannot apply bidirectional `describe` semantics
+                // (spec/MESSAGE_TYPES.md forward-compatibility rule).
+                let code = response.payload_value().ok().and_then(|payload| {
+                    payload
+                        .get("code")
+                        .and_then(|code| code.as_str())
+                        .map(String::from)
+                });
+                match code.as_deref() {
+                    Some("no_manifest") | Some("unsupported_kind") => {
+                        PullOutcome::Declined(agent_id.clone())
+                    }
+                    _ => PullOutcome::Unreachable(agent_id.clone()),
+                }
             }
-        }
-        Ok(_) => PullOutcome::Declined(agent_id.clone()),
-        Err(_) => PullOutcome::Unreachable(agent_id.clone()),
+            _ => PullOutcome::Unreachable(agent_id.clone()),
+        },
+        Ok(None) | Err(_) => PullOutcome::Unreachable(agent_id.clone()),
     }
 }
 
@@ -131,8 +155,11 @@ async fn pull_manifest(ctx: &DaemonContext, agent_id: &AgentId) -> PullOutcome {
 /// query is trimmed and lowercased here; absent or whitespace-only queries
 /// list every service.
 fn match_services(query: Option<&str>, manifest: &Manifest) -> Vec<ServiceSummary> {
+    // Unicode-aware lowercasing on both sides: manifest ids and descriptions
+    // may contain non-ASCII text (only whitespace/control characters are
+    // excluded), so ASCII-only folding would miss legitimate matches.
     let needle = query
-        .map(|q| q.trim().to_ascii_lowercase())
+        .map(|q| q.trim().to_lowercase())
         .filter(|q| !q.is_empty());
     manifest
         .services
@@ -140,11 +167,8 @@ fn match_services(query: Option<&str>, manifest: &Manifest) -> Vec<ServiceSummar
         .filter(|service| match &needle {
             None => true,
             Some(needle) => {
-                service.id.to_ascii_lowercase().contains(needle.as_str())
-                    || service
-                        .description
-                        .to_ascii_lowercase()
-                        .contains(needle.as_str())
+                service.id.to_lowercase().contains(needle.as_str())
+                    || service.description.to_lowercase().contains(needle.as_str())
             }
         })
         .map(|service| ServiceSummary {

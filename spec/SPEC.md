@@ -104,6 +104,7 @@ Authentication is solely via mTLS. TLS verifiers read an immutable pinning snaps
 | `response` | Bidirectional | Reply to a request |
 | `message` | Unidirectional | Fire-and-forget |
 | `error` | Bidirectional (reply) or Unidirectional (unsolicited) | Error reply to a request, or unsolicited error |
+| `describe` | Bidirectional | Capability query, answered by the daemon from its registered manifest |
 
 - Stream contains: JSON bytes, delimited by QUIC stream FIN (no length prefix).
 - Max message size: 64KB.

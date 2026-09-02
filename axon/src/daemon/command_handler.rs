@@ -196,11 +196,15 @@ pub(crate) async fn handle_command(cmd: CommandEvent, ctx: &DaemonContext) -> Re
             // gate's revocation guarantee cannot be defeated by a skipped
             // close_peer.
             match ctx.transport.revoke_peer(&agent_id).await {
-                Ok(_) => DaemonReply::PeerChanged {
-                    ok: true,
-                    agent_id: agent_id.to_string(),
-                    req_id,
-                },
+                Ok(_) => {
+                    // Advisory capability data must not outlive the peer.
+                    ctx.manifest_cache.remove(&agent_id).await;
+                    DaemonReply::PeerChanged {
+                        ok: true,
+                        agent_id: agent_id.to_string(),
+                        req_id,
+                    }
+                }
                 Err(err) => error_reply(directory_failure(err), req_id),
             }
         }

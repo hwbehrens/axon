@@ -125,6 +125,48 @@ Core decisions:
 cd axon && make verify   # fmt + clippy -D warnings + full test suite
 ```
 
+## Review round 1 (Luna Max agent, 2026-02-17) — request-changes → repaired
+
+Independent adversarial review of 5bcde3a returned verdict request-changes,
+score 72/100. All eight findings verified and repaired in the follow-up commit:
+
+1. **High — event-loop blocking**: `who_can` was awaited inline in the daemon
+   select loop, stalling discovery/reconnect/disconnect handling for up to
+   `WHO_CAN_PULL_TIMEOUT` per query. Fixed: `WhoCan` now takes the spawned
+   command path alongside `Send` (it reserves no send capacity).
+2. **Medium — orphaned cache tests**: `cache_tests.rs` was never wired into
+   `cache.rs` AND its eviction math was wrong (`i % 20` → 20 unique IDs, so
+   the capacity assertion could not hold). Fixed: module wired; filler IDs
+   are now 256 unique hex-encoded indices; added a `retain_connected` test.
+3. **Medium — stale claims**: cache is now connection-scoped —
+   `retain_connected` evicts entries for peers no longer connected at each
+   `who_can`, and `remove_peer` invalidates on revocation. `get` documented
+   as last-observed-while-connected.
+4. **Medium — Declined semantics**: `Declined` is now reserved for explicit
+   `no_manifest` and the intentional `unsupported_kind` compatibility case;
+   malformed payloads and unexpected errors map to `Unreachable` and are
+   named in the reply, per IPC.md §4.9.
+5. **Low — spec-compliance coverage**: `describe` added to the kind round-trip
+   and stream-classification tests; new `describe_exchange_conformance` and
+   legacy-string-losslessness tests in `tests/spec_compliance/wire_format/`.
+6. **Low — unvalidated construction**: `Manifest`/`ServiceEntry` fields are
+   now `pub(crate)`; the only construction paths are serde (`try_from` →
+   `from_parts`) and `from_parts` itself, both validated — making the fuzz
+   target's post-parse assertions hold for ALL values, not just parsed ones.
+7. **Low — stale doc summaries**: SPEC.md §3 stream table, README Message
+   Types table, AGENTS.md specs-to-read line, and `message/AGENTS.md`
+   guardrail updated to five kinds.
+8. **Low — Unicode matching**: `who_can` matching now uses Unicode-aware
+   `to_lowercase()` on both sides.
+
+Process note for future rounds: the orphaned-test finding is the second time
+in this repo's history a test module compiled nowhere; wiring a new
+test file into its module is part of writing it.
+
+```sh
+cd axon && make verify   # fmt + clippy -D warnings + full test suite
+```
+
 New tests: manifest parse/validate/round-trip/oversize; broker describe
 answering (with/without manifest, no-handler, before replay cache, refreshed
 manifest, cleared on disconnect); IPC protocol parsing (`serve` manifest,

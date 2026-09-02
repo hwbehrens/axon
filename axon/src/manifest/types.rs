@@ -25,6 +25,12 @@ const MAX_CONCURRENCY: u32 = 1024;
 /// cache. Unknown fields are ignored for forward compatibility (payloads are
 /// opaque; the manifest schema merely adds optional structure).
 ///
+/// Fields are crate-private on purpose: every construction path — serde via
+/// `try_from`, or [`Manifest::from_parts`] — runs validation, so a `Manifest`
+/// value in daemon state always satisfies every invariant (schema bounds and
+/// the encoded-size limit). Hand-constructed unvalidated values are not
+/// possible, which is what the `fuzz_manifest` post-parse assertions rely on.
+///
 /// The schema is written for LLM consumption: `description` is imperative
 /// prose, and `example_request`/`example_response` are worked objects —
 /// callers generalize from one example faster than from a formal schema.
@@ -33,37 +39,37 @@ const MAX_CONCURRENCY: u32 = 1024;
 pub struct Manifest {
     /// Optional human/agent-readable display name for the application.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
+    pub(crate) name: Option<String>,
     /// Optional application version string (distinct from the daemon version).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub version: Option<String>,
+    pub(crate) version: Option<String>,
     /// At least one service; at most [`MAX_SERVICES`].
-    pub services: Vec<ServiceEntry>,
+    pub(crate) services: Vec<ServiceEntry>,
 }
 
 /// One offered service.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ServiceEntry {
     /// Stable machine-readable identifier (e.g. `cargo_test`).
-    pub id: String,
+    pub(crate) id: String,
     /// What the service does and how to call it.
-    pub description: String,
+    pub(crate) description: String,
     /// Worked request example (JSON object). Examples teach callers faster
     /// than formal schemas.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub example_request: Option<serde_json::Value>,
+    pub(crate) example_request: Option<serde_json::Value>,
     /// Worked response example (JSON object).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub example_response: Option<serde_json::Value>,
+    pub(crate) example_response: Option<serde_json::Value>,
     /// Suggested upper bound for a single exchange, in seconds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub timeout_hint_secs: Option<u64>,
+    pub(crate) timeout_hint_secs: Option<u64>,
     /// Concurrent exchanges the service can absorb.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub concurrency: Option<u32>,
+    pub(crate) concurrency: Option<u32>,
     /// Service-specific error payload codes a caller may receive.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub errors: Option<Vec<String>>,
+    pub(crate) errors: Option<Vec<String>>,
 }
 
 /// Raw deserialization shape; validation happens in [`Manifest::from_parts`].

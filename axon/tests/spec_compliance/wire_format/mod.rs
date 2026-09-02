@@ -287,3 +287,84 @@ peers:
     .unwrap();
     assert!(axon::config::Config::load(&path).await.is_err());
 }
+
+// =========================================================================
+// §6.5 Capability manifests — describe kind and manifest payload conformance
+// =========================================================================
+
+/// spec/MESSAGE_TYPES.md + spec/WIRE_FORMAT.md §6.5: `describe` is a
+/// bidirectional kind; its `response` payload is a capability manifest whose
+/// encoded form carries only id/kind/ref/payload on the wire.
+#[test]
+fn describe_exchange_conformance() {
+    use axon::manifest::{MAX_MANIFEST_BYTES, Manifest};
+
+    // Request: kind "describe", payload ignored (spec: SHOULD be {}).
+    let request = Envelope::new(agent_a(), agent_b(), MessageKind::Describe, json!({}));
+    let request_bytes = request.wire_encode().unwrap();
+    let decoded_request: Value = serde_json::from_slice(&request_bytes).unwrap();
+    assert_eq!(decoded_request["kind"], "describe");
+    assert!(decoded_request.get("from").is_none());
+    assert!(decoded_request.get("to").is_none());
+
+    // Response: manifest payload with the normative schema fields. Built via
+    // the wire path (JSON parse) — the only external construction route.
+    let manifest: Manifest = serde_json::from_value(json!({
+        "name": "forge",
+        "version": "0.9.0",
+        "services": [{
+            "id": "cargo_test",
+            "description": "Run cargo test on a workspace.",
+            "example_request": {"workspace": "/srv/axon"},
+            "timeout_hint_secs": 900,
+            "concurrency": 2,
+            "errors": ["build_failed"]
+        }]
+    }))
+    .unwrap();
+    assert!(
+        manifest.encoded_size().unwrap() <= MAX_MANIFEST_BYTES,
+        "schema-valid manifests must fit the §6.5 encoded bound"
+    );
+
+    let response = Envelope::response_to(
+        &request,
+        agent_b(),
+        MessageKind::Response,
+        manifest.to_payload_value().unwrap(),
+    );
+    let response_bytes = response.wire_encode().unwrap();
+    let decoded: Value = serde_json::from_slice(&response_bytes).unwrap();
+    assert_eq!(decoded["kind"], "response");
+    assert_eq!(decoded["ref"], json!(request.id.to_string()));
+    assert_eq!(decoded["payload"]["name"], "forge");
+    assert_eq!(decoded["payload"]["services"][0]["id"], "cargo_test");
+    assert_eq!(
+        decoded["payload"]["services"][0]["timeout_hint_secs"],
+        json!(900)
+    );
+
+    // Round-trip: the wire payload parses back into an equal Manifest
+    // (unknown fields ignored, per §6.5 forward compatibility).
+    let mut with_future_field = decoded["payload"].clone();
+    with_future_field["future_field"] = json!(true);
+    let reparsed: Manifest = serde_json::from_value(with_future_field).unwrap();
+    assert_eq!(reparsed, manifest);
+}
+
+/// spec/MESSAGE_TYPES.md forward-compatibility note: a peer that predates
+/// `describe` sees a plain unknown kind string on the wire and replies
+/// `unsupported_kind` naming it. Simulate that legacy receiver with a
+/// string-typed kind field.
+#[test]
+fn describe_is_a_lossless_string_for_legacy_receivers() {
+    #[derive(serde::Deserialize)]
+    struct LegacyEnvelope {
+        kind: String,
+    }
+
+    let request = Envelope::new(agent_a(), agent_b(), MessageKind::Describe, json!({}));
+    let bytes = encode(&request).unwrap();
+    let legacy: LegacyEnvelope = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(legacy.kind, "describe");
+}
