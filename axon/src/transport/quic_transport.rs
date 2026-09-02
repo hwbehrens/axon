@@ -2,10 +2,14 @@ use std::collections::HashMap;
 use std::future::{Future, IntoFuture};
 use std::net::SocketAddr;
 use std::pin::Pin;
+#[cfg(test)]
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex as StdMutex, atomic::AtomicU64};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow};
+#[cfg(test)]
+use tokio::sync::Notify;
 use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore, broadcast};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
@@ -66,39 +70,21 @@ pub struct ConnectionManager {
     /// reused — pruning entries would allow an ABA reuse against restored
     /// trust. Reads take a short std mutex; no await runs under it.
     enrollment_epochs: Arc<StdMutex<HashMap<AgentId, Arc<AtomicU64>>>>,
+    /// Test-only determinism gate, scoped PER MANAGER (never global, so
+    /// parallel tests cannot interfere): when armed, this manager's
+    /// in-flight revocations pause between the directory commit and
+    /// transport teardown, letting tests cancel the caller or start
+    /// `close_all` inside the pairing window deterministically.
+    #[cfg(test)]
+    revocation_pause: Arc<RevocationPause>,
 }
 
-/// Test-only determinism gate for [`ConnectionManager::revoke_peer`]: when
-/// armed, an in-flight revocation pauses between the directory commit and
-/// transport teardown, so tests can cancel the caller inside the pairing
-/// window deterministically instead of racing a fixed sleep.
+/// Test-only state behind [`ConnectionManager::revocation_pause`].
 #[cfg(test)]
-pub(super) mod revocation_test_gate {
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use tokio::sync::Notify;
-
-    static ARMED: AtomicBool = AtomicBool::new(false);
-    static NOTIFY: std::sync::LazyLock<Notify> = std::sync::LazyLock::new(Notify::new);
-
-    /// Arm the gate; the NEXT revocation to reach the post-commit point
-    /// (and any later ones while armed) pauses until disarmed.
-    pub fn arm() {
-        ARMED.store(true, Ordering::Release);
-    }
-
-    /// Disarm and release any paused revocation. `notify_one` stores a
-    /// permit, so a revocation that has not reached the gate yet passes
-    /// immediately.
-    pub fn disarm_and_release() {
-        ARMED.store(false, Ordering::Release);
-        NOTIFY.notify_one();
-    }
-
-    pub(super) async fn pause_if_armed() {
-        if ARMED.load(Ordering::Acquire) {
-            NOTIFY.notified().await;
-        }
-    }
+#[derive(Default)]
+struct RevocationPause {
+    armed: AtomicBool,
+    release: Notify,
 }
 
 impl ConnectionManager {
@@ -160,6 +146,8 @@ impl ConnectionManager {
             reconnect: ReconnectBook::default(),
             directory,
             enrollment_epochs: Arc::new(StdMutex::new(HashMap::new())),
+            #[cfg(test)]
+            revocation_pause: Arc::new(RevocationPause::default()),
         };
         manager.spawn_accept_loop();
         Ok(manager)
@@ -200,19 +188,40 @@ impl ConnectionManager {
     /// against revoked trust. Once this method's body has started, the pair
     /// completes regardless of what happens to the caller; tracker
     /// ownership means `close_all` joins in-flight revocations at shutdown
-    /// instead of aborting them mid-pair. A `JoinError` (runtime shutdown
-    /// or task panic) surfaces as [`DirectoryError::Persist`].
+    /// instead of aborting them mid-pair. The pair deliberately does NOT
+    /// observe shutdown cancellation — once the commit lands, teardown must
+    /// follow — and `close_all`'s bounded wait drains normal-speed pairs.
+    /// Residual exposure: a pathologically stalled (>2s) pair at runtime
+    /// shutdown can still be dropped mid-pair; the connection dies with the
+    /// runtime, so at most a stale in-memory registry entry on an already
+    /// failing environment remains. A `JoinError` (runtime shutdown or task
+    /// panic) surfaces as [`DirectoryError::Persist`].
     ///
     /// On a failed commit (peer not enrolled, persistence error) nothing is
     /// torn down: transport authority follows trust, never leads it.
     pub async fn revoke_peer(&self, agent_id: &AgentId) -> Result<PeerIdentity, DirectoryError> {
+        // No-new-revocations boundary: after `close_all` has closed the
+        // tracker (shutdown wait completed), a revocation started now would
+        // never be joined and could commit trust removal after transport
+        // shutdown. Refuse instead; the caller may retry before shutdown.
+        if self.tasks.is_closed() {
+            return Err(DirectoryError::Persist(anyhow!(
+                "transport is shutting down; revocation refused"
+            )));
+        }
         let manager = self.clone();
         let agent_id = agent_id.clone();
         self.tasks
             .spawn(async move {
                 let identity = manager.directory.remove_peer(&agent_id).await?;
                 #[cfg(test)]
-                revocation_test_gate::pause_if_armed().await;
+                if manager
+                    .revocation_pause
+                    .armed
+                    .load(std::sync::atomic::Ordering::Acquire)
+                {
+                    manager.revocation_pause.release.notified().await;
+                }
                 manager.close_peer(&agent_id, b"peer revoked").await;
                 Ok(identity)
             })

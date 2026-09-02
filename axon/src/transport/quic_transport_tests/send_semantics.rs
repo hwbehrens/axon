@@ -11,6 +11,7 @@
 use std::time::{Duration, Instant};
 
 use serde_json::json;
+use std::sync::atomic::Ordering;
 
 use super::fixtures::make_transport_pair;
 use crate::message::{AgentId, Envelope, MessageKind};
@@ -193,12 +194,15 @@ async fn cancelled_revoke_still_tears_down_transport() {
         .expect("initial send");
     assert!(transport.has_connection(&agent_b).await);
 
-    // Arm the gate, then abort the caller while the pair is parked EXACTLY
-    // between the directory commit and transport teardown. Trust removal is
-    // detached and completes once started, so without revoke_peer owning
-    // the pair on its own tracked task, teardown would be skipped. The pair
-    // task is detached from the aborted caller and must land both halves.
-    super::super::revocation_test_gate::arm();
+    // Arm the per-manager gate, then put the revocation pair into the exact
+    // cancellation window: parked between the directory commit and
+    // transport teardown. Trust removal is detached and completes once
+    // started, so without revoke_peer owning the pair on its own tracked
+    // task, an aborted caller would skip teardown.
+    transport
+        .revocation_pause
+        .armed
+        .store(true, Ordering::Release);
     let revoker = tokio::spawn({
         let transport = transport.clone();
         let agent_b = agent_b.clone();
@@ -215,14 +219,30 @@ async fn cancelled_revoke_still_tears_down_transport() {
         "directory commit must have landed while the pair is gated"
     );
 
-    // Abort the caller inside the pairing window, then release the pair.
+    // Phase 1 (caller cancellation): abort the caller inside the pairing
+    // window; the detached pair must survive.
     revoker.abort();
-    super::super::revocation_test_gate::disarm_and_release();
 
-    // Teardown must still land.
-    while transport.has_connection(&agent_b).await && Instant::now() < deadline {
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
+    // Phase 2 (tracker ownership): close_all must NOT return while the pair
+    // is still parked — shutdown joins in-flight revocations instead of
+    // leaving them to be dropped at runtime teardown.
+    let closer = tokio::spawn({
+        let transport = transport.clone();
+        async move { transport.close_all().await }
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(
+        !closer.is_finished(),
+        "close_all must wait for in-flight revocation pairs (tracker ownership)"
+    );
+
+    // Release the pair; teardown and shutdown must both complete.
+    transport
+        .revocation_pause
+        .armed
+        .store(false, Ordering::Release);
+    transport.revocation_pause.release.notify_one();
+    let _ = tokio::time::timeout(Duration::from_secs(5), closer).await;
     assert!(
         !transport.has_connection(&agent_b).await,
         "transport teardown must complete despite caller abort"
