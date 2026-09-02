@@ -21,11 +21,14 @@ pub(super) fn request() -> Arc<Envelope> {
 async fn one_connection_owns_handler_lease() {
     let broker = RequestBroker::new(agent('b'));
 
-    broker.register(1).await.expect("first handler");
+    broker.register(1, None).await.expect("first handler");
 
-    assert_eq!(broker.register(2).await, Err(BrokerError::HandlerBusy));
+    assert_eq!(
+        broker.register(2, None).await,
+        Err(BrokerError::HandlerBusy)
+    );
     broker
-        .register(1)
+        .register(1, None)
         .await
         .expect("same handler is idempotent");
 }
@@ -56,7 +59,7 @@ async fn no_handler_returns_immediate_unhandled_error() {
 #[tokio::test]
 async fn handler_can_reply_exactly_once() {
     let broker = RequestBroker::new(agent('b'));
-    broker.register(1).await.expect("handler");
+    broker.register(1, None).await.expect("handler");
     let original = request();
     let BeginRequest::Deliver(delivery) = broker.begin(original.clone(), REQUEST_TTL).await else {
         panic!("request should be delivered");
@@ -89,7 +92,7 @@ async fn handler_can_reply_exactly_once() {
 #[tokio::test]
 async fn disconnect_releases_lease_and_terminates_pending_requests() {
     let broker = RequestBroker::new(agent('b'));
-    broker.register(1).await.expect("handler");
+    broker.register(1, None).await.expect("handler");
     let BeginRequest::Deliver(delivery) = broker.begin(request(), REQUEST_TTL).await else {
         panic!("request should be delivered");
     };
@@ -105,7 +108,7 @@ async fn disconnect_releases_lease_and_terminates_pending_requests() {
         "unhandled"
     );
     broker
-        .register(2)
+        .register(2, None)
         .await
         .expect("new handler after disconnect");
 }
@@ -113,7 +116,7 @@ async fn disconnect_releases_lease_and_terminates_pending_requests() {
 #[tokio::test]
 async fn non_handler_cannot_reply() {
     let broker = RequestBroker::new(agent('b'));
-    broker.register(1).await.expect("handler");
+    broker.register(1, None).await.expect("handler");
     let original = request();
     let BeginRequest::Deliver(_delivery) = broker.begin(original.clone(), REQUEST_TTL).await else {
         panic!("request should be delivered");
@@ -130,7 +133,7 @@ async fn non_handler_cannot_reply() {
 #[tokio::test]
 async fn handler_deadline_removes_pending_request() {
     let broker = RequestBroker::new(agent('b'));
-    broker.register(1).await.expect("handler");
+    broker.register(1, None).await.expect("handler");
     let BeginRequest::Deliver(delivery) = broker.begin(request(), REQUEST_TTL).await else {
         panic!("request should be delivered");
     };
@@ -150,7 +153,7 @@ async fn handler_deadline_removes_pending_request() {
 #[tokio::test]
 async fn pending_request_capacity_is_bounded() {
     let broker = RequestBroker::new(agent('b'));
-    broker.register(1).await.expect("handler");
+    broker.register(1, None).await.expect("handler");
     let mut deliveries = Vec::new();
     for index in 0..MAX_PENDING_REQUESTS {
         let mut next = (*request()).clone();
@@ -184,7 +187,7 @@ pub(super) const REQUEST_TTL: Duration = Duration::from_secs(30);
 #[tokio::test]
 async fn oversized_reply_is_rejected_without_consuming_the_request() {
     let broker = RequestBroker::new(agent('a'));
-    broker.register(1).await.unwrap();
+    broker.register(1, None).await.unwrap();
     let original = request();
     let BeginRequest::Deliver(delivery) = broker.begin(original.clone(), REQUEST_TTL).await else {
         panic!("delivery expected");
@@ -218,7 +221,7 @@ async fn oversized_reply_is_rejected_without_consuming_the_request() {
 #[tokio::test]
 async fn reconcile_clients_revokes_leases_and_pending_for_gone_clients() {
     let broker = RequestBroker::new(agent('a'));
-    broker.register(1).await.unwrap();
+    broker.register(1, None).await.unwrap();
     let BeginRequest::Deliver(delivery) = broker.begin(request(), REQUEST_TTL).await else {
         panic!("delivery expected");
     };
@@ -228,7 +231,7 @@ async fn reconcile_clients_revokes_leases_and_pending_for_gone_clients() {
     broker.reconcile_clients(&live).await;
 
     // Lease is freed: a new client can acquire it.
-    assert!(broker.register(2).await.is_ok());
+    assert!(broker.register(2, None).await.is_ok());
     // The orphaned pending request resolves with an explicit error.
     let response = delivery.response.await.expect("orphaned request resolves");
     assert_eq!(response.kind, MessageKind::Error);

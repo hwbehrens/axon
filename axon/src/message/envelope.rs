@@ -15,18 +15,22 @@ use uuid::Uuid;
 /// - `Response` → bidirectional stream (reply to a `Request`)
 /// - `Message` → unidirectional stream (fire-and-forget)
 /// - `Error` → bidirectional stream (error reply to a `Request`)
+/// - `Describe` → bidirectional stream (capability-manifest query; answered
+///   by the receiving daemon from its registered manifest, never delivered
+///   to the application handler)
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum MessageKind {
     Request,
     Response,
     Message,
     Error,
+    Describe,
     Unknown(Box<str>),
 }
 
 impl MessageKind {
     pub fn expects_response(&self) -> bool {
-        matches!(self, MessageKind::Request)
+        matches!(self, MessageKind::Request | MessageKind::Describe)
     }
 
     pub fn is_response(&self) -> bool {
@@ -50,6 +54,7 @@ impl MessageKind {
             MessageKind::Response => "response",
             MessageKind::Message => "message",
             MessageKind::Error => "error",
+            MessageKind::Describe => "describe",
             MessageKind::Unknown(value) => value,
         }
     }
@@ -81,6 +86,7 @@ impl<'de> Deserialize<'de> for MessageKind {
             "response" => Self::Response,
             "message" => Self::Message,
             "error" => Self::Error,
+            "describe" => Self::Describe,
             _ => Self::Unknown(value.into_boxed_str()),
         })
     }

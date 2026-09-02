@@ -12,6 +12,8 @@ use crate::peer_token;
 use crate::request_broker::{BrokerError, RequestBroker};
 use crate::transport::{ConnectionManager, REQUEST_TIMEOUT};
 
+use super::who_can;
+
 /// Upper bound for caller-supplied `timeout_secs`. Without it, `u64::MAX`
 /// would overflow `Instant::now() + timeout` into a panic that leaks the
 /// sender's reserved send-slot budget. One hour comfortably exceeds any
@@ -69,6 +71,12 @@ pub(crate) struct DaemonContext {
     pub(crate) inflight_sends: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     pub(crate) max_inflight_sends: usize,
     pub(crate) start: Instant,
+    /// Runtime cache of connected peers' capability manifests (advisory).
+    pub(crate) manifest_cache: crate::manifest::ManifestCache,
+    /// Backpressure for `who_can` computations: one query runs at a time.
+    /// Queued queries are cheap — they re-read the now-fresh cache instead
+    /// of stacking concurrent network pulls.
+    pub(crate) who_can_gate: std::sync::Arc<tokio::sync::Mutex<()>>,
 }
 
 pub(crate) async fn handle_command(cmd: CommandEvent, ctx: &DaemonContext) -> Result<()> {
@@ -133,6 +141,22 @@ pub(crate) async fn handle_command(cmd: CommandEvent, ctx: &DaemonContext) -> Re
                 locators.extend(peer.observed_endpoints.iter().map(ToString::to_string));
                 locators.sort();
                 locators.dedup();
+                // Advisory summary, visible only while the peer is
+                // connected — never for a disconnected record.
+                let services = if connected {
+                    ctx.manifest_cache
+                        .get(peer.identity.agent_id())
+                        .await
+                        .map(|manifest| {
+                            manifest
+                                .services()
+                                .iter()
+                                .map(|service| service.id.clone())
+                                .collect::<Vec<_>>()
+                        })
+                } else {
+                    None
+                };
                 peers.push(PeerSummary {
                     agent_id: peer.identity.agent_id().to_string(),
                     public_key: peer.identity.public_key().to_string(),
@@ -141,6 +165,7 @@ pub(crate) async fn handle_command(cmd: CommandEvent, ctx: &DaemonContext) -> Re
                     status,
                     rtt_ms: None,
                     display_name: peer.display_name.map(Into::into),
+                    services,
                 });
             }
             DaemonReply::Peers {
@@ -180,22 +205,39 @@ pub(crate) async fn handle_command(cmd: CommandEvent, ctx: &DaemonContext) -> Re
             // gate's revocation guarantee cannot be defeated by a skipped
             // close_peer.
             match ctx.transport.revoke_peer(&agent_id).await {
-                Ok(_) => DaemonReply::PeerChanged {
-                    ok: true,
-                    agent_id: agent_id.to_string(),
-                    req_id,
-                },
+                Ok(_) => {
+                    // Advisory capability data must not outlive the peer.
+                    ctx.manifest_cache.remove(&agent_id).await;
+                    DaemonReply::PeerChanged {
+                        ok: true,
+                        agent_id: agent_id.to_string(),
+                        req_id,
+                    }
+                }
                 Err(err) => error_reply(directory_failure(err), req_id),
             }
         }
-        IpcCommand::Serve { req_id } => match ctx.broker.register(client_id).await {
-            Ok(()) => DaemonReply::Serving {
-                ok: true,
-                serving: true,
-                req_id,
-            },
-            Err(err) => error_reply(broker_failure(err), req_id),
-        },
+        IpcCommand::Serve { manifest, req_id } => {
+            // Schema and encoded-size bounds are enforced at deserialization
+            // (manifest::Manifest), so a parsed manifest always satisfies
+            // every daemon invariant; serde failures surface as
+            // `invalid_command` at the protocol layer.
+            match ctx.broker.register(client_id, manifest).await {
+                Ok(()) => DaemonReply::Serving {
+                    ok: true,
+                    serving: true,
+                    req_id,
+                },
+                Err(err) => error_reply(broker_failure(err), req_id),
+            }
+        }
+        IpcCommand::WhoCan { query, req_id } => {
+            let mut reply = who_can::handle(ctx, query).await;
+            if let DaemonReply::WhoCan { req_id: slot, .. } = &mut reply {
+                *slot = req_id;
+            }
+            reply
+        }
         IpcCommand::Reply {
             request_id,
             peer,
@@ -317,7 +359,9 @@ async fn send(
             }
             Ok((msg_id, response))
         }
-        Err(err) if err.timed_out && matches!(kind, IpcSendKind::Request) => {
+        Err(err)
+            if err.timed_out && matches!(kind, IpcSendKind::Request | IpcSendKind::Describe) =>
+        {
             // Spec: timeouts must surface as `timeout`, never
             // `peer_unreachable`.
             Err(CommandFailure::new(
@@ -337,24 +381,26 @@ fn send_timeout(
     timeout_secs: Option<u64>,
 ) -> std::result::Result<Duration, CommandFailure> {
     match (kind, timeout_secs) {
-        (IpcSendKind::Request, Some(0)) => Err(CommandFailure::new(
+        (IpcSendKind::Request | IpcSendKind::Describe, Some(0)) => Err(CommandFailure::new(
             IpcErrorCode::InvalidCommand,
             "timeout_secs must be at least 1",
         )),
         // Bound before any Instant arithmetic: u64::MAX seconds would panic
         // on `Instant::now() + timeout` inside the transport.
-        (IpcSendKind::Request, Some(secs)) if secs > MAX_REQUEST_TIMEOUT_SECS => {
+        (IpcSendKind::Request | IpcSendKind::Describe, Some(secs))
+            if secs > MAX_REQUEST_TIMEOUT_SECS =>
+        {
             Err(CommandFailure::new(
                 IpcErrorCode::InvalidCommand,
                 "timeout_secs exceeds the maximum allowed value",
             ))
         }
-        (IpcSendKind::Request, seconds) => Ok(Duration::from_secs(
+        (IpcSendKind::Request | IpcSendKind::Describe, seconds) => Ok(Duration::from_secs(
             seconds.unwrap_or(REQUEST_TIMEOUT.as_secs()),
         )),
         (IpcSendKind::Message, Some(_)) => Err(CommandFailure::new(
             IpcErrorCode::InvalidCommand,
-            "timeout_secs is only valid for request kind",
+            "timeout_secs is only valid for request and describe kinds",
         )),
         (IpcSendKind::Message, None) => Ok(Duration::from_secs(10)),
     }

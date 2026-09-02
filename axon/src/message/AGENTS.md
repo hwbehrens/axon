@@ -13,7 +13,7 @@ Spec compliance first — envelope schema must match `spec/WIRE_FORMAT.md` §6.
 
 ## Guardrails
 
-- Four kinds have defined v1 semantics (`request`, `response`, `message`, `error`), but unknown kind strings must be retained exactly for forward compatibility.
+- Five kinds have defined v1 semantics (`request`, `response`, `message`, `error`, `describe`), but unknown kind strings must be retained exactly for forward compatibility. `describe` is answered by the receiving daemon from the manifest published at `serve` time (see `axon/src/manifest/`); it is never delivered to an application handler.
 - `AgentId` values must be validated at construction; do not add unchecked string constructors.
 - Unknown JSON fields must be tolerated (forward compatibility).
 - `MAX_MESSAGE_SIZE` changes require README.md Configuration Reference update.

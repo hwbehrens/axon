@@ -84,6 +84,7 @@ Each entry: ID, date opened, context, resolution path, owner, status (open/resol
 - Context: `spec/SPEC.md` says unknown kind strings are preserved for forwarding, while the implementation deserializes every unknown string to one `MessageKind::Unknown` sentinel and therefore loses the original value when reserialized. Other normative summaries describe exactly four protocol kinds without clarifying whether the original future string must survive.
 - Date resolved: 2026-08-24
 - Resolution: There remain exactly four known v1 kinds: `request`, `response`, `message`, and `error`. Receivers retain any unknown remote kind string losslessly. An unknown unidirectional message may be exposed or forwarded unchanged; an unknown bidirectional kind receives `unsupported_kind` because AXON cannot infer its response semantics. Unknown IPC command names are different: they are rejected immediately and are never retained for execution after an upgrade. AXON has no durable inbox, so preservation provides rolling-version forwarding and diagnostics, not retroactive execution.
+- Update (2026-02-17, DEC-026): `describe` was added as the fifth known kind. The lossless unknown-kind retention rule and the `unsupported_kind` bidirectional behavior are unchanged; older peers receiving `describe` therefore degrade gracefully.
 - Follow-up: Use a lossless unknown-kind representation and add serialization, forwarding, fuzz, and interoperability tests. Keep unknown IPC-command rejection explicit.
 - Owner: protocol, message
 - Status: resolved

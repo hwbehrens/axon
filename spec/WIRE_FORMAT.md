@@ -190,6 +190,7 @@ Receivers **MUST** read exactly one frame and then MAY ignore additional bytes (
 | `response` | Bidirectional (reply side) | N/A (is a response) |
 | `message` | Unidirectional | No |
 | `error` | Bidirectional (reply side) or Unidirectional (unsolicited) | No |
+| `describe` | Bidirectional | ← `response` or `error` (answered by the daemon) |
 
 Senders MUST follow this mapping. Receivers SHOULD tolerate minor deviations gracefully.
 
@@ -236,7 +237,7 @@ Every network message body is a JSON object:
 ```json
 {
   "id": "uuid-v4-string",
-  "kind": "request|response|message|error",
+  "kind": "request|response|message|error|describe",
   "ref": "uuid-v4-string-or-omitted",
   "payload": { }
 }
@@ -265,6 +266,55 @@ Receivers MUST retain an unknown `kind` string exactly when decoding and re-enco
 
 - Senders SHOULD use the canonical RFC 4122 text format: `8-4-4-4-12` hex with hyphens (lowercase).
 - Receivers MUST accept the canonical hyphenated form at minimum.
+
+### 6.5 Capability manifest (normative schema, advisory content)
+
+A `describe` exchange carries a **capability manifest** as the `response`
+payload. The daemon answers from the manifest its handler published at
+`serve` time; the manifest is a **self-reported claim** — it never affects
+TLS trust, pinning, or enrollment, and only exercising a service validates
+it. Unknown fields MUST be ignored (forward compatibility).
+
+```json
+{
+  "name": "forge",
+  "version": "0.9.0",
+  "services": [
+    {
+      "id": "cargo_test",
+      "description": "Run cargo test on a workspace; returns condensed failure output.",
+      "example_request": {"workspace": "/srv/axon"},
+      "example_response": {"passed": 214, "failed": 0},
+      "timeout_hint_secs": 900,
+      "concurrency": 2,
+      "errors": ["build_failed"]
+    }
+  ]
+}
+```
+
+| Field | Type | Required | Constraint |
+|-------|------|----------|------------|
+| `name` | string | No | 1–128 bytes |
+| `version` | string | No | 1–64 bytes; application version, distinct from daemon version |
+| `services` | array | Yes | 1–64 entries |
+| `services[].id` | string | Yes | 1–128 bytes; no whitespace or control characters |
+| `services[].description` | string | Yes | 1–2048 bytes; written for agent consumption |
+| `services[].example_request` | object | No | JSON object; a worked example teaches callers faster than a schema |
+| `services[].example_response` | object | No | JSON object |
+| `services[].timeout_hint_secs` | integer | No | Suggested per-exchange upper bound |
+| `services[].concurrency` | integer | No | 1–1024 |
+| `services[].errors` | array | No | ≤32 entries of 1–64 bytes; service-specific error codes |
+
+A manifest whose encoded form exceeds **32,768 bytes** MUST be rejected at
+publication (`invalid_command`); this bounds a `describe` response well below
+the 64 KiB wire limit (§5.2).
+
+If no manifest is published, the daemon answers `describe` with `kind:
+"error"`, code `no_manifest`, instructing the caller that the peer's handler
+has not published one. A `describe` MUST NOT be delivered to the application
+handler and MUST NOT be tombstoned in completed-response caches (it is
+side-effect free; answers stay fresh across manifest refreshes).
 
 ---
 
@@ -335,6 +385,8 @@ Errors are carried as normal envelopes with `kind: "error"`:
 Valid error codes:
 - `unhandled`
 - `unsupported_kind`
+- `no_manifest`
+- `manifest_too_large`
 - `peer_not_found`
 - `invalid_envelope`
 - `internal`
@@ -382,6 +434,9 @@ Discovery **MUST NOT** populate the enrolled pinning snapshot used by TLS verifi
 | Name | Value | Requirement | Description |
 |------|-------|-------------|-------------|
 | `MAX_MESSAGE_SIZE` | 65,536 bytes | MUST accept at least | Max JSON body size |
+| Manifest encoded size | 32,768 bytes | MUST reject above | Max `describe` response payload; keeps responses under the wire limit |
+| Services per manifest | 64 | Reference bound | Max entries in one capability manifest |
+| Manifest cache entries | 256 | Reference bound | Max cached remote manifests for `who_can` views |
 | Request timeout | 30 seconds | RECOMMENDED | Max wait for bidi response |
 | QUIC keepalive interval | 15 seconds | RECOMMENDED | Keepalive ping interval |
 | QUIC idle timeout | 60 seconds | RECOMMENDED | Max idle before connection close |

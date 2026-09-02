@@ -10,7 +10,7 @@ AXON has three contract surfaces:
 
 1. **Wire format** (`spec/WIRE_FORMAT.md`) — QUIC stream JSON envelopes between daemons
 2. **IPC protocol** (`spec/IPC.md`) — Unix socket JSON commands between clients and daemon
-3. **Message types** (`spec/MESSAGE_TYPES.md`) — The four message kinds and their stream mapping
+3. **Message types** (`spec/MESSAGE_TYPES.md`) — The five message kinds and their stream mapping; capability manifest schema lives in `spec/WIRE_FORMAT.md` §6.5
 
 Changes to any of these surfaces affect interoperability between AXON implementations and between client tools and the daemon.
 

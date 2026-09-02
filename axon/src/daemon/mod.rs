@@ -1,5 +1,6 @@
 pub(crate) mod command_handler;
 mod lockfile;
+mod who_can;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -144,6 +145,8 @@ pub async fn run_daemon(opts: DaemonOptions) -> Result<()> {
         inflight_sends: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         max_inflight_sends: opts.max_inflight_sends.unwrap_or(MAX_INFLIGHT_SENDS),
         start,
+        manifest_cache: crate::manifest::ManifestCache::new(),
+        who_can_gate: Arc::new(tokio::sync::Mutex::new(())),
     };
 
     loop {
@@ -154,11 +157,17 @@ pub async fn run_daemon(opts: DaemonOptions) -> Result<()> {
             }
             maybe_command = command_rx.recv() => {
                 let Some(command) = maybe_command else { break };
-                if matches!(&command.command, crate::ipc::IpcCommand::Send { .. }) {
-                    // Control commands never consume send capacity: they are
-                    // handled inline even when every send slot is busy. Send
-                    // capacity is reserved inside `handle_command` itself, so
-                    // the budget counts exactly the sends being processed.
+                if matches!(
+                    &command.command,
+                    crate::ipc::IpcCommand::Send { .. } | crate::ipc::IpcCommand::WhoCan { .. }
+                ) {
+                    // Send capacity is reserved inside `handle_command` itself,
+                    // so the budget counts exactly the sends being processed.
+                    // `who_can` reserves no send capacity but is spawned for
+                    // the same reason sends are: it can await bounded network
+                    // pulls (`WHO_CAN_PULL_TIMEOUT`), and the control loop must
+                    // stay responsive to discovery, disconnects, and shutdown
+                    // while it runs.
                     let command_ctx = ctx.clone();
                     send_tasks.spawn(async move {
                         handle_command(command, &command_ctx).await

@@ -9,6 +9,7 @@ mod client_handler_tests;
 
 pub use protocol::{
     CommandEvent, DaemonReply, IpcCommand, IpcErrorCode, IpcReplyKind, IpcSendKind,
-    MAX_IPC_LINE_LENGTH, PeerSummary, WhoamiInfo, encode_reply_line, error_reply_line,
+    MAX_IPC_LINE_LENGTH, PeerSummary, ServiceMatch, ServiceSummary, WhoamiInfo, encode_reply_line,
+    error_reply_line,
 };
 pub use server::{IpcServer, IpcServerConfig};

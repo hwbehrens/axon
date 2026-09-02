@@ -141,6 +141,7 @@ fn kind_serde_roundtrip() {
         MessageKind::Response,
         MessageKind::Message,
         MessageKind::Error,
+        MessageKind::Describe,
     ] {
         let json = serde_json::to_string(&kind).unwrap();
         let back: MessageKind = serde_json::from_str(&json).unwrap();

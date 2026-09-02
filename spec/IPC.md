@@ -9,7 +9,7 @@ Status: Normative
 
 ## 1. Overview
 
-The IPC interface connects same-user local clients (CLI tools and agent applications) to one AXON daemon over a Unix domain socket. It provides outbound messaging, candidate inspection, intentional peer enrollment and revocation, daemon status, identity queries, and one connection-bound inbound request handler.
+The IPC interface connects same-user local clients (CLI tools and agent applications) to one AXON daemon over a Unix domain socket. It provides outbound messaging, candidate inspection, intentional peer enrollment and revocation, daemon status, identity queries, capability-manifest publication and query, and one connection-bound inbound request handler.
 
 IPC is transport plumbing. `PeerDirectory` owns peer trust and observations, while `RequestBroker` owns handler and pending-request state. IPC connections do not independently own either fact.
 
@@ -46,10 +46,10 @@ Unknown IPC command names are rejected immediately with `invalid_command`. They 
 Send a message to an enrolled peer.
 
 ```json
-{"cmd":"send","to":"<agent_id>","kind":"request|message","payload":{},"timeout_secs":30,"ref":"<uuid-optional>"}
+{"cmd":"send","to":"<agent_id>","kind":"request|message|describe","payload":{},"timeout_secs":30,"ref":"<uuid-optional>"}
 ```
 
-`timeout_secs` is optional and only valid for `request`. It bounds the WHOLE exchange (dial, stream open, frame write, and response read share one deadline; phases never receive independent budgets). Values above `3600` are rejected with `invalid_command`.
+`timeout_secs` is optional and only valid for `request` and `describe`. It bounds the WHOLE exchange (dial, stream open, frame write, and response read share one deadline; phases never receive independent budgets). Values above `3600` are rejected with `invalid_command`.
 
 For `message`:
 
@@ -62,6 +62,12 @@ For `request`, the peer's response is returned inline:
 ```json
 {"ok":true,"msg_id":"<uuid>","response":{}}
 ```
+
+For `describe`, the receiving daemon answers inline from the capability
+manifest its handler published at `serve` time — the remote application
+handler is never woken. The response payload is the peer's manifest
+(spec/WIRE_FORMAT.md §6.5), or an `error` envelope with code `no_manifest`
+when none is published. Manifests are claims: they never affect trust.
 
 ### 4.2 `peers`
 
@@ -88,7 +94,11 @@ List bounded read-only views of discovered candidates and enrolled peers.
 }
 ```
 
-`rtt_ms` and `display_name` are omitted when unavailable. Candidate entries always use `status=discovered`; they are not trusted and cannot be messaged until enrolled.
+`rtt_ms` and `display_name` are omitted when unavailable. `services` is an
+advisory summary of the peer's last observed capability manifest (service ids
+only) and is omitted until a manifest has been observed. Candidate entries
+always use `status=discovered`; they are not trusted and cannot be messaged
+until enrolled.
 
 ### 4.3 `status`
 
@@ -150,17 +160,23 @@ Removing a candidate observation is not supported; it expires with discovery.
 
 ### 4.7 `serve`
 
-Acquire the daemon's single inbound request-handler lease for the lifetime of this IPC connection.
+Acquire the daemon's single inbound request-handler lease for the lifetime of this IPC connection, optionally publishing a capability manifest.
 
 ```json
 {"cmd":"serve"}
 ```
 
 ```json
-{"ok":true,"serving":true}
+{"cmd":"serve","manifest":{...}}
 ```
 
-A second client receives `handler_busy`. Repeating `serve` on the lease holder is idempotent. The lease is released immediately when its IPC connection closes.
+The manifest (schema: spec/WIRE_FORMAT.md §6.5) is validated at publication:
+schema violations or an encoded size above 32,768 bytes are rejected with
+`invalid_command` and nothing changes. When published, the daemon answers
+inbound `describe` requests from the manifest without waking this client.
+Manifests are claims and never affect trust state.
+
+A second client receives `handler_busy`. Repeating `serve` on the lease holder is idempotent and atomically refreshes the published manifest (or clears it when `manifest` is omitted). The lease and any published manifest are released immediately when this IPC connection closes.
 
 ### 4.8 `reply`
 
@@ -175,6 +191,33 @@ Resolve one pending request delivered to the current handler.
 ```
 
 Only the handler that received the request may reply. Exactly one reply is admitted. Requests are correlated per authenticated remote peer: `request_id` alone can be ambiguous when two peers present the same UUID. Supplying `peer` (the `from` identity delivered with the request event) disambiguates; when it is omitted and the ID matches several pending requests, the reply is rejected with `invalid_command` rather than being routed to an arbitrary peer. Duplicate, late, unknown, and non-owner replies are rejected explicitly. A reply whose encoded envelope would exceed the 65,536-byte wire limit is rejected with `invalid_command` before the request is consumed; the handler may retry with a smaller payload.
+
+### 4.9 `who_can`
+
+Query which connected enrolled peers expose a matching service. The daemon consults manifests pulled from peers via `describe` exchanges (cached, TTL-refreshed); entries are runtime-only, advisory, and never grant authority.
+
+```json
+{"cmd":"who_can","query":"cargo","req_id":"<optional>"}
+```
+
+`query` is optional: when absent or whitespace-only, every reachable service is listed. Matching is a case-insensitive substring over service ids and descriptions.
+
+```json
+{
+  "ok": true,
+  "matches": [
+    {
+      "agent_id": "ed25519.a1b2...",
+      "services": [
+        {"id": "cargo_test", "description": "Run cargo test on a workspace."}
+      ]
+    }
+  ],
+  "unreachable": []
+}
+```
+
+Connected enrolled peers that failed to answer a capability pull are named in `unreachable` rather than silently omitted. Candidates and disconnected peers are never listed; peers that publish no manifest simply contribute no matches.
 
 ---
 

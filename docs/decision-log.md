@@ -10,6 +10,7 @@ Each entry: ID, date, subsystem, one-paragraph summary covering motivation, deci
 
 | ID | Date | Subsystem | Title |
 |---|---|---|---|
+| DEC-026 | 2026-02-17 | message, manifest, request_broker, ipc, daemon | Capability manifests: daemon-answered `describe`, `serve`-time publication, `who_can` derived view |
 | DEC-025 | 2026-09-01 | transport, daemon | Structural revocation pairing (`revoke_peer`) and fail-closed epoch-lock poisoning |
 | DEC-024 | 2026-08-26 | transport, peer_directory, ipc, daemon | Maintainability simplification: synchronous pin-snapshot admission gate, tripwire removal, registry read-path clarity, whoami flattening |
 | DEC-023 | 2026-08-26 | peer_directory, ipc, daemon | Round-eight re-review hardening: serialized persistence transactions, bounded req_id, encoder-gated client-handler errors, capacity-modeling Hegel machine |
@@ -39,6 +40,12 @@ Each entry: ID, date, subsystem, one-paragraph summary covering motivation, deci
 ---
 
 ## Entries
+
+### DEC-026: Capability manifests — daemon-answered `describe`, `serve`-time publication, `who_can` derived view
+
+Date: 2026-02-17 | Subsystem: message, manifest, request_broker, ipc, daemon
+
+AXON solved identity discovery but not capability discovery: a newly connected agent had a socket and zero vocabulary — the real "shout into the void" happened after a successful connection. Three coupled decisions. **(1) `describe` becomes the fifth known message kind**, answered by the *receiving daemon* from the manifest its local handler published at `serve` time; the handler is never woken. A payload-level `op` convention on `request` was rejected: it would require the daemon to inspect payloads (violating "payloads are opaque") or couple directory queries to handler liveness while forcing every application to re-implement describe boilerplate it already published. The kind count grew deliberately — the four-kind rule predates any use case for capability query, and unknown-kind lossless retention gives graceful degradation (`unsupported_kind` naming the string) against older peers. **(2) Manifests are claims, never authority:** publication is opt-in, absence is explicit (`no_manifest`), and a manifest never affects TLS trust, pinning, or enrollment — only exercising a service validates a claim. The broker answers `describe` before the completed-response tombstone cache, because describe is side-effect free and a fresh answer is always correct across manifest refreshes. **(3) `who_can` is a derived, cached view** over connected enrolled peers only, refreshed by TTL-gated daemon-issued `describe` pulls; it is runtime-only (no durable state, no new ownership domain) and names peers that fail a pull instead of silently omitting them. Referrals deliberately remain peer tokens — no gossip, no transitive trust, no reputation scores. Alternatives considered and rejected: connection-time manifest exchange as framing-layer metadata (touches WIRE_FORMAT framing and ConnectionManager generation logic for little gain over pull) and mandatory blocking hellos on every connection (a handshake tax; ALPN already negotiates the protocol version).
 
 ### DEC-025: Structural revocation pairing (`revoke_peer`) and fail-closed epoch-lock poisoning
 
@@ -139,6 +146,8 @@ AXON now treats document status, authority ordering, escalation behavior, the de
 ### DEC-008: Fixed message kinds at protocol level
 
 Date: 2025-01-01 | Subsystem: message
+
+> Superseded in part by DEC-026 (2026-02-17): `describe` was added as the fifth known kind, with daemon-answered capability semantics. The lossless unknown-kind retention rule below is unchanged.
 
 The protocol defines exactly 4 known message kinds (`request`, `response`, `message`, `error`) at the wire level. New application-level semantics are expressed via message payload content, not new kinds. Receivers nevertheless retain an unrecognized kind's exact string: unknown unidirectional messages may be exposed or forwarded unchanged, while unknown bidirectional kinds receive `unsupported_kind`. This keeps known semantics minimal without destroying rolling-version information. Adding a known kind requires a spec update to `spec/MESSAGE_TYPES.md`.
 

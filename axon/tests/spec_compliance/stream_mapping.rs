@@ -13,6 +13,17 @@ fn stream_type_classification_per_spec() {
         "Request should be bidirectional (expects_response)"
     );
 
+    // Bidirectional: Describe expects a daemon-answered response
+    // (spec/MESSAGE_TYPES.md §The `describe` Kind).
+    assert!(
+        MessageKind::Describe.expects_response(),
+        "Describe should be bidirectional (expects_response)"
+    );
+    assert!(
+        !MessageKind::Describe.is_allowed_on_unidirectional(),
+        "Describe must never be classified for unidirectional streams"
+    );
+
     // Unidirectional / no response expected: Message, Response, Error
     assert!(
         !MessageKind::Message.expects_response(),

@@ -3,6 +3,7 @@ pub mod daemon;
 pub mod discovery;
 pub mod identity;
 pub mod ipc;
+pub mod manifest;
 pub mod message;
 pub mod peer_directory;
 pub mod peer_token;

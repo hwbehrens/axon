@@ -1,225 +1,394 @@
 {
-  "schema_version": "1.0.0",
-  "status": "normative",
-  "last_updated": "2026-08-26",
-  "description": "Canonical machine-readable map for agent task routing and subsystem boundaries. Key files list only architecturally significant entry points — use code_roots directories for full file discovery.",
-  "authoritative_order": [
-    "spec/*",
-    "AGENTS.md",
-    "CONTRIBUTING.md",
-    "docs/decision-log.md",
-    "rubrics/*",
-    "docs/agent-index.json",
+ "schema_version": "1.0.0",
+ "status": "normative",
+ "last_updated": "2026-02-17",
+ "description": "Canonical machine-readable map for agent task routing and subsystem boundaries. Key files list only architecturally significant entry points \u2014 use code_roots directories for full file discovery.",
+ "authoritative_order": [
+  "spec/*",
+  "AGENTS.md",
+  "CONTRIBUTING.md",
+  "docs/decision-log.md",
+  "rubrics/*",
+  "docs/agent-index.json",
+  "README.md"
+ ],
+ "escalation": {
+  "stop_when": [
+   "Normative sources conflict",
+   "Implementation behavior disagrees with specs",
+   "Requested changes violate hard constraints"
+  ],
+  "action": "Request clarification and log unresolved conflicts in docs/open-questions.md"
+ },
+ "global_validation_commands": {
+  "full_quality_gate": "cd axon && make verify",
+  "quick_check": "cd axon && make check",
+  "format": "cd axon && make fmt",
+  "lint": "cd axon && make lint",
+  "unit_tests": "cd axon && make test-unit",
+  "full_tests": "cd axon && make test-all"
+ },
+ "subsystems": [
+  {
+   "id": "transport",
+   "description": "Physical QUIC/TLS connection ownership, framing, reconnect, and peer verification.",
+   "code_roots": [
+    "axon/src/transport"
+   ],
+   "test_roots": [
+    "axon/src/transport"
+   ],
+   "specs": [
+    "spec/SPEC.md",
+    "spec/WIRE_FORMAT.md"
+   ],
+   "rubrics": [
+    "rubrics/QUALITY.md"
+   ],
+   "key_files": [
+    "axon/src/transport/tls.rs",
+    "axon/src/transport/quic_transport.rs",
+    "axon/src/transport/connection.rs",
+    "axon/src/transport/connection_registry.rs",
+    "axon/src/transport/reconnect.rs"
+   ]
+  },
+  {
+   "id": "message",
+   "description": "Validated AgentId, lossless MessageKind, Envelope, encode/decode.",
+   "code_roots": [
+    "axon/src/message"
+   ],
+   "test_roots": [
+    "axon/src/message"
+   ],
+   "specs": [
+    "spec/MESSAGE_TYPES.md",
+    "spec/WIRE_FORMAT.md"
+   ],
+   "rubrics": [
+    "rubrics/QUALITY.md"
+   ],
+   "key_files": [
+    "axon/src/message/envelope.rs",
+    "axon/src/message/mod.rs"
+   ]
+  },
+  {
+   "id": "ipc",
+   "description": "Unix socket IPC protocol, server, client handler, auth.",
+   "code_roots": [
+    "axon/src/ipc"
+   ],
+   "test_roots": [
+    "axon/src/ipc"
+   ],
+   "specs": [
+    "spec/IPC.md",
+    "spec/WIRE_FORMAT.md"
+   ],
+   "rubrics": [
+    "rubrics/QUALITY.md"
+   ],
+   "key_files": [
+    "axon/src/ipc/protocol.rs",
+    "axon/src/ipc/server.rs",
+    "axon/src/ipc/client_handler.rs",
+    "axon/src/ipc/auth.rs"
+   ]
+  },
+  {
+   "id": "daemon",
+   "description": "Daemon orchestration, lifecycle, and command dispatch across subsystem owners.",
+   "code_roots": [
+    "axon/src/daemon"
+   ],
+   "test_roots": [
+    "axon/src/daemon"
+   ],
+   "specs": [
+    "spec/SPEC.md"
+   ],
+   "rubrics": [
+    "rubrics/QUALITY.md"
+   ],
+   "key_files": [
+    "axon/src/daemon/mod.rs",
+    "axon/src/daemon/command_handler.rs"
+   ]
+  },
+  {
+   "id": "discovery",
+   "description": "Bonjour/mDNS candidate discovery; never a trust authority.",
+   "code_roots": [
+    "axon/src/discovery"
+   ],
+   "test_roots": [
+    "axon/src/discovery",
+    "axon/tests/mdns_live.rs"
+   ],
+   "specs": [
+    "spec/SPEC.md"
+   ],
+   "rubrics": [
+    "rubrics/QUALITY.md"
+   ],
+   "key_files": [
+    "axon/src/discovery/mod.rs"
+   ]
+  },
+  {
+   "id": "identity",
+   "description": "Ed25519 identity + agent_id derivation.",
+   "code_roots": [
+    "axon/src/identity"
+   ],
+   "test_roots": [
+    "axon/src/identity"
+   ],
+   "specs": [
+    "spec/SPEC.md",
+    "spec/WIRE_FORMAT.md"
+   ],
+   "rubrics": [
+    "rubrics/QUALITY.md"
+   ],
+   "key_files": [
+    "axon/src/identity/mod.rs"
+   ]
+  },
+  {
+   "id": "peer_directory",
+   "description": "Sole logical owner of enrolled peers, candidates, locators, conflicts, persistence, and pinning views.",
+   "code_roots": [
+    "axon/src/peer_directory"
+   ],
+   "test_roots": [
+    "axon/src/peer_directory"
+   ],
+   "specs": [
+    "spec/SPEC.md"
+   ],
+   "rubrics": [
+    "rubrics/QUALITY.md"
+   ],
+   "key_files": [
+    "axon/src/peer_directory/mod.rs",
+    "axon/src/peer_directory/state.rs",
+    "axon/src/peer_directory/types.rs",
+    "axon/src/peer_directory/store.rs",
+    "axon/src/peer_directory/persistence.rs"
+   ]
+  },
+  {
+   "id": "request_broker",
+   "description": "Single IPC request-handler lease and exactly-once request completion.",
+   "code_roots": [
+    "axon/src/request_broker"
+   ],
+   "test_roots": [
+    "axon/src/request_broker"
+   ],
+   "specs": [
+    "spec/IPC.md",
+    "spec/MESSAGE_TYPES.md"
+   ],
+   "rubrics": [
+    "rubrics/QUALITY.md"
+   ],
+   "key_files": [
+    "axon/src/request_broker/mod.rs"
+   ]
+  },
+  {
+   "id": "manifest",
+   "description": "Capability manifests: describe schema and bounds, remote manifest cache, who_can derived view.",
+   "code_roots": [
+    "axon/src/manifest"
+   ],
+   "test_roots": [
+    "axon/src/manifest",
+    "axon/src/daemon/who_can_tests.rs"
+   ],
+   "specs": [
+    "spec/MESSAGE_TYPES.md",
+    "spec/WIRE_FORMAT.md",
+    "spec/IPC.md"
+   ],
+   "rubrics": [
+    "rubrics/QUALITY.md",
+    "rubrics/AGENT-READABILITY.md"
+   ],
+   "key_files": [
+    "axon/src/manifest/types.rs",
+    "axon/src/manifest/cache.rs",
+    "axon/src/daemon/who_can.rs",
+    "axon/src/request_broker/describe.rs"
+   ]
+  },
+  {
+   "id": "peer_token",
+   "description": "Peer token (axon:// URI) encoding/decoding.",
+   "code_roots": [
+    "axon/src/peer_token"
+   ],
+   "test_roots": [
+    "axon/src/peer_token"
+   ],
+   "specs": [
+    "spec/SPEC.md"
+   ],
+   "rubrics": [
+    "rubrics/QUALITY.md"
+   ],
+   "key_files": [
+    "axon/src/peer_token/mod.rs"
+   ]
+  },
+  {
+   "id": "config",
+   "description": "Local daemon YAML settings and peer-state path/legacy validation.",
+   "code_roots": [
+    "axon/src/config"
+   ],
+   "test_roots": [
+    "axon/src/config"
+   ],
+   "specs": [
+    "spec/SPEC.md"
+   ],
+   "rubrics": [
+    "rubrics/QUALITY.md",
+    "rubrics/DOCUMENTATION.md"
+   ],
+   "key_files": [
+    "axon/src/config/mod.rs"
+   ]
+  },
+  {
+   "id": "cli",
+   "description": "CLI entrypoint, commands, helpers, doctor diagnostics, examples.",
+   "code_roots": [
+    "axon/src/app"
+   ],
+   "test_roots": [
+    "axon/src/app",
+    "axon/tests/cli_contract.rs",
+    "axon/tests/cli_contract_config.rs",
+    "axon/tests/doctor_contract.rs"
+   ],
+   "specs": [
+    "spec/IPC.md"
+   ],
+   "rubrics": [
+    "rubrics/QUALITY.md",
+    "rubrics/DOCUMENTATION.md"
+   ],
+   "key_files": [
+    "axon/src/app/run.rs",
+    "axon/src/app/doctor/mod.rs",
+    "axon/src/app/examples.rs",
+    "axon/src/app/cli/ipc_client.rs"
+   ]
+  }
+ ],
+ "common_tasks": [
+  {
+   "task_id": "envelope-or-message-kind-change",
+   "subsystem": "message",
+   "primary_files": [
+    "axon/src/message/envelope.rs"
+   ],
+   "also_update": [
+    "spec/MESSAGE_TYPES.md",
+    "spec/WIRE_FORMAT.md",
+    "axon/tests/spec_compliance.rs"
+   ]
+  },
+  {
+   "task_id": "ipc-command-change",
+   "subsystem": "ipc",
+   "primary_files": [
+    "axon/src/ipc/protocol.rs",
+    "axon/src/ipc/server.rs",
+    "axon/src/ipc/client_handler.rs"
+   ],
+   "also_update": [
+    "spec/IPC.md",
+    "axon/tests/cli_contract.rs"
+   ]
+  },
+  {
+   "task_id": "tls-or-peer-verification-change",
+   "subsystem": "transport",
+   "primary_files": [
+    "axon/src/transport/tls.rs",
+    "axon/src/peer_directory/mod.rs"
+   ],
+   "also_update": [
+    "spec/SPEC.md",
+    "spec/WIRE_FORMAT.md"
+   ]
+  },
+  {
+   "task_id": "cli-command-change",
+   "subsystem": "cli",
+   "primary_files": [
+    "axon/src/app/run.rs"
+   ],
+   "also_update": [
+    "README.md",
+    "axon/tests/cli_contract.rs"
+   ]
+  },
+  {
+   "task_id": "config-key-change",
+   "subsystem": "config",
+   "primary_files": [
+    "axon/src/config/mod.rs"
+   ],
+   "also_update": [
     "README.md"
-  ],
-  "escalation": {
-    "stop_when": [
-      "Normative sources conflict",
-      "Implementation behavior disagrees with specs",
-      "Requested changes violate hard constraints"
-    ],
-    "action": "Request clarification and log unresolved conflicts in docs/open-questions.md"
+   ]
   },
-  "global_validation_commands": {
-    "full_quality_gate": "cd axon && make verify",
-    "quick_check": "cd axon && make check",
-    "format": "cd axon && make fmt",
-    "lint": "cd axon && make lint",
-    "unit_tests": "cd axon && make test-unit",
-    "full_tests": "cd axon && make test-all"
+  {
+   "task_id": "doctor-check-change",
+   "subsystem": "cli",
+   "primary_files": [
+    "axon/src/app/doctor/mod.rs",
+    "axon/src/app/doctor/identity_check.rs"
+   ],
+   "also_update": [
+    "axon/tests/doctor_contract.rs",
+    "README.md"
+   ]
   },
-  "subsystems": [
-    {
-      "id": "transport",
-      "description": "Physical QUIC/TLS connection ownership, framing, reconnect, and peer verification.",
-      "code_roots": ["axon/src/transport"],
-      "test_roots": ["axon/src/transport"],
-      "specs": ["spec/SPEC.md", "spec/WIRE_FORMAT.md"],
-      "rubrics": ["rubrics/QUALITY.md"],
-      "key_files": [
-        "axon/src/transport/tls.rs",
-        "axon/src/transport/quic_transport.rs",
-        "axon/src/transport/connection.rs",
-        "axon/src/transport/connection_registry.rs",
-        "axon/src/transport/reconnect.rs"
-      ]
-    },
-    {
-      "id": "message",
-      "description": "Validated AgentId, lossless MessageKind, Envelope, encode/decode.",
-      "code_roots": ["axon/src/message"],
-      "test_roots": ["axon/src/message"],
-      "specs": ["spec/MESSAGE_TYPES.md", "spec/WIRE_FORMAT.md"],
-      "rubrics": ["rubrics/QUALITY.md"],
-      "key_files": [
-        "axon/src/message/envelope.rs",
-        "axon/src/message/mod.rs"
-      ]
-    },
-    {
-      "id": "ipc",
-      "description": "Unix socket IPC protocol, server, client handler, auth.",
-      "code_roots": ["axon/src/ipc"],
-      "test_roots": ["axon/src/ipc"],
-      "specs": ["spec/IPC.md", "spec/WIRE_FORMAT.md"],
-      "rubrics": ["rubrics/QUALITY.md"],
-      "key_files": [
-        "axon/src/ipc/protocol.rs",
-        "axon/src/ipc/server.rs",
-        "axon/src/ipc/client_handler.rs",
-        "axon/src/ipc/auth.rs"
-      ]
-    },
-    {
-      "id": "daemon",
-      "description": "Daemon orchestration, lifecycle, and command dispatch across subsystem owners.",
-      "code_roots": ["axon/src/daemon"],
-      "test_roots": ["axon/src/daemon"],
-      "specs": ["spec/SPEC.md"],
-      "rubrics": ["rubrics/QUALITY.md"],
-      "key_files": [
-        "axon/src/daemon/mod.rs",
-        "axon/src/daemon/command_handler.rs"
-      ]
-    },
-    {
-      "id": "discovery",
-      "description": "Bonjour/mDNS candidate discovery; never a trust authority.",
-      "code_roots": ["axon/src/discovery"],
-      "test_roots": ["axon/src/discovery", "axon/tests/mdns_live.rs"],
-      "specs": ["spec/SPEC.md"],
-      "rubrics": ["rubrics/QUALITY.md"],
-      "key_files": [
-        "axon/src/discovery/mod.rs"
-      ]
-    },
-    {
-      "id": "identity",
-      "description": "Ed25519 identity + agent_id derivation.",
-      "code_roots": ["axon/src/identity"],
-      "test_roots": ["axon/src/identity"],
-      "specs": ["spec/SPEC.md", "spec/WIRE_FORMAT.md"],
-      "rubrics": ["rubrics/QUALITY.md"],
-      "key_files": [
-        "axon/src/identity/mod.rs"
-      ]
-    },
-    {
-      "id": "peer_directory",
-      "description": "Sole logical owner of enrolled peers, candidates, locators, conflicts, persistence, and pinning views.",
-      "code_roots": ["axon/src/peer_directory"],
-      "test_roots": ["axon/src/peer_directory"],
-      "specs": ["spec/SPEC.md"],
-      "rubrics": ["rubrics/QUALITY.md"],
-      "key_files": [
-        "axon/src/peer_directory/mod.rs",
-        "axon/src/peer_directory/state.rs",
-        "axon/src/peer_directory/types.rs",
-        "axon/src/peer_directory/store.rs",
-        "axon/src/peer_directory/persistence.rs"
-      ]
-    },
-    {
-      "id": "request_broker",
-      "description": "Single IPC request-handler lease and exactly-once request completion.",
-      "code_roots": ["axon/src/request_broker"],
-      "test_roots": ["axon/src/request_broker"],
-      "specs": ["spec/IPC.md", "spec/MESSAGE_TYPES.md"],
-      "rubrics": ["rubrics/QUALITY.md"],
-      "key_files": [
-        "axon/src/request_broker/mod.rs"
-      ]
-    },
-    {
-      "id": "peer_token",
-      "description": "Peer token (axon:// URI) encoding/decoding.",
-      "code_roots": ["axon/src/peer_token"],
-      "test_roots": ["axon/src/peer_token"],
-      "specs": ["spec/SPEC.md"],
-      "rubrics": ["rubrics/QUALITY.md"],
-      "key_files": [
-        "axon/src/peer_token/mod.rs"
-      ]
-    },
-    {
-      "id": "config",
-      "description": "Local daemon YAML settings and peer-state path/legacy validation.",
-      "code_roots": ["axon/src/config"],
-      "test_roots": ["axon/src/config"],
-      "specs": ["spec/SPEC.md"],
-      "rubrics": ["rubrics/QUALITY.md", "rubrics/DOCUMENTATION.md"],
-      "key_files": [
-        "axon/src/config/mod.rs"
-      ]
-    },
-    {
-      "id": "cli",
-      "description": "CLI entrypoint, commands, helpers, doctor diagnostics, examples.",
-      "code_roots": ["axon/src/app"],
-      "test_roots": ["axon/src/app", "axon/tests/cli_contract.rs", "axon/tests/cli_contract_config.rs", "axon/tests/doctor_contract.rs"],
-      "specs": ["spec/IPC.md"],
-      "rubrics": ["rubrics/QUALITY.md", "rubrics/DOCUMENTATION.md"],
-      "key_files": [
-        "axon/src/app/run.rs",
-        "axon/src/app/doctor/mod.rs",
-        "axon/src/app/examples.rs",
-        "axon/src/app/cli/ipc_client.rs"
-      ]
-    }
-  ],
-  "common_tasks": [
-    {
-      "task_id": "envelope-or-message-kind-change",
-      "subsystem": "message",
-      "primary_files": ["axon/src/message/envelope.rs"],
-      "also_update": ["spec/MESSAGE_TYPES.md", "spec/WIRE_FORMAT.md", "axon/tests/spec_compliance.rs"]
-    },
-    {
-      "task_id": "ipc-command-change",
-      "subsystem": "ipc",
-      "primary_files": ["axon/src/ipc/protocol.rs", "axon/src/ipc/server.rs", "axon/src/ipc/client_handler.rs"],
-      "also_update": ["spec/IPC.md", "axon/tests/cli_contract.rs"]
-    },
-    {
-      "task_id": "tls-or-peer-verification-change",
-      "subsystem": "transport",
-      "primary_files": ["axon/src/transport/tls.rs", "axon/src/peer_directory/mod.rs"],
-      "also_update": ["spec/SPEC.md", "spec/WIRE_FORMAT.md"]
-    },
-    {
-      "task_id": "cli-command-change",
-      "subsystem": "cli",
-      "primary_files": ["axon/src/app/run.rs"],
-      "also_update": ["README.md", "axon/tests/cli_contract.rs"]
-    },
-    {
-      "task_id": "config-key-change",
-      "subsystem": "config",
-      "primary_files": ["axon/src/config/mod.rs"],
-      "also_update": ["README.md"]
-    },
-    {
-      "task_id": "doctor-check-change",
-      "subsystem": "cli",
-      "primary_files": ["axon/src/app/doctor/mod.rs", "axon/src/app/doctor/identity_check.rs"],
-      "also_update": ["axon/tests/doctor_contract.rs", "README.md"]
-    },
-    {
-      "task_id": "discovery-change",
-      "subsystem": "discovery",
-      "primary_files": ["axon/src/discovery/mod.rs", "axon/src/peer_directory/mod.rs"],
-      "also_update": ["spec/SPEC.md"]
-    },
-    {
-      "task_id": "daemon-lifecycle-change",
-      "subsystem": "daemon",
-      "primary_files": ["axon/src/daemon/mod.rs", "axon/src/transport/reconnect.rs"],
-      "also_update": ["spec/SPEC.md"]
-    }
-  ],
-  "maintenance_rules": [
-    "Update this file when adding, removing, or renaming subsystem directories.",
-    "Keep key_files to architecturally significant entry points only (3-5 per subsystem); agents should ls code_roots for full listings.",
-    "If constants change, also update README.md Configuration Reference tables in the same change."
-  ]
+  {
+   "task_id": "discovery-change",
+   "subsystem": "discovery",
+   "primary_files": [
+    "axon/src/discovery/mod.rs",
+    "axon/src/peer_directory/mod.rs"
+   ],
+   "also_update": [
+    "spec/SPEC.md"
+   ]
+  },
+  {
+   "task_id": "daemon-lifecycle-change",
+   "subsystem": "daemon",
+   "primary_files": [
+    "axon/src/daemon/mod.rs",
+    "axon/src/transport/reconnect.rs"
+   ],
+   "also_update": [
+    "spec/SPEC.md"
+   ]
+  }
+ ],
+ "maintenance_rules": [
+  "Update this file when adding, removing, or renaming subsystem directories.",
+  "Keep key_files to architecturally significant entry points only (3-5 per subsystem); agents should ls code_roots for full listings.",
+  "If constants change, also update README.md Configuration Reference tables in the same change."
+ ]
 }

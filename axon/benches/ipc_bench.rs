@@ -112,6 +112,7 @@ fn bench_daemon_reply_serialize(c: &mut Criterion) {
             status: "connected",
             rtt_ms: Some(1.2),
             display_name: None,
+            services: None,
         }],
         req_id: Some("req-3".to_string()),
     };
