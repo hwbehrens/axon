@@ -32,6 +32,7 @@ Know where to make changes before you start editing:
 | IPC peer credential auth | `axon/src/ipc/auth.rs` |
 | Peer identity / trust / locators / pin snapshots | `axon/src/peer_directory/` (persistence transaction worker: `peer_directory/persistence.rs`) |
 | Inbound request correlation / handler lease | `axon/src/request_broker/` |
+| Capability manifests / describe answering / who_can | `axon/src/manifest/`, `axon/src/daemon/who_can.rs` |
 | Bonjour/mDNS candidate discovery | `axon/src/discovery/` |
 | Daemon event loop / startup / shutdown | `axon/src/daemon/mod.rs` |
 | Command dispatch | `axon/src/daemon/command_handler.rs` |
@@ -222,7 +223,7 @@ Don't test third-party crate internals (`quinn`, `ed25519-dalek`, `mdns-sd`). Te
 
 ## Message Kinds
 
-The four interpreted message kinds are fixed at the protocol level (`request`, `response`, `message`, `error`). Unknown wire strings must be retained losslessly for forward compatibility and answered with `unsupported_kind` on bidirectional streams. Do not add an interpreted kind without updating the spec.
+The five interpreted message kinds are fixed at the protocol level (`request`, `response`, `message`, `error`, `describe`); `describe` is answered by the receiving daemon from the manifest published at `serve` time. Unknown wire strings must be retained losslessly for forward compatibility and answered with `unsupported_kind` on bidirectional streams. Do not add an interpreted kind without updating the spec.
 
 ## License
 

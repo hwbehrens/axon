@@ -25,7 +25,14 @@ fn sample_command(name: &str) -> IpcCommand {
             agent_id: to,
             req_id: None,
         },
-        "serve" => IpcCommand::Serve { req_id: None },
+        "serve" => IpcCommand::Serve {
+            manifest: None,
+            req_id: None,
+        },
+        "who_can" => IpcCommand::WhoCan {
+            query: Some("cargo".into()),
+            req_id: None,
+        },
         _ => IpcCommand::Reply {
             request_id: Uuid::new_v4(),
             peer: None,
@@ -46,6 +53,7 @@ fn every_command_reports_its_wire_name() {
         ("add_peer", sample_command("add_peer")),
         ("remove_peer", sample_command("remove_peer")),
         ("serve", sample_command("serve")),
+        ("who_can", sample_command("who_can")),
         ("reply", sample_command("reply")),
     ] {
         assert_eq!(command.cmd_name(), name, "wire name drift for {name}");
@@ -203,4 +211,87 @@ fn error_reply_line_drops_an_overbound_echo_instead_of_panicking() {
         error_reply_line(IpcErrorCode::MessageTooLarge, Some(echoed.clone())).expect("must encode");
     let decoded: serde_json::Value = serde_json::from_str(&line).expect("json");
     assert_eq!(decoded["req_id"], serde_json::json!(echoed));
+}
+
+#[test]
+fn who_can_parses_with_optional_query() {
+    let with_query: IpcCommand =
+        serde_json::from_str(r#"{"cmd":"who_can","query":"cargo","req_id":"q1"}"#)
+            .expect("who_can with query");
+    assert_eq!(with_query.cmd_name(), "who_can");
+    let IpcCommand::WhoCan { query, req_id } = with_query else {
+        panic!("expected WhoCan");
+    };
+    assert_eq!(query.as_deref(), Some("cargo"));
+    assert_eq!(req_id.as_deref(), Some("q1"));
+
+    let bare: IpcCommand = serde_json::from_str(r#"{"cmd":"who_can"}"#).expect("bare who_can");
+    let IpcCommand::WhoCan { query, req_id } = bare else {
+        panic!("expected WhoCan");
+    };
+    assert!(query.is_none() && req_id.is_none());
+}
+
+#[test]
+fn serve_accepts_and_validates_a_manifest() {
+    let line = r#"{"cmd":"serve","manifest":{"name":"forge","services":[
+        {"id":"cargo_test","description":"Run cargo test on a workspace."}]}}"#;
+    let IpcCommand::Serve { manifest, .. } =
+        serde_json::from_str::<IpcCommand>(line).expect("serve with manifest")
+    else {
+        panic!("expected Serve");
+    };
+    let manifest = manifest.expect("manifest parsed");
+    assert_eq!(manifest.services.len(), 1);
+    assert_eq!(manifest.services[0].id, "cargo_test");
+
+    // Schema validation runs at parse time: an invalid manifest is an
+    // invalid_command before it can ever reach the broker.
+    let bad = r#"{"cmd":"serve","manifest":{"services":[]}}"#;
+    assert!(
+        serde_json::from_str::<IpcCommand>(bad).is_err(),
+        "manifest without services must be rejected"
+    );
+}
+
+#[test]
+fn send_accepts_describe_kind() {
+    let to = AgentId::parse("ed25519.0123456789abcdef0123456789abcdef").unwrap();
+    let line = r#"{"cmd":"send","to":"ed25519.0123456789abcdef0123456789abcdef","kind":"describe","payload":{}}"#;
+    let IpcCommand::Send { kind, .. } =
+        serde_json::from_str::<IpcCommand>(line).expect("describe send")
+    else {
+        panic!("expected Send");
+    };
+    assert_eq!(kind, IpcSendKind::Describe);
+    assert_eq!(
+        kind.as_message_kind(),
+        crate::message::MessageKind::Describe
+    );
+    let _ = to;
+}
+
+#[test]
+fn peers_summary_omits_absent_services() {
+    let summary = PeerSummary {
+        agent_id: "ed25519.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+        public_key: "AAAA".to_string(),
+        trust: "enrolled",
+        locators: vec![],
+        status: "connected",
+        rtt_ms: None,
+        display_name: None,
+        services: None,
+    };
+    let value = serde_json::to_value(&summary).expect("serialize");
+    assert!(
+        value.get("services").is_none(),
+        "absent services must be omitted, not null"
+    );
+    let summary = PeerSummary {
+        services: Some(vec!["cargo_test".to_string()]),
+        ..summary
+    };
+    let value = serde_json::to_value(&summary).expect("serialize");
+    assert_eq!(value["services"], serde_json::json!(["cargo_test"]));
 }

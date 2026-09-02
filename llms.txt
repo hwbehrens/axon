@@ -11,7 +11,7 @@ Core entrypoints:
 - ./CONTRIBUTING.md — Contribution workflow, full module map, testing requirements
 - ./docs/agent-index.json — Machine-readable subsystem map for task routing and file discovery
 - ./spec/SPEC.md — Architecture, identity, discovery, transport lifecycle
-- ./spec/MESSAGE_TYPES.md — Message kinds (4 known + future-kind preservation) and stream mapping
+- ./spec/MESSAGE_TYPES.md — Message kinds (5 known: request, response, message, error, describe) and stream mapping
 - ./spec/WIRE_FORMAT.md — Normative interoperable wire format
 - ./spec/IPC.md — IPC protocol, Unix socket commands
 

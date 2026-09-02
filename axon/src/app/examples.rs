@@ -116,9 +116,11 @@ One client may lease request handling with `serve`.
 → {{"cmd":"whoami"}}
 ← {{"ok":true,"agent_id":"ed25519.a1b2...","public_key":"<base64>","name":"my-agent","version":"<version>","uptime_secs":3600}}
 
-# 6. Acquire the single inbound request-handler lease
-→ {{"cmd":"serve"}}
+# 6. Acquire the single inbound request-handler lease (with a capability manifest)
+→ {{"cmd":"serve","manifest":{{"name":"forge","services":[{{"id":"cargo_test","description":"Run cargo test on a workspace.","example_request":{{"workspace":"/srv/axon"}},"timeout_hint_secs":900}}]}}}}
 ← {{"ok":true,"serving":true}}
+  (The daemon now answers remote `describe` requests from this manifest
+   without waking this client. Re-`serve` atomically refreshes it.)
 
 # 7. Answer a delivered request on its original QUIC stream
 ← {{"event":"request","request_id":"880e8400-...","from":"ed25519.f6e5d4c3...","envelope":{{"id":"880e8400-...","kind":"request","payload":{{"question":"Hello?"}}}}}}
@@ -128,14 +130,29 @@ One client may lease request handling with `serve`.
 # 8. Inbound fire-and-forget event (broadcast; lagging clients are disconnected)
 ← {{"event":"inbound","from":"ed25519.f6e5d4c3...","envelope":{{"id":"990e8400-...","kind":"message","payload":{{"state":"ready"}}}}}}
 
+# 9. Ask a peer what it can do (describe — answered by the peer's daemon)
+→ {{"cmd":"send","to":"ed25519.f6e5d4c3...","kind":"describe","payload":{{}},"timeout_secs":5}}
+← {{"ok":true,"msg_id":"aa0e8400-...","response":{{"id":"bb0e8400-...","kind":"response","ref":"aa0e8400-...","payload":{{"name":"forge","services":[{{"id":"cargo_test","description":"Run cargo test on a workspace.","example_request":{{"workspace":"/srv/axon"}},"timeout_hint_secs":900}}]}}}}}}
+  (With no manifest published the response is an error envelope with code
+   "no_manifest" — explicit absence, never silence. Manifests are claims;
+   only exercising a service validates one.)
+
+# 10. Find connected peers that offer a matching service
+→ {{"cmd":"who_can","query":"cargo"}}
+← {{"ok":true,"matches":[{{"agent_id":"ed25519.f6e5d4c3...","services":[{{"id":"cargo_test","description":"Run cargo test on a workspace."}}]}}],"unreachable":[]}}
+  (Advisory cached view of connected enrolled peers; peers that failed a
+   capability pull are named in "unreachable" rather than silently omitted.
+   Omit "query" to list every reachable service.)
+
 ──────────────────────────────────────────────
 Notes
 ──────────────────────────────────────────────
 - Either side can initiate the QUIC connection; duplicates are resolved automatically.
 - Unknown peers are rejected during TLS; Bonjour candidates require explicit enrollment.
 - Messages are framed by QUIC stream FIN (no length prefix).
-- Bidirectional streams are used for request/response patterns (kind: "request").
+- Bidirectional streams are used for request/response and describe patterns.
 - Unidirectional streams are used for fire-and-forget messages (kind: "message").
+- Discovery is distinct from trust: Bonjour finds candidates, `add_peer` enrolls, mTLS verifies. Peer tokens in messages are referrals — enroll them explicitly, never automatically.
 - Identity is established by mTLS — peer identity is derived from the TLS certificate.
 "#
     );

@@ -38,6 +38,10 @@ doc = false
 [[bin]]
 name = "fuzz_peer_store"
 path = "fuzz_targets/fuzz_peer_store.rs"
+
+[[bin]]
+name = "fuzz_manifest"
+path = "fuzz_targets/fuzz_manifest.rs"
 doc = false
 
 [[bin]]

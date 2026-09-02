@@ -304,6 +304,11 @@ These are compile-time constants and cannot be changed via configuration.
 | `MAX_IPC_CLIENTS` | `64` | `daemon/mod.rs` | Maximum simultaneous IPC client connections. |
 | `IPC_OVERLONG_DRAIN_TIMEOUT` | `2s` | `ipc/client_handler.rs` | Maximum time to drain an overlong IPC line before closing the client so the error reply can be delivered. |
 | `MAX_REQ_ID_BYTES` | `1,024` | `ipc/protocol.rs` | Upper bound on the echoed `req_id`; commands with a longer `req_id` are rejected with `invalid_command` so replies stay within the framed line limit. |
+| `MAX_MANIFEST_BYTES` | `32 KiB` | `manifest/types.rs` | Encoded-size bound for a published capability manifest; larger manifests are rejected with `invalid_command` so `describe` responses stay under the wire limit. |
+| `MAX_SERVICES` | `64` | `manifest/types.rs` | Maximum services listed in one capability manifest. |
+| `WHO_CAN_PULL_TIMEOUT` | `5s` | `daemon/who_can.rs` | Whole-exchange deadline for one `describe` capability pull issued by `who_can`. |
+| `WHO_CAN_CACHE_TTL` | `60s` | `daemon/who_can.rs` | Cached peer manifests older than this are re-pulled on the next `who_can` query. |
+| `MAX_MANIFEST_CACHE_ENTRIES` | `256` | `manifest/cache.rs` | Maximum cached remote manifests; overflow evicts the oldest-inserted entry. |
 | `MAX_PEER_STORE_BYTES` | `1 MiB` | `peer_directory/store.rs` | Maximum peer-store file size on load. Non-regular files and larger stores are rejected without unbounded reads. |
 | `PEER_STORE_VERSION` | `1` | `peer_directory/store.rs` | Schema version of the canonical `peers.json` document; stores with any other version are rejected on load. |
 | `MAX_CLIENT_QUEUE` | `1024` | `daemon/mod.rs` | Per-IPC-client outbound message queue depth; overflow disconnects lagging clients. |

@@ -160,6 +160,7 @@ fn ipc_peers_response_uses_agent_id_field() {
             status: "connected",
             rtt_ms: Some(1.23),
             display_name: None,
+            services: None,
         }],
         req_id: None,
     };

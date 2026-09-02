@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
+use crate::manifest::Manifest;
 use crate::message::{AgentId, Envelope, MessageKind};
 
 pub const MAX_IPC_LINE_LENGTH: usize = 64 * 1024;
@@ -72,6 +73,10 @@ pub fn error_reply_line(
 pub enum IpcSendKind {
     Request,
     Message,
+    /// Capability-manifest query. Answered by the *receiving daemon* from
+    /// its registered manifest; the remote application handler is never
+    /// woken (spec/MESSAGE_TYPES.md §describe).
+    Describe,
 }
 
 impl IpcSendKind {
@@ -79,6 +84,7 @@ impl IpcSendKind {
         match self {
             Self::Request => MessageKind::Request,
             Self::Message => MessageKind::Message,
+            Self::Describe => MessageKind::Describe,
         }
     }
 }
@@ -138,7 +144,21 @@ pub enum IpcCommand {
         #[serde(default)]
         req_id: Option<String>,
     },
+    WhoCan {
+        /// Case-insensitive substring matched against service ids and
+        /// descriptions. Absent/empty lists every reachable service.
+        #[serde(default)]
+        query: Option<String>,
+        #[serde(default)]
+        req_id: Option<String>,
+    },
     Serve {
+        /// Optional capability manifest published with the handler lease.
+        /// The daemon answers inbound `describe` requests from it without
+        /// waking this client. Validated at parse time and size-bounded at
+        /// dispatch time (spec/IPC.md §4.7).
+        #[serde(default)]
+        manifest: Option<Manifest>,
         #[serde(default)]
         req_id: Option<String>,
     },
@@ -166,7 +186,8 @@ impl IpcCommand {
             | Self::Whoami { req_id }
             | Self::AddPeer { req_id, .. }
             | Self::RemovePeer { req_id, .. }
-            | Self::Serve { req_id }
+            | Self::WhoCan { req_id, .. }
+            | Self::Serve { req_id, .. }
             | Self::Reply { req_id, .. } => req_id.as_deref(),
         }
     }
@@ -179,6 +200,7 @@ impl IpcCommand {
             Self::Whoami { .. } => "whoami",
             Self::AddPeer { .. } => "add_peer",
             Self::RemovePeer { .. } => "remove_peer",
+            Self::WhoCan { .. } => "who_can",
             Self::Serve { .. } => "serve",
             Self::Reply { .. } => "reply",
         }
@@ -202,6 +224,10 @@ pub struct PeerSummary {
     pub rtt_ms: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
+    /// Advisory service ids from the peer's last observed capability
+    /// manifest. Omitted when no manifest has been observed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub services: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -212,6 +238,19 @@ pub struct WhoamiInfo {
     pub name: Option<String>,
     pub version: String,
     pub uptime_secs: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ServiceSummary {
+    pub id: String,
+    pub description: String,
+}
+
+/// One peer's services matching a `who_can` query.
+#[derive(Debug, Clone, Serialize)]
+pub struct ServiceMatch {
+    pub agent_id: String,
+    pub services: Vec<ServiceSummary>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -305,6 +344,15 @@ pub enum DaemonReply {
         #[serde(skip_serializing_if = "Option::is_none")]
         req_id: Option<String>,
     },
+    WhoCan {
+        ok: bool,
+        matches: Vec<ServiceMatch>,
+        /// Connected enrolled peers that failed to answer a capability pull;
+        /// named explicitly so partial results are never silently incomplete.
+        unreachable: Vec<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        req_id: Option<String>,
+    },
     Error {
         ok: bool,
         error: IpcErrorCode,
@@ -345,6 +393,7 @@ impl DaemonReply {
             | Self::PeerChanged { req_id, .. }
             | Self::Serving { req_id, .. }
             | Self::Replied { req_id, .. }
+            | Self::WhoCan { req_id, .. }
             | Self::Error { req_id, .. } => req_id.as_deref(),
             Self::InboundEvent { .. }
             | Self::RequestEvent { .. }

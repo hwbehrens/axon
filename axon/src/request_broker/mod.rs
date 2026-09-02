@@ -6,7 +6,10 @@ use serde_json::{Value, json};
 use tokio::sync::{Mutex, oneshot};
 use uuid::Uuid;
 
+use crate::manifest::Manifest;
 use crate::message::{AgentId, Envelope, MAX_MESSAGE_SIZE, MessageKind};
+
+mod describe;
 
 pub const MAX_PENDING_REQUESTS: usize = 1024;
 /// Completed-request responses are cached so transport-level retries can be
@@ -121,6 +124,10 @@ pub struct RequestBroker {
 #[derive(Debug, Default)]
 struct BrokerState {
     handler: Option<u64>,
+    /// Capability manifest published by the handler at `serve` time. Answered
+    /// by the broker itself for inbound `describe` requests; cleared with the
+    /// lease. A claim only — never an authority input.
+    manifest: Option<Arc<Manifest>>,
     pending: HashMap<RequestKey, PendingRequest>,
     completed: CompletedCache,
 }
@@ -141,14 +148,27 @@ impl RequestBroker {
         }
     }
 
-    pub async fn register(&self, client_id: u64) -> Result<(), BrokerError> {
+    /// Atomically acquire the handler lease and publish (or clear) the
+    /// application's capability manifest. Registering without a manifest is
+    /// valid — the daemon then answers `describe` with an explicit
+    /// `no_manifest` error instead of waking the handler.
+    pub async fn register(
+        &self,
+        client_id: u64,
+        manifest: Option<Manifest>,
+    ) -> Result<(), BrokerError> {
         let mut state = self.state.lock().await;
         match state.handler {
             None => {
                 state.handler = Some(client_id);
+                state.manifest = manifest.map(Arc::new);
                 Ok(())
             }
-            Some(owner) if owner == client_id => Ok(()),
+            Some(owner) if owner == client_id => {
+                // Idempotent re-serve refreshes the published manifest.
+                state.manifest = manifest.map(Arc::new);
+                Ok(())
+            }
             Some(_) => Err(BrokerError::HandlerBusy),
         }
     }
@@ -163,6 +183,14 @@ impl RequestBroker {
                 false,
             ));
         };
+        // `describe` is answered by the broker itself from the handler's
+        // registered manifest — never delivered to the handler, never
+        // tombstoned (it has no side effects, so a fresh answer is always
+        // correct even across manifest refreshes).
+        if request.kind == MessageKind::Describe {
+            let manifest = state.manifest.clone();
+            return BeginRequest::Respond(self.describe_response(manifest.as_deref(), &request));
+        }
         // A cached terminal response answers any redelivery of the same
         // (peer, request UUID) pair. This runs BEFORE the handler lookup so
         // that (a) a retried exchange after handler loss replays the recorded
@@ -376,6 +404,7 @@ impl RequestBroker {
             return;
         }
         state.handler = None;
+        state.manifest = None;
         let pending_keys: Vec<_> = state
             .pending
             .iter()
@@ -404,6 +433,7 @@ impl RequestBroker {
             && !live_clients.contains(&holder)
         {
             state.handler = None;
+            state.manifest = None;
         }
         let orphans: Vec<_> = state
             .pending

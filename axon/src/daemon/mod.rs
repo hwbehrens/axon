@@ -1,5 +1,6 @@
 pub(crate) mod command_handler;
 mod lockfile;
+mod who_can;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -144,6 +145,7 @@ pub async fn run_daemon(opts: DaemonOptions) -> Result<()> {
         inflight_sends: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         max_inflight_sends: opts.max_inflight_sends.unwrap_or(MAX_INFLIGHT_SENDS),
         start,
+        manifest_cache: crate::manifest::ManifestCache::new(),
     };
 
     loop {

@@ -1,0 +1,159 @@
+//! `who_can` — a derived, cached view of connected peers' capabilities.
+//!
+//! On each query, manifests for connected enrolled peers are pulled via
+//! `describe` exchanges only when missing or stale (TTL-gated); fresh cache
+//! entries answer without network traffic. The cache is runtime-only and
+//! advisory: it grants no authority and introduces no durable state.
+//! Peers that fail a pull are named in the reply — partial results are never
+//! silently incomplete.
+
+use std::time::Duration;
+
+use serde_json::json;
+use tracing::{debug, warn};
+
+use crate::ipc::{DaemonReply, ServiceMatch, ServiceSummary};
+use crate::manifest::Manifest;
+use crate::message::{AgentId, Envelope, MessageKind};
+use crate::peer_directory::PeerTrust;
+
+use super::DaemonContext;
+
+/// Whole-exchange deadline for one `describe` capability pull.
+pub(crate) const WHO_CAN_PULL_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Cached manifests older than this are re-pulled on the next `who_can`.
+pub(crate) const WHO_CAN_CACHE_TTL: Duration = Duration::from_secs(60);
+
+pub(super) async fn handle(ctx: &DaemonContext, query: Option<String>) -> DaemonReply {
+    // Capability data is pulled over live TLS sessions, so only connected
+    // enrolled peers are in scope; candidates cannot be messaged at all.
+    let mut connected: Vec<AgentId> = Vec::new();
+    for peer in ctx.directory.list().await {
+        if peer.trust != PeerTrust::Enrolled {
+            continue;
+        }
+        let agent_id = peer.identity.agent_id().clone();
+        if ctx.transport.has_connection(&agent_id).await {
+            connected.push(agent_id);
+        }
+    }
+    connected.sort();
+
+    // Refresh stale or missing entries concurrently; fresh entries answer
+    // from cache without waking the network.
+    let mut pulls = tokio::task::JoinSet::new();
+    for agent_id in &connected {
+        if ctx
+            .manifest_cache
+            .fresh(agent_id, WHO_CAN_CACHE_TTL)
+            .await
+            .is_none()
+        {
+            let ctx = ctx.clone();
+            let agent_id = agent_id.clone();
+            pulls.spawn(async move { pull_manifest(&ctx, &agent_id).await });
+        }
+    }
+    let mut unreachable: Vec<String> = Vec::new();
+    while let Some(joined) = pulls.join_next().await {
+        match joined {
+            Ok(PullOutcome::Manifest(agent_id, manifest)) => {
+                ctx.manifest_cache.insert(agent_id, manifest).await;
+            }
+            Ok(PullOutcome::Declined(agent_id)) => {
+                debug!(peer = %agent_id, "peer published no capability manifest");
+            }
+            Ok(PullOutcome::Unreachable(agent_id)) => unreachable.push(agent_id.to_string()),
+            Err(err) if err.is_panic() => warn!(error = %err, "capability pull task panicked"),
+            Err(_) => {}
+        }
+    }
+
+    let mut matches: Vec<ServiceMatch> = Vec::new();
+    for agent_id in &connected {
+        let Some(manifest) = ctx.manifest_cache.fresh(agent_id, WHO_CAN_CACHE_TTL).await else {
+            continue;
+        };
+        let services = match_services(query.as_deref(), &manifest);
+        if services.is_empty() {
+            continue;
+        }
+        matches.push(ServiceMatch {
+            agent_id: agent_id.to_string(),
+            services,
+        });
+    }
+    matches.sort_by(|a, b| a.agent_id.cmp(&b.agent_id));
+    unreachable.sort();
+    unreachable.dedup();
+
+    DaemonReply::WhoCan {
+        ok: true,
+        matches,
+        unreachable,
+        req_id: None,
+    }
+}
+
+enum PullOutcome {
+    Manifest(AgentId, Manifest),
+    /// The peer answered but published no usable manifest (e.g. an explicit
+    /// `no_manifest` error). Reported as "no services", not unreachable.
+    Declined(AgentId),
+    Unreachable(AgentId),
+}
+
+async fn pull_manifest(ctx: &DaemonContext, agent_id: &AgentId) -> PullOutcome {
+    let envelope = Envelope::new(
+        ctx.local_agent_id.clone(),
+        agent_id.clone(),
+        MessageKind::Describe,
+        json!({}),
+    );
+    match ctx
+        .transport
+        .send_to(&ctx.directory, agent_id, envelope, WHO_CAN_PULL_TIMEOUT)
+        .await
+    {
+        Ok(Some(response)) if response.kind == MessageKind::Response => {
+            match response.payload_as::<Manifest>() {
+                Ok(manifest) => PullOutcome::Manifest(agent_id.clone(), manifest),
+                Err(_) => PullOutcome::Declined(agent_id.clone()),
+            }
+        }
+        Ok(_) => PullOutcome::Declined(agent_id.clone()),
+        Err(_) => PullOutcome::Unreachable(agent_id.clone()),
+    }
+}
+
+/// Case-insensitive substring match over service id and description. The
+/// query is trimmed and lowercased here; absent or whitespace-only queries
+/// list every service.
+fn match_services(query: Option<&str>, manifest: &Manifest) -> Vec<ServiceSummary> {
+    let needle = query
+        .map(|q| q.trim().to_ascii_lowercase())
+        .filter(|q| !q.is_empty());
+    manifest
+        .services
+        .iter()
+        .filter(|service| match &needle {
+            None => true,
+            Some(needle) => {
+                service.id.to_ascii_lowercase().contains(needle.as_str())
+                    || service
+                        .description
+                        .to_ascii_lowercase()
+                        .contains(needle.as_str())
+            }
+        })
+        .map(|service| ServiceSummary {
+            id: service.id.clone(),
+            description: service.description.clone(),
+        })
+        .collect()
+}
+
+#[cfg(test)]
+#[path = "who_can_tests.rs"]
+mod tests;

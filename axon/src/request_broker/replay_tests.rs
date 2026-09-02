@@ -13,7 +13,7 @@ use super::*;
 #[tokio::test]
 async fn retried_request_replays_cached_completion_without_reexecution() {
     let broker = RequestBroker::new(agent('a'));
-    broker.register(1).await.unwrap();
+    broker.register(1, None).await.unwrap();
 
     let original = request();
     let BeginRequest::Deliver(delivery) = broker.begin(original.clone(), REQUEST_TTL).await else {
@@ -44,7 +44,7 @@ async fn retried_request_replays_cached_completion_without_reexecution() {
 #[tokio::test]
 async fn duplicate_of_inflight_request_is_rejected_retryable() {
     let broker = RequestBroker::new(agent('a'));
-    broker.register(1).await.unwrap();
+    broker.register(1, None).await.unwrap();
 
     let original = request();
     let BeginRequest::Deliver(first) = broker.begin(original.clone(), REQUEST_TTL).await else {
@@ -66,7 +66,7 @@ async fn cancelled_deliveries_are_swept_once_the_ttl_expires() {
     // Simulates QUIC connection loss dropping the awaiting task: the
     // delivery (and its resolver) is discarded without replying.
     let broker = RequestBroker::new(agent('a'));
-    broker.register(1).await.unwrap();
+    broker.register(1, None).await.unwrap();
     let original = request();
     let BeginRequest::Deliver(delivery) = broker.begin(original.clone(), REQUEST_TTL).await else {
         panic!("delivery expected");
@@ -97,7 +97,7 @@ async fn same_call_retry_after_sweep_replays_tombstone_not_fresh_delivery() {
     // recheck, that call produced a fresh delivery whose pending entry the
     // stale attempt's late reply could satisfy.
     let broker = RequestBroker::new(agent('a'));
-    broker.register(1).await.unwrap();
+    broker.register(1, None).await.unwrap();
     let original = request();
     let tiny_ttl = Duration::from_millis(50);
     let BeginRequest::Deliver(first) = broker.begin(original.clone(), tiny_ttl).await else {
@@ -129,7 +129,7 @@ async fn same_call_retry_after_sweep_replays_tombstone_not_fresh_delivery() {
 #[tokio::test]
 async fn swept_request_uuid_is_tombstoned_and_never_redelivered() {
     let broker = RequestBroker::new(agent('b'));
-    broker.register(1).await.expect("handler");
+    broker.register(1, None).await.expect("handler");
     let original = request();
     let tiny_ttl = Duration::from_millis(50);
     let BeginRequest::Deliver(first) = broker.begin(original.clone(), tiny_ttl).await else {
@@ -180,7 +180,7 @@ async fn swept_request_uuid_is_tombstoned_and_never_redelivered() {
 #[tokio::test]
 async fn completed_response_replays_without_a_registered_handler() {
     let broker = RequestBroker::new(agent('b'));
-    broker.register(1).await.expect("handler");
+    broker.register(1, None).await.expect("handler");
     let original = request();
     let BeginRequest::Deliver(delivery) = broker.begin(original.clone(), REQUEST_TTL).await else {
         panic!("request should be delivered");
@@ -226,7 +226,7 @@ async fn same_uuid_from_another_peer_does_not_replay_cached_response() {
     // UUID alone, so a second peer reusing a UUID could replay the first
     // peer's cached response without its request ever being executed.
     let broker = RequestBroker::new(agent('b'));
-    broker.register(1).await.unwrap();
+    broker.register(1, None).await.unwrap();
 
     let original = request();
     let BeginRequest::Deliver(first) = broker.begin(original.clone(), REQUEST_TTL).await else {
@@ -262,7 +262,7 @@ async fn same_uuid_from_another_peer_does_not_replay_cached_response() {
 #[tokio::test]
 async fn uuid_collision_reply_is_ambiguous_without_peer_and_scoped_with_it() {
     let broker = RequestBroker::new(agent('b'));
-    broker.register(1).await.unwrap();
+    broker.register(1, None).await.unwrap();
 
     let shared_id = uuid::Uuid::from_u128(0xfeed);
     let from_a = request_from(agent('a'), shared_id);

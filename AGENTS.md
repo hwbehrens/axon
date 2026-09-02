@@ -109,6 +109,8 @@ axon/                      Rust implementation (Cargo crate)
       mod.rs, state.rs, types.rs, store.rs, tests.rs
     peer_token/            Peer token encoding/decoding
       mod.rs, tests.rs
+    manifest/              Capability manifests: describe schema, bounds, remote cache
+      mod.rs, types.rs, cache.rs, tests
     request_broker/        IPC handler lease and inbound request correlation
       mod.rs, tests.rs
     transport/             ConnectionManager, QUIC/TLS, generations, reconnect, framing
@@ -128,9 +130,9 @@ Client (OpenClaw/CLI) ←→ [Unix Socket IPC] ←→ AXON Daemon ←→ [QUIC/U
 - **Discovery**: Bonjour/mDNS (`_axon._udp.local.`) broadcasts Agent ID and public key on the local link. Observations create untrusted candidates only; WAN rendezvous is out of scope.
 - **Peer authority**: `PeerDirectory` is the only logical owner of enrolled identities, configured locators, live observations, the atomic `peers.json` store, and derived pin/query views.
 - **Transport**: `ConnectionManager` exclusively owns QUIC handles, one generation-checked slot per peer, cross-dial selection, tracked tasks, and reconnect backoff.
-- **IPC**: Unix socket at `~/.axon/axon.sock`; line-delimited JSON commands are `send`, `peers`, `status`, `whoami`, `add_peer`, `remove_peer`, `serve`, and `reply`. `RequestBroker` correlates an inbound request with exactly one terminal reply on its original QUIC stream.
+- **IPC**: Unix socket at `~/.axon/axon.sock`; line-delimited JSON commands are `send`, `peers`, `status`, `whoami`, `add_peer`, `remove_peer`, `who_can`, `serve`, and `reply`. `RequestBroker` correlates an inbound request with exactly one terminal reply on its original QUIC stream.
 - **Doctor CLI**: `axon doctor` checks state-root health, identity material, local config, canonical peer-store integrity, and unsupported legacy state.
-- **Messages**: JSON envelopes with UUID, kind, payload, and optional ref. The four interpreted kinds are `request`, `response`, `message`, and `error`; unknown strings are retained losslessly.
+- **Messages**: JSON envelopes with UUID, kind, payload, and optional ref. The five interpreted kinds are `request`, `response`, `message`, `error`, and `describe`; unknown strings are retained losslessly. `describe` is answered by the receiving daemon from the manifest published at `serve` time (see `axon/src/manifest/`).
 
 ## Module Map (summary)
 
@@ -146,6 +148,7 @@ Use this to navigate quickly; for the full "change → file(s)" table, see `CONT
 - **Config parsing**: `axon/src/config/`
 - **Peer authority + pinning**: `axon/src/peer_directory/`
 - **Inbound request correlation**: `axon/src/request_broker/`
+- **Capability manifests**: `axon/src/manifest/`
 - **CLI**: `axon/src/app/` (CLI definitions in `app/run.rs`, helpers in `app/cli/`)
 - **Doctor diagnostics**: `axon/src/app/doctor/`
 
@@ -213,6 +216,7 @@ Detailed requirements and recipes live in `CONTRIBUTING.md`. Key conventions:
 - `axon/src/identity/AGENTS.md`: Ed25519 identity, agent ID derivation, key format rules.
 - `axon/src/ipc/AGENTS.md`: IPC protocol, server, client handler, auth, bounded queues.
 - `axon/src/message/AGENTS.md`: message kinds, envelope schema, wire format compliance.
+- `axon/src/manifest/AGENTS.md`: capability manifests, describe answering, remote manifest cache.
 - `axon/src/peer_directory/AGENTS.md`: peer authority, atomic persistence, observations, and immutable pin views.
 - `axon/src/peer_token/AGENTS.md`: peer token encoding/decoding, round-trip invariant.
 - `axon/src/request_broker/AGENTS.md`: handler lease and exactly-once request correlation.

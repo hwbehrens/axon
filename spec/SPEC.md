@@ -123,15 +123,15 @@ Authentication is solely via mTLS. TLS verifiers read an immutable pinning snaps
 ```json
 {
   "id": "uuid-v4",
-  "kind": "request|response|message|error",
+  "kind": "request|response|message|error|describe",
   "payload": { ... },
   "ref": "uuid-v4-or-omitted"
 }
 ```
 
 - `id`: unique message identifier (UUID v4).
-- `kind`: one of `request`, `response`, `message`, `error`. Unknown kinds are preserved for forward compatibility.
-- `payload`: arbitrary JSON object. No typed payload schemas — contents are application-defined. Unknown fields MUST be ignored (forward compatibility).
+- `kind`: one of `request`, `response`, `message`, `error`, `describe`. Unknown kinds are preserved for forward compatibility.
+- `payload`: arbitrary JSON object. No typed payload schemas — contents are application-defined. Unknown fields MUST be ignored (forward compatibility). The single exception is `describe`, whose response payload is the capability manifest (schema: spec/WIRE_FORMAT.md §6.5).
 - `ref`: the message ID this responds to. Omitted for initiating messages.
 
 Note: `from` and `to` are **not** on the wire. The daemon populates these fields for IPC clients based on the QUIC connection context.
@@ -142,6 +142,7 @@ Note: `from` and `to` are **not** on the wire. The daemon populates these fields
 - **`response`** — Reply to a `request`.
 - **`message`** — Fire-and-forget notification. Sent on a unidirectional stream.
 - **`error`** — Error reply to a `request` on a bidirectional stream, or unsolicited error on a unidirectional stream.
+- **`describe`** — Capability-manifest query. Answered by the receiving daemon from the manifest its handler published at `serve` time; the application handler is never woken. Manifests are self-reported claims and never affect trust state. With no manifest published, the daemon replies `error`/`no_manifest` — explicit absence, never silence.
 
 ## 5. Local IPC: Unix Domain Socket
 
@@ -161,17 +162,19 @@ Line-delimited JSON over Unix socket. Each line is one complete JSON object. Sin
 {"cmd": "add_peer", "agent_id": "<observed-candidate-id>"}
 {"cmd": "add_peer", "token": "axon://<peer-token>"}
 {"cmd": "remove_peer", "agent_id": "<agent_id>"}
-{"cmd": "serve"}
+{"cmd": "who_can", "query": "cargo"}
+{"cmd": "serve", "manifest": { ... }}
 {"cmd": "reply", "request_id": "<uuid>", "kind": "response|error", "payload": { ... }}
 ```
 
-- **`send`** — Send a message to a remote peer over IPC. Requires `to`, `kind` (`request` or `message`), and `payload`. Optional `timeout_secs` applies to `kind=request`.
-- **`peers`** — List bounded candidate and enrolled peer views.
+- **`send`** — Send a message to a remote peer over IPC. Requires `to`, `kind` (`request`, `message`, or `describe`), and `payload`. Optional `timeout_secs` applies to `request` and `describe`. `describe` is answered by the receiving daemon from its registered manifest.
+- **`peers`** — List bounded candidate and enrolled peer views; connected peers include an advisory `services` summary when a manifest has been observed.
 - **`status`** — Daemon health: uptime, connections, message counts.
 - **`whoami`** — Daemon identity and metadata (`ok`, `agent_id`, `public_key`, optional `name`, `version`, `uptime_secs`).
 - **`add_peer`** — Enroll a currently observed candidate or a peer token and persist it atomically.
 - **`remove_peer`** — Revoke an enrolled peer, cancel its attempts, close its connection, and remove its durable record.
-- **`serve`** — Acquire the daemon's single connection-bound inbound request-handler lease.
+- **`who_can`** — Query which connected enrolled peers expose a matching service (cached `describe` pulls; advisory; `unreachable` names peers that failed a pull).
+- **`serve`** — Acquire the daemon's single connection-bound inbound request-handler lease, optionally publishing a capability manifest that the daemon serves for `describe` requests.
 - **`reply`** — Resolve one pending inbound request on its originating QUIC stream.
 
 ### Authentication
