@@ -352,19 +352,46 @@ fn describe_exchange_conformance() {
     assert_eq!(reparsed, manifest);
 }
 
-/// spec/MESSAGE_TYPES.md forward-compatibility note: a peer that predates
-/// `describe` sees a plain unknown kind string on the wire and replies
-/// `unsupported_kind` naming it. Simulate that legacy receiver with a
-/// string-typed kind field.
+/// spec/MESSAGE_TYPES.md forward-compatibility rule, exercised end to end:
+/// a peer predating `describe` sees a plain unknown kind string on a
+/// bidirectional stream and MUST answer `unsupported_kind` naming the
+/// original string (bounded per spec).
 #[test]
-fn describe_is_a_lossless_string_for_legacy_receivers() {
+fn describe_on_legacy_peer_yields_unsupported_kind() {
+    // Legacy receiver: kind deserializes as an opaque string.
     #[derive(serde::Deserialize)]
     struct LegacyEnvelope {
         kind: String,
     }
 
     let request = Envelope::new(agent_a(), agent_b(), MessageKind::Describe, json!({}));
-    let bytes = encode(&request).unwrap();
+    let bytes = request.wire_encode().unwrap();
     let legacy: LegacyEnvelope = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(legacy.kind, "describe");
+
+    // The mandated legacy reply: an error envelope whose message embeds the
+    // original bounded kind string.
+    let reply = Envelope::response_to(
+        &request,
+        agent_b(),
+        MessageKind::Error,
+        json!({
+            "code": "unsupported_kind",
+            "message": format!(
+                "unsupported message kind '{}' on bidirectional stream",
+                legacy.kind.chars().take(64).collect::<String>()
+            ),
+            "retryable": false,
+        }),
+    );
+    let decoded: Value = serde_json::from_slice(&reply.wire_encode().unwrap()).unwrap();
+    assert_eq!(decoded["kind"], "error");
+    assert_eq!(decoded["ref"], json!(request.id.to_string()));
+    assert_eq!(decoded["payload"]["code"], "unsupported_kind");
+    assert!(
+        decoded["payload"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("describe")
+    );
 }

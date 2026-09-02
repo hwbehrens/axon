@@ -163,6 +163,30 @@ Process note for future rounds: the orphaned-test finding is the second time
 in this repo's history a test module compiled nowhere; wiring a new
 test file into its module is part of writing it.
 
+## Review round 2 (Luna Max agent) — request-changes → repairs
+
+Re-review of the repair round: score 82/100 (from 72), five findings
+REPAIRED, two PARTIAL, one NOT-REPAIRED, plus one NEW medium introduced by
+the round-1 spawn fix. All addressed in the follow-up commit:
+
+- **New medium — unbounded who_can fan-out**: spawning WhoCan like Send
+  restored loop responsiveness but allowed concurrent queries to stack
+  unbounded concurrent pulls. Fixed with a dedicated gate mutex
+  (`DaemonContext.who_can_gate`): one who_can computation runs at a time;
+  queued queries wait, then re-read the now-fresh cache cheaply.
+- **Partial — connection scoping**: `peers` now shows the advisory
+  `services` summary only while the peer is connected, and a pulled manifest
+  is cached only if the peer is still connected at insert time. Semantics
+  (precise): summaries visible while connected; entries evicted on
+  revocation, on disconnect at the next who_can; inserts require a live
+  connection.
+- **Partial — legacy coverage**: the legacy test now exercises the full
+  normative claim — string-typed kind on the wire, then the mandated
+  `unsupported_kind` error envelope naming the original bounded string.
+- **Not-repaired — AGENTS.md:65**: repository-layout tree still said
+  "Message kinds (4)"; fixed. The open-questions.md historical entry with
+  its DEC-026 update note was judged acceptable as annotated history.
+
 ```sh
 cd axon && make verify   # fmt + clippy -D warnings + full test suite
 ```

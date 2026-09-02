@@ -26,6 +26,11 @@ pub(crate) const WHO_CAN_PULL_TIMEOUT: Duration = Duration::from_secs(5);
 pub(crate) const WHO_CAN_CACHE_TTL: Duration = Duration::from_secs(60);
 
 pub(super) async fn handle(ctx: &DaemonContext, query: Option<String>) -> DaemonReply {
+    // Backpressure: one `who_can` computation runs at a time. Concurrent
+    // queries would stack unbounded concurrent pulls; queued queries instead
+    // wait here, then re-read the now-fresh cache cheaply.
+    let _gate = ctx.who_can_gate.lock().await;
+
     // Capability data is pulled over live TLS sessions, so only connected
     // enrolled peers are in scope; candidates cannot be messaged at all.
     let mut connected: Vec<AgentId> = Vec::new();
@@ -64,7 +69,13 @@ pub(super) async fn handle(ctx: &DaemonContext, query: Option<String>) -> Daemon
     while let Some(joined) = pulls.join_next().await {
         match joined {
             Ok(PullOutcome::Manifest(agent_id, manifest)) => {
-                ctx.manifest_cache.insert(agent_id, manifest).await;
+                // A pull can outlive its connection snapshot; only cache
+                // manifests for peers still connected right now.
+                if ctx.transport.has_connection(&agent_id).await {
+                    ctx.manifest_cache.insert(agent_id, manifest).await;
+                } else {
+                    debug!(peer = %agent_id, "discarding capability pull for disconnected peer");
+                }
             }
             Ok(PullOutcome::Declined(agent_id)) => {
                 debug!(peer = %agent_id, "peer published no capability manifest");

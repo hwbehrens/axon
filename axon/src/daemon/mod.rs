@@ -146,6 +146,7 @@ pub async fn run_daemon(opts: DaemonOptions) -> Result<()> {
         max_inflight_sends: opts.max_inflight_sends.unwrap_or(MAX_INFLIGHT_SENDS),
         start,
         manifest_cache: crate::manifest::ManifestCache::new(),
+        who_can_gate: Arc::new(tokio::sync::Mutex::new(())),
     };
 
     loop {

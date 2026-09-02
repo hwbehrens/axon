@@ -62,7 +62,7 @@ LICENSE
 
 spec/                      Protocol specifications (authoritative)
   SPEC.md                  Architecture + lifecycle (QUIC, identity, discovery, transport)
-  MESSAGE_TYPES.md         Message kinds (4) + stream mapping
+  MESSAGE_TYPES.md         Message kinds (5) + stream mapping
   WIRE_FORMAT.md           Normative interoperable wire format
   IPC.md                   IPC protocol, Unix socket commands
 

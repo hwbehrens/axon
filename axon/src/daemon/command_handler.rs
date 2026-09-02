@@ -73,6 +73,10 @@ pub(crate) struct DaemonContext {
     pub(crate) start: Instant,
     /// Runtime cache of connected peers' capability manifests (advisory).
     pub(crate) manifest_cache: crate::manifest::ManifestCache,
+    /// Backpressure for `who_can` computations: one query runs at a time.
+    /// Queued queries are cheap — they re-read the now-fresh cache instead
+    /// of stacking concurrent network pulls.
+    pub(crate) who_can_gate: std::sync::Arc<tokio::sync::Mutex<()>>,
 }
 
 pub(crate) async fn handle_command(cmd: CommandEvent, ctx: &DaemonContext) -> Result<()> {
@@ -137,17 +141,22 @@ pub(crate) async fn handle_command(cmd: CommandEvent, ctx: &DaemonContext) -> Re
                 locators.extend(peer.observed_endpoints.iter().map(ToString::to_string));
                 locators.sort();
                 locators.dedup();
-                let services =
+                // Advisory summary, visible only while the peer is
+                // connected — never for a disconnected record.
+                let services = if connected {
                     ctx.manifest_cache
                         .get(peer.identity.agent_id())
                         .await
                         .map(|manifest| {
                             manifest
-                                .services
+                                .services()
                                 .iter()
                                 .map(|service| service.id.clone())
                                 .collect::<Vec<_>>()
-                        });
+                        })
+                } else {
+                    None
+                };
                 peers.push(PeerSummary {
                     agent_id: peer.identity.agent_id().to_string(),
                     public_key: peer.identity.public_key().to_string(),
