@@ -33,6 +33,12 @@ pub type PinningSnapshotHandle = Arc<StdRwLock<PinningSnapshot>>;
 pub struct PeerDirectory {
     local_agent_id: AgentId,
     state: Arc<RwLock<DirectoryState>>,
+    /// Published pin/enrollment snapshot. Long-lived consumers (the TLS
+    /// verifiers, the connection-admission gate) capture the
+    /// `PinningSnapshotHandle` once and read it on every use, so publication
+    /// MUST mutate the lock's contents in place (`publish_pins`) and must
+    /// never swap this field for a new `Arc` — a swap would silently freeze
+    /// every captured handle on a stale snapshot.
     pins: PinningSnapshotHandle,
     store: PeerStore,
     /// Transaction gate for persistent edits (see `persistence.rs`): held
@@ -222,7 +228,18 @@ impl PeerDirectory {
             .await
     }
 
-    pub async fn remove_peer(&self, agent_id: &AgentId) -> Result<PeerIdentity, DirectoryError> {
+    /// Revoke a peer: remove the durable record and republish pins.
+    ///
+    /// Crate-private BY DESIGN: trust removal must be paired with transport
+    /// teardown (the admission gate's revocation guarantee depends on
+    /// `close_peer` following every successful commit), so runtime callers
+    /// — in-crate or library — must use
+    /// [`crate::transport::ConnectionManager::revoke_peer`]. Directory-level
+    /// tests reach this method from inside the module tree.
+    pub(crate) async fn remove_peer(
+        &self,
+        agent_id: &AgentId,
+    ) -> Result<PeerIdentity, DirectoryError> {
         let agent_id = agent_id.clone();
         self.commit_persistent(move |current| remove_peer_plan(current, &agent_id))
             .await
@@ -235,16 +252,6 @@ impl PeerDirectory {
             .enrolled
             .get(agent_id)
             .map(|peer| peer.identity.clone())
-    }
-
-    /// Enrollment predicate used as the transport's connection-admission
-    /// gate. It shares the directory state lock with `remove_peer`'s short
-    /// commit section, so a result observed under the registry's admission
-    /// lock is linearized against revocation (see
-    /// `ConnectionRegistry::admit_gated`). Persistence runs outside this
-    /// lock, so the gate can never be stalled by peer-store disk I/O.
-    pub async fn is_enrolled(&self, agent_id: &AgentId) -> bool {
-        self.state.read().await.enrolled.contains_key(agent_id)
     }
 
     pub async fn enrolled_agent_ids(&self) -> Vec<AgentId> {

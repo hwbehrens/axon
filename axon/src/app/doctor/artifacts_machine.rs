@@ -61,7 +61,7 @@ impl DoctorArtifactsMachine {
     }
 
     fn pid_path(&self) -> std::path::PathBuf {
-        self.paths.root.join("daemon.pid")
+        self.paths.daemon_lock.clone()
     }
 
     fn sweep(&self, fix: bool) -> DoctorReport {

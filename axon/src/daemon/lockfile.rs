@@ -5,16 +5,14 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use tracing::{info, warn};
 
-pub(crate) const DAEMON_PID_FILE_NAME: &str = "daemon.pid";
-
 pub(crate) struct DaemonLock {
     path: PathBuf,
     released: bool,
 }
 
 impl DaemonLock {
-    pub(crate) fn acquire(state_root: &Path) -> Result<Self> {
-        let path = state_root.join(DAEMON_PID_FILE_NAME);
+    pub(crate) fn acquire(lock_path: &Path) -> Result<Self> {
+        let path = lock_path.to_path_buf();
 
         loop {
             match create_lock_file(&path) {

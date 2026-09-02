@@ -1,3 +1,5 @@
+use std::panic::AssertUnwindSafe;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use serde_json::json;
@@ -103,23 +105,16 @@ async fn revoking_one_peer_does_not_reject_an_unrelated_peers_handshake() {
         .await;
 
     // B's pre-revocation attempt (captured epoch 0) is rejected...
-    assert!(
-        !trio
-            .transport_a
-            .admission_gate(trio.agent_b.clone(), 0, None)
-            .await
-    );
+    assert!(!trio.transport_a.admission_gate(trio.agent_b.clone(), 0)());
     // ...while C's equally-old in-flight attempt remains fully admissible:
     // its epoch did not move and it is still enrolled.
     assert_eq!(
         trio.transport_a.peer_enrollment_epoch(&trio.agent_c),
         captured_c
     );
-    assert!(
-        trio.transport_a
-            .admission_gate(trio.agent_c.clone(), captured_c, None)
-            .await
-    );
+    assert!(trio
+        .transport_a
+        .admission_gate(trio.agent_c.clone(), captured_c)());
 
     // End to end: A↔C exchange works after B's revocation.
     let message = Envelope::new(
@@ -140,6 +135,34 @@ async fn revoking_one_peer_does_not_reject_an_unrelated_peers_handshake() {
 }
 
 #[tokio::test]
+async fn poisoned_epoch_lock_fails_admission_closed() {
+    let trio = make_transport_trio().await;
+    let manager = &trio.transport_a;
+
+    // Poison the epoch lock: a holder panics while holding it.
+    let epochs = Arc::clone(&manager.enrollment_epochs);
+    let _ = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        let _guard = epochs.lock().expect("lock before poisoning");
+        panic!("intentional: poison the enrollment epoch lock");
+    }));
+
+    // Admission fails CLOSED for every captured epoch while poisoned.
+    assert!(!manager.admission_gate(trio.agent_b.clone(), 0)());
+    let captured = manager.peer_enrollment_epoch(&trio.agent_c);
+    assert!(!manager.admission_gate(trio.agent_c.clone(), captured)());
+
+    // Captures default safely instead of panicking.
+    assert_eq!(manager.peer_enrollment_epoch(&trio.agent_c), 0);
+    assert!(manager.capture_enrollment_epochs().is_empty());
+
+    // close_peer (epoch bump + registry teardown) must not panic while
+    // poisoned; the bump is skipped with a warning and the gate keeps
+    // failing closed.
+    manager.close_peer(&trio.agent_c, b"poison test").await;
+    assert!(!manager.admission_gate(trio.agent_c.clone(), 0)());
+}
+
+#[tokio::test]
 async fn stale_epoch_attempt_is_rejected_while_fresh_capture_is_admissible() {
     let trio = make_transport_trio().await;
     trio.transport_a
@@ -149,20 +172,13 @@ async fn stale_epoch_attempt_is_rejected_while_fresh_capture_is_admissible() {
 
     // Stale pre-revocation attempt: rejected by the epoch mismatch even
     // though the directory still lists B as enrolled.
-    assert!(
-        !trio
-            .transport_a
-            .admission_gate(trio.agent_b.clone(), 0, None)
-            .await
-    );
+    assert!(!trio.transport_a.admission_gate(trio.agent_b.clone(), 0)());
     // An attempt that started after the revocation committed captures the
     // new epoch. Trust removal itself is the directory's authority
     // (`remove_peer`); while B remains enrolled there, such an attempt is
     // admissible — but it can never be confused with the pre-revocation
     // generation (no ABA reuse of epoch 0).
-    assert!(
-        trio.transport_a
-            .admission_gate(trio.agent_b.clone(), bumped, None)
-            .await
-    );
+    assert!(trio
+        .transport_a
+        .admission_gate(trio.agent_b.clone(), bumped)());
 }

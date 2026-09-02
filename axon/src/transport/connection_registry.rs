@@ -28,6 +28,22 @@ struct RegistryState {
     generations: HashMap<AgentId, u64>,
 }
 
+impl RegistryState {
+    /// Remove the peer's slot when its connection has closed, advancing the
+    /// generation so stale attempt/teardown outcomes can neither mutate nor
+    /// resurrect the emptied slot. The caller must hold the state write lock.
+    fn reap_closed(&mut self, peer: &AgentId) {
+        if self
+            .slots
+            .get(peer)
+            .is_some_and(|slot| slot.connection.close_reason().is_some())
+        {
+            self.slots.remove(peer);
+            *self.generations.entry(peer.clone()).or_default() += 1;
+        }
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct ConnectionRegistry {
     local_agent_id: AgentId,
@@ -53,43 +69,38 @@ impl ConnectionRegistry {
         }
     }
 
-    pub(crate) async fn current(&self, peer: &AgentId) -> Option<quinn::Connection> {
+    /// The peer's authoritative connection, if any.
+    ///
+    /// Reads lazily reap a closed slot (removing it and advancing the
+    /// generation), so a dead slot never lingers as authoritative and stale
+    /// outcomes cannot mutate the emptied slot. That cleanup is a mutation,
+    /// which is why this takes the write lock despite being a query.
+    pub(crate) async fn live_slot(&self, peer: &AgentId) -> Option<quinn::Connection> {
         let mut state = self.state.write().await;
-        if state
-            .slots
-            .get(peer)
-            .is_some_and(|slot| slot.connection.close_reason().is_some())
-        {
-            state.slots.remove(peer);
-            *state.generations.entry(peer.clone()).or_default() += 1;
-        }
+        state.reap_closed(peer);
         state.slots.get(peer).map(|slot| slot.connection.clone())
     }
 
     /// Admission with an authorization gate consulted atomically against
     /// slot installation.
     ///
-    /// The gate future runs while the registry's state lock is held, which
-    /// linearizes it against every mutation that closes slots through this
-    /// registry (notably revocation's `close_peer`): either the gate observes
-    /// the authority change and refuses, or the subsequent slot-closing
-    /// mutation lands after installation and tears the fresh slot down.
-    /// A check performed before acquiring this lock would admit handshakes
-    /// that raced a revocation.
-    ///
-    /// Lock ordering: `state` first, then whatever `gate` acquires. Gates
-    /// MUST NOT acquire a lock whose holders acquire the registry state lock.
-    pub(crate) async fn admit_gated<F, Fut>(
+    /// The gate is a SYNCHRONOUS closure (pin-snapshot enrollment check plus
+    /// epoch comparison — both plain std-lock reads) that runs inside the
+    /// registry's write-lock critical section, linearizing it against every
+    /// mutation that closes slots through this registry (notably
+    /// revocation's `close_peer`): either the gate observes the authority
+    /// change and refuses, or the subsequent slot-closing mutation lands
+    /// after installation and tears the fresh slot down. Because the gate
+    /// cannot await, no lock is ever held across an await, no stall can
+    /// block admission, and no lock-ordering rule between the registry and
+    /// the directory is required.
+    pub(crate) async fn admit_gated(
         &self,
         peer: AgentId,
         connection: quinn::Connection,
         direction: Direction,
-        gate: F,
-    ) -> Admission
-    where
-        F: FnOnce() -> Fut,
-        Fut: std::future::Future<Output = bool>,
-    {
+        gate: impl FnOnce() -> bool,
+    ) -> Admission {
         self.admit_gated_with_window(
             peer,
             connection,
@@ -105,32 +116,21 @@ impl ConnectionRegistry {
 
     /// Admission with the cross-dial replacement window made explicit so the
     /// aged-incumbent rule is unit-testable without real sleeps.
-    pub(crate) async fn admit_gated_with_window<F, Fut>(
+    pub(crate) async fn admit_gated_with_window(
         &self,
         peer: AgentId,
         connection: quinn::Connection,
         direction: Direction,
-        gate: F,
+        gate: impl FnOnce() -> bool,
         cross_dial_window: Duration,
-    ) -> Admission
-    where
-        F: FnOnce() -> Fut,
-        Fut: std::future::Future<Output = bool>,
-    {
+    ) -> Admission {
         let mut state = self.state.write().await;
-        if !gate().await {
+        if !gate() {
             drop(state);
             connection.close(0u32.into(), b"peer not admitted");
             return Admission::Rejected;
         }
-        if state
-            .slots
-            .get(&peer)
-            .is_some_and(|slot| slot.connection.close_reason().is_some())
-        {
-            state.slots.remove(&peer);
-            *state.generations.entry(peer.clone()).or_default() += 1;
-        }
+        state.reap_closed(&peer);
         let generation = *state.generations.entry(peer.clone()).or_default();
         if let Some(incumbent) = state.slots.get(&peer) {
             if incumbent.connection.stable_id() == connection.stable_id() {

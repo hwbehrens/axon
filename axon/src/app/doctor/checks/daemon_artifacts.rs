@@ -9,15 +9,13 @@ use axon::config::AxonPaths;
 
 use crate::app::doctor::{DoctorArgs, DoctorReport};
 
-const DAEMON_PID_FILE_NAME: &str = "daemon.pid";
-
 pub(in crate::app::doctor) fn check_daemon_artifacts(
     paths: &AxonPaths,
     args: &DoctorArgs,
     report: &mut DoctorReport,
 ) -> Result<()> {
-    let pid_path = paths.root.join(DAEMON_PID_FILE_NAME);
-    let pid_state = inspect_daemon_pid(&pid_path)?;
+    let pid_path = &paths.daemon_lock;
+    let pid_state = inspect_daemon_pid(pid_path)?;
     let pid_alive = matches!(&pid_state, DaemonPidState::Alive(_));
 
     match pid_state {
@@ -35,7 +33,7 @@ pub(in crate::app::doctor) fn check_daemon_artifacts(
         ),
         DaemonPidState::Stale(pid) => {
             if args.fix {
-                fs::remove_file(&pid_path).with_context(|| {
+                fs::remove_file(pid_path).with_context(|| {
                     format!("failed removing stale daemon.pid: {}", pid_path.display())
                 })?;
                 report.add_fix(
@@ -59,7 +57,7 @@ pub(in crate::app::doctor) fn check_daemon_artifacts(
         }
         DaemonPidState::Invalid(raw) => {
             if args.fix {
-                fs::remove_file(&pid_path).with_context(|| {
+                fs::remove_file(pid_path).with_context(|| {
                     format!("failed removing invalid daemon.pid: {}", pid_path.display())
                 })?;
                 report.add_fix(

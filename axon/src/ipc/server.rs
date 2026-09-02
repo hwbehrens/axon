@@ -14,8 +14,8 @@ use tokio_util::task::TaskTracker;
 use super::auth;
 use super::client_handler::handle_client;
 use super::protocol::{
-    CommandEvent, DaemonReply, EncodeLineError, IpcCommand, IpcErrorCode, WhoamiInfo,
-    encode_reply_line, error_reply_line,
+    CommandEvent, DaemonReply, EncodeLineError, IpcErrorCode, WhoamiInfo, encode_reply_line,
+    error_reply_line,
 };
 use crate::message::Envelope;
 
@@ -282,25 +282,16 @@ impl IpcServer {
         self.broadcast_line(line).await
     }
 
-    pub async fn handle_command(&self, event: CommandEvent) -> Result<DaemonReply> {
-        match event.command {
-            IpcCommand::Whoami { req_id } => Ok(DaemonReply::Whoami {
-                ok: true,
-                info: WhoamiInfo {
-                    agent_id: self.config.agent_id.clone(),
-                    public_key: self.config.public_key.clone(),
-                    name: self.config.name.clone(),
-                    version: self.config.version.clone(),
-                    uptime_secs: (self.config.uptime_secs)(),
-                },
-                req_id,
-            }),
-            _ => Ok(DaemonReply::Error {
-                ok: false,
-                error: IpcErrorCode::InternalError,
-                message: IpcErrorCode::InternalError.message().to_string(),
-                req_id: event.command.req_id().map(|s| s.to_string()),
-            }),
+    /// Identity metadata served by the `whoami` command. The daemon's
+    /// command handler composes the reply from this; `IpcServer` owns the
+    /// config the reply is built from but does not dispatch commands.
+    pub fn whoami_info(&self) -> WhoamiInfo {
+        WhoamiInfo {
+            agent_id: self.config.agent_id.clone(),
+            public_key: self.config.public_key.clone(),
+            name: self.config.name.clone(),
+            version: self.config.version.clone(),
+            uptime_secs: (self.config.uptime_secs)(),
         }
     }
 

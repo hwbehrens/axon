@@ -296,16 +296,16 @@ These are compile-time constants and cannot be changed via configuration.
 | `MAX_PENDING_REQUESTS` | `1024` | `request_broker/mod.rs` | Maximum inbound requests awaiting the single IPC handler. |
 | `MAX_COMPLETED_CACHE_ENTRIES` | `256` | `request_broker/mod.rs` | Maximum completed-request responses retained for replay of retried exchanges. |
 | `MAX_COMPLETED_CACHE_BYTES` | `4 MiB` | `request_broker/mod.rs` | Aggregate byte budget for the completed-response replay cache. |
-| `ADMISSION_GATE_BUDGET` | `5s` | `transport/quic_transport.rs` | Upper bound on one connection-admission gate evaluation (registry lock wait + enrollment lookup); a stalled gate fails closed instead of blocking admission forever. Outbound dials use the caller's remaining exchange budget when smaller. |
 | `DIAL_TIMEOUT` | `10s` | `transport/mod.rs` | Maximum time for a single outbound QUIC dial including handshake. Also bounds how long a fresh preferred-direction candidate may replace a healthy connection-slot incumbent (the simultaneous cross-dial race window). |
 | `MAX_TRACKED_SERVICES` | `1024` | `discovery/mod.rs` | Maximum mDNS service instances tracked for stale-observation diffing; overflow evicts the oldest-inserted service and emits lost events. |
 | `MAX_REQUEST_TIMEOUT_SECS` | `3600` | `daemon/command_handler.rs` | Upper bound for caller-supplied `timeout_secs`; larger values are rejected with `invalid_command` instead of overflowing deadline arithmetic. |
 | `PAIR_REQUEST_LOG_WINDOW` | `30s` | `transport/tls.rs` | Rate-limit window for repeated unknown-peer pairing events. |
-| `DAEMON_PID_FILE_NAME` | `daemon.pid` | `daemon/lockfile.rs` | Runtime lock file used for single-instance enforcement. |
+| `daemon.pid` (state-root file) | `daemon.pid` | `config/mod.rs` (`AxonPaths::daemon_lock`) | Runtime lock file used for single-instance enforcement. |
 | `MAX_IPC_CLIENTS` | `64` | `daemon/mod.rs` | Maximum simultaneous IPC client connections. |
 | `IPC_OVERLONG_DRAIN_TIMEOUT` | `2s` | `ipc/client_handler.rs` | Maximum time to drain an overlong IPC line before closing the client so the error reply can be delivered. |
 | `MAX_REQ_ID_BYTES` | `1,024` | `ipc/protocol.rs` | Upper bound on the echoed `req_id`; commands with a longer `req_id` are rejected with `invalid_command` so replies stay within the framed line limit. |
 | `MAX_PEER_STORE_BYTES` | `1 MiB` | `peer_directory/store.rs` | Maximum peer-store file size on load. Non-regular files and larger stores are rejected without unbounded reads. |
+| `PEER_STORE_VERSION` | `1` | `peer_directory/store.rs` | Schema version of the canonical `peers.json` document; stores with any other version are rejected on load. |
 | `MAX_CLIENT_QUEUE` | `1024` | `daemon/mod.rs` | Per-IPC-client outbound message queue depth; overflow disconnects lagging clients. |
 | `MAX_INFLIGHT_SENDS` | `256` | `daemon/mod.rs` | Maximum concurrent outbound IPC send operations; excess `send` commands are rejected with `send_capacity_exceeded`, while control commands remain responsive. |
 | Maximum reconnect backoff | `30s` | `transport/reconnect.rs` | Maximum delay between versioned reconnect attempts. |

@@ -8,12 +8,14 @@
 //! - Fire-and-forget retries must preserve at-most-once delivery (P1):
 //!   ambiguous failures are not retried for non-request kinds.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::json;
+use std::sync::atomic::Ordering;
 
 use super::fixtures::make_transport_pair;
 use crate::message::{AgentId, Envelope, MessageKind};
+use crate::peer_directory::DirectoryError;
 use crate::transport::DialPeer;
 use crate::transport::connection_registry::{Admission, Direction};
 
@@ -110,7 +112,7 @@ async fn admission_gate_refuses_and_closes_when_not_enrolled() {
             agent_b.clone(),
             connection.clone(),
             Direction::Outbound,
-            || async { true },
+            || true,
         )
         .await;
     assert!(matches!(admitted, Admission::Existing(_)));
@@ -124,7 +126,7 @@ async fn admission_gate_refuses_and_closes_when_not_enrolled() {
             agent_b.clone(),
             connection.clone(),
             Direction::Outbound,
-            || async { false },
+            || false,
         )
         .await;
     assert!(matches!(refused, Admission::Rejected));
@@ -148,11 +150,11 @@ async fn revoked_peer_is_closed_and_never_redialled() {
         .expect("initial send");
     assert!(pair.transport_a.has_connection(&agent_b).await);
 
-    // Revoke exactly as the daemon does: commit the directory change, then
-    // close the live slot.
-    pair.directory_a.remove_peer(&agent_b).await.unwrap();
-    pair.transport_a.close_peer(&agent_b, b"peer revoked").await;
+    // Revoke through the sanctioned paired path: directory commit followed
+    // by transport teardown (what the daemon's remove_peer command calls).
+    pair.transport_a.revoke_peer(&agent_b).await.unwrap();
     assert!(!pair.transport_a.has_connection(&agent_b).await);
+    assert!(pair.directory_a.get_enrolled(&agent_b).await.is_none());
 
     // Neither an explicit send nor reconnect maintenance may re-establish
     // the revoked peer.
@@ -175,6 +177,98 @@ async fn revoked_peer_is_closed_and_never_redialled() {
         !pair.transport_a.has_connection(&agent_b).await,
         "maintenance must not redial a revoked peer"
     );
+}
+
+#[tokio::test]
+async fn cancelled_revoke_still_tears_down_transport() {
+    let pair = make_transport_pair().await;
+    let agent_a = AgentId::parse(pair.id_a.agent_id()).unwrap();
+    let agent_b = AgentId::parse(pair.id_b.agent_id()).unwrap();
+    let transport = pair.transport_a.clone();
+    let directory = pair.directory_a.clone();
+
+    let first = Envelope::new(agent_a, agent_b.clone(), MessageKind::Message, json!({}));
+    transport
+        .send_to(&directory, &agent_b, first, Duration::from_secs(5))
+        .await
+        .expect("initial send");
+    assert!(transport.has_connection(&agent_b).await);
+
+    // Arm the per-manager gate, then put the revocation pair into the exact
+    // cancellation window: parked between the directory commit and
+    // transport teardown. Trust removal is detached and completes once
+    // started, so without revoke_peer owning the pair on its own tracked
+    // task, an aborted caller would skip teardown.
+    transport
+        .revocation_pause
+        .armed
+        .store(true, Ordering::Release);
+    let revoker = tokio::spawn({
+        let transport = transport.clone();
+        let agent_b = agent_b.clone();
+        async move { transport.revoke_peer(&agent_b).await }
+    });
+
+    // Wait for the commit to land: the pair is now parked at the gate.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while directory.get_enrolled(&agent_b).await.is_some() && Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+    assert!(
+        directory.get_enrolled(&agent_b).await.is_none(),
+        "directory commit must have landed while the pair is gated"
+    );
+
+    // Phase 1 (caller cancellation): abort the caller inside the pairing
+    // window; the detached pair must survive.
+    revoker.abort();
+
+    // Phase 2 (tracker ownership): close_all must NOT return while the pair
+    // is still parked — shutdown joins in-flight revocations instead of
+    // leaving them to be dropped at runtime teardown.
+    let closer = tokio::spawn({
+        let transport = transport.clone();
+        async move { transport.close_all().await }
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(
+        !closer.is_finished(),
+        "close_all must wait for in-flight revocation pairs (tracker ownership)"
+    );
+
+    // Release the pair; teardown and shutdown must both complete.
+    transport
+        .revocation_pause
+        .armed
+        .store(false, Ordering::Release);
+    transport.revocation_pause.release.notify_one();
+    let _ = tokio::time::timeout(Duration::from_secs(5), closer).await;
+    assert!(
+        !transport.has_connection(&agent_b).await,
+        "transport teardown must complete despite caller abort"
+    );
+    assert!(directory.get_enrolled(&agent_b).await.is_none());
+}
+
+#[tokio::test]
+async fn failed_revoke_leaves_transport_state_untouched() {
+    let pair = make_transport_pair().await;
+    let agent_a = AgentId::parse(pair.id_a.agent_id()).unwrap();
+    let agent_b = AgentId::parse(pair.id_b.agent_id()).unwrap();
+
+    let first = Envelope::new(agent_a, agent_b.clone(), MessageKind::Message, json!({}));
+    pair.transport_a
+        .send_to(&pair.directory_a, &agent_b, first, Duration::from_secs(5))
+        .await
+        .expect("initial send");
+
+    // Revoking an unenrolled peer fails and must not tear down unrelated
+    // state: transport authority follows trust, never leads it.
+    let stranger = AgentId::parse("ed25519.cccccccccccccccccccccccccccccccc").unwrap();
+    let err = pair.transport_a.revoke_peer(&stranger).await.unwrap_err();
+    assert!(matches!(err, DirectoryError::NotEnrolled(_)));
+    assert!(pair.transport_a.has_connection(&agent_b).await);
+    assert!(pair.directory_a.get_enrolled(&agent_b).await.is_some());
 }
 
 #[tokio::test]

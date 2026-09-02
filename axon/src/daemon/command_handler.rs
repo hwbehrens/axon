@@ -157,14 +157,11 @@ pub(crate) async fn handle_command(cmd: CommandEvent, ctx: &DaemonContext) -> Re
             messages_received: ctx.counters.received.load(Ordering::Relaxed),
             req_id,
         },
-        IpcCommand::Whoami { req_id } => {
-            ctx.ipc
-                .handle_command(CommandEvent {
-                    client_id,
-                    command: IpcCommand::Whoami { req_id },
-                })
-                .await?
-        }
+        IpcCommand::Whoami { req_id } => DaemonReply::Whoami {
+            ok: true,
+            info: ctx.ipc.whoami_info(),
+            req_id,
+        },
         IpcCommand::AddPeer {
             agent_id,
             token,
@@ -178,15 +175,16 @@ pub(crate) async fn handle_command(cmd: CommandEvent, ctx: &DaemonContext) -> Re
             Err(failure) => error_reply(failure, req_id),
         },
         IpcCommand::RemovePeer { agent_id, req_id } => {
-            match ctx.directory.remove_peer(&agent_id).await {
-                Ok(_) => {
-                    ctx.transport.close_peer(&agent_id, b"peer revoked").await;
-                    DaemonReply::PeerChanged {
-                        ok: true,
-                        agent_id: agent_id.to_string(),
-                        req_id,
-                    }
-                }
+            // revoke_peer is the only sanctioned revocation path: it pairs
+            // the directory commit with transport teardown so the admission
+            // gate's revocation guarantee cannot be defeated by a skipped
+            // close_peer.
+            match ctx.transport.revoke_peer(&agent_id).await {
+                Ok(_) => DaemonReply::PeerChanged {
+                    ok: true,
+                    agent_id: agent_id.to_string(),
+                    req_id,
+                },
                 Err(err) => error_reply(directory_failure(err), req_id),
             }
         }
