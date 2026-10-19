@@ -270,10 +270,13 @@ fn deserialize_optional_agent_id<'de, D>(
 where
     D: Deserializer<'de>,
 {
-    Ok(Option::<String>::deserialize(deserializer)
-        .ok()
-        .flatten()
-        .and_then(|raw| AgentId::parse(&raw).ok()))
+    // Consume the value whatever its JSON shape. A `String` deserializer
+    // rejects `{}`/`[]` without consuming their tokens on the streaming
+    // path, which fails the rest of the envelope; `Value` always consumes
+    // exactly one value, so only a well-formed string yields an Agent ID
+    // and every other shape decodes as `None`.
+    let value = Value::deserialize(deserializer)?;
+    Ok(value.as_str().and_then(|raw| AgentId::parse(raw).ok()))
 }
 
 impl PartialEq for Envelope {

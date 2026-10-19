@@ -12,6 +12,9 @@ use tracing::{info, warn};
 /// first attempt.
 const MAX_ACQUIRE_ATTEMPTS: usize = 8;
 
+/// Maximum private recovery names tried while releasing the lock.
+const MAX_RELEASE_CAPTURE_ATTEMPTS: usize = 8;
+
 /// Single-instance daemon lock held for the daemon's lifetime.
 ///
 /// Mutual exclusion is an OS-level `flock(2)` on the lock file, not the file
@@ -83,6 +86,23 @@ impl DaemonLock {
                 continue;
             }
 
+            // Transitional backstop for pre-flock daemons: older versions
+            // published their PID here but held no flock, so winning the
+            // flock does not prove the recorded daemon is gone. Fail closed
+            // while the file names a live process that is not this one; a
+            // genuinely stale record (dead, or recycled to a dead PID) is
+            // still replaced as before. The flock remains the authority.
+            if let Some(pid) = read_lock_pid(&path)
+                && pid != std::process::id()
+                && pid_is_alive(pid)
+            {
+                bail!(
+                    "daemon.pid names live process {pid} that does not hold the daemon lock; \
+                     refusing to start (remove {} only if that process is not an AXON daemon)",
+                    path.display()
+                );
+            }
+
             publish_pid(&file, &path)?;
             info!(pid = std::process::id(), path = %path.display(), "acquired daemon lock");
             return Ok(Self {
@@ -107,19 +127,131 @@ impl DaemonLock {
         if self.released {
             return Ok(());
         }
-        // Unlink only while still holding the flock, and only when the path
-        // still names the inode this process locked: if the file was removed
-        // and recreated by someone else, removing it would delete a lock we
-        // do not own.
-        if path_refers_to_same_file(&self.file, &self.path) {
-            match fs::remove_file(&self.path) {
-                Ok(()) => {}
-                Err(err) if err.kind() == ErrorKind::NotFound => {}
-                Err(err) => return Err(err),
-            }
+        // The flock is still held here, but the path can be swapped between
+        // an ownership check and an unlink (a cleanup script or a successor
+        // racing the release), which could delete a lock file this process
+        // does not own. So capture the current entry under a private name
+        // first — the rename is atomic — decide on the captured inode, and
+        // only ever unlink that private name. A captured successor file is
+        // put back under its original path instead of being severed.
+        let Some(captured) = self.capture_entry()? else {
+            self.released = true;
+            return Ok(());
+        };
+        if path_refers_to_same_file(&self.file, &captured) {
+            remove_file_if_present(&captured)?;
+        } else {
+            self.restore_successor(&captured)?;
         }
         self.released = true;
         Ok(())
+    }
+
+    /// Atomically move whatever the lock path currently names to a private
+    /// recovery name and return it; `None` when the path is already gone.
+    fn capture_entry(&self) -> std::io::Result<Option<PathBuf>> {
+        let stem = self
+            .path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "daemon.pid".to_string());
+        for attempt in 0..MAX_RELEASE_CAPTURE_ATTEMPTS {
+            let captured = self
+                .path
+                .with_file_name(format!("{stem}.released.{}.{attempt}", std::process::id()));
+            // Reserve the recovery name first: `rename` would otherwise
+            // silently replace (delete) a file already sitting there.
+            match OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .custom_flags(libc::O_NOFOLLOW)
+                .open(&captured)
+            {
+                Ok(_sentinel) => {}
+                Err(err) if err.kind() == ErrorKind::AlreadyExists => continue,
+                Err(err) => return Err(err),
+            }
+            #[cfg(test)]
+            release_hook::run();
+            match fs::rename(&self.path, &captured) {
+                Ok(()) => return Ok(Some(captured)),
+                Err(err) if err.kind() == ErrorKind::NotFound => {
+                    let _ = remove_file_if_present(&captured);
+                    return Ok(None);
+                }
+                Err(err) => {
+                    let _ = remove_file_if_present(&captured);
+                    return Err(err);
+                }
+            }
+        }
+        Err(std::io::Error::new(
+            ErrorKind::AlreadyExists,
+            "could not reserve a private name to release the daemon lock",
+        ))
+    }
+
+    /// Put a captured successor lock file back under the original path
+    /// without clobbering anything created there in the meantime.
+    fn restore_successor(&self, captured: &Path) -> std::io::Result<()> {
+        match fs::hard_link(captured, &self.path) {
+            Ok(()) => remove_file_if_present(captured),
+            Err(err) if err.kind() == ErrorKind::AlreadyExists => {
+                warn!(
+                    preserved = %captured.display(),
+                    "daemon lock path was replaced during release; the displaced file was preserved"
+                );
+                Ok(())
+            }
+            Err(err) => Err(err),
+        }
+    }
+}
+
+fn remove_file_if_present(path: &Path) -> std::io::Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err),
+    }
+}
+
+fn pid_is_alive(pid: u32) -> bool {
+    if pid == 0 || pid > i32::MAX as u32 {
+        return false;
+    }
+
+    // SAFETY: kill(pid, 0) sends no signal; it only probes process existence
+    // and permission to signal.
+    let rc = unsafe { libc::kill(pid as libc::pid_t, 0) };
+    rc == 0
+        || matches!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(code) if code == libc::EPERM
+        )
+}
+
+/// One-shot test injection point inside `capture_entry`: it runs after the
+/// private recovery name is reserved but before the lock entry is captured,
+/// letting a test replace the path exactly in the window between the
+/// ownership check and the unlink the old implementation performed.
+#[cfg(test)]
+mod release_hook {
+    use std::cell::RefCell;
+
+    thread_local! {
+        static HOOK: RefCell<Option<Box<dyn FnOnce()>>> = const { RefCell::new(None) };
+    }
+
+    pub(super) fn install(hook: impl FnOnce() + 'static) {
+        HOOK.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+    }
+
+    pub(super) fn run() {
+        if let Some(hook) = HOOK.with(|slot| slot.borrow_mut().take()) {
+            hook();
+        }
     }
 }
 

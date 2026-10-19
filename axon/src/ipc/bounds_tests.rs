@@ -225,3 +225,75 @@ fn who_can_reply_never_exceeds_the_limit_even_with_an_overbound_req_id() {
     let (decoded, _) = decode(&reply);
     assert!(decoded.get("req_id").is_none());
 }
+
+/// Boundary: a match whose identity fits but whose first service does not
+/// must be dropped whole. Emitting it with `services: []` claimed the peer
+/// matched the query while exposing nothing — the opposite of what a match
+/// means. Matches after it must still be considered.
+#[test]
+fn partial_match_without_a_fitting_service_is_dropped_whole() {
+    let agent = |letter: char| format!("ed25519.{}", letter.to_string().repeat(32));
+    let full = |letter: char| ServiceMatch {
+        agent_id: agent(letter),
+        services: vec![ServiceSummary {
+            // Two legal manifests of this size exhaust the line budget while
+            // leaving room for one more identity but not for one more service.
+            id: "bulk".to_string(),
+            description: "d".repeat(32_000),
+        }],
+    };
+
+    let reply = bounded_who_can_reply(
+        vec![
+            full('a'),
+            full('b'),
+            // Identity fits in the remaining budget; its service does not.
+            ServiceMatch {
+                agent_id: agent('c'),
+                services: vec![ServiceSummary {
+                    id: "too_big".to_string(),
+                    description: "x".repeat(3_000),
+                }],
+            },
+            // A later, smaller match still fits and must not be starved by
+            // the dropped one.
+            ServiceMatch {
+                agent_id: agent('d'),
+                services: vec![ServiceSummary {
+                    id: "cargo_test".to_string(),
+                    description: "Run cargo test.".to_string(),
+                }],
+            },
+        ],
+        Vec::new(),
+        None,
+    );
+
+    let (decoded, _) = decode(&reply);
+    assert_eq!(
+        decoded["truncated"], true,
+        "omitting the partial match must be explicit"
+    );
+    let matches = decoded["matches"].as_array().expect("matches array");
+    let ids: Vec<&str> = matches
+        .iter()
+        .map(|entry| entry["agent_id"].as_str().expect("agent id"))
+        .collect();
+    assert!(
+        !ids.contains(&agent('c').as_str()),
+        "a match with no fitting service must be dropped, not emitted bare: {ids:?}"
+    );
+    assert!(
+        ids.contains(&agent('d').as_str()),
+        "later matches must still be considered after a dropped partial: {ids:?}"
+    );
+    for entry in matches {
+        assert!(
+            !entry["services"]
+                .as_array()
+                .expect("services array")
+                .is_empty(),
+            "no match may carry an empty services array: {entry}"
+        );
+    }
+}

@@ -109,8 +109,11 @@ fn minimal_peers_reply() -> DaemonReply {
 /// Compose a `who_can` reply that always encodes within one framed IPC line.
 ///
 /// Complete matches win over trailing matches, whole matches win over
-/// partial ones, and partial matches keep their leading services; the
-/// diagnostic `unreachable` list is bounded last. Anything dropped sets
+/// partial ones, and partial matches keep their leading services. A match is
+/// never emitted with an empty `services` array: a match answers "this peer
+/// exposes these services", so a partial match with no retainable service is
+/// dropped whole rather than claiming an empty match. The diagnostic
+/// `unreachable` list is bounded last. Anything dropped sets
 /// `truncated: true` on the reply.
 pub fn bounded_who_can_reply(
     matches: Vec<ServiceMatch>,
@@ -188,6 +191,12 @@ pub fn bounded_who_can_reply(
             }
             match_len = next;
             services.push(service);
+        }
+        if services.is_empty() {
+            // The identity alone fits but not one matching service: keep
+            // scanning instead of emitting a match with no services, which
+            // clients would read as "this peer matched but exposes nothing".
+            continue;
         }
         used += 1 + match_len;
         kept_matches.push(ServiceMatch {

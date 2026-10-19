@@ -49,7 +49,9 @@ Send a message to an enrolled peer.
 {"cmd":"send","to":"<agent_id>","kind":"request|message|describe","payload":{},"timeout_secs":30,"ref":"<uuid-optional>"}
 ```
 
-`timeout_secs` is optional and only valid for `request` and `describe`. It bounds the WHOLE exchange (dial, stream open, frame write, and response read share one deadline; phases never receive independent budgets). Values above `3600` are rejected with `invalid_command`.
+`timeout_secs` is optional and only valid for `request` and `describe`. It bounds the WHOLE exchange (dial, stream open, frame write, and response read share one deadline; phases never receive independent budgets). Values above `3600` are rejected with `invalid_command`; the default is 30 seconds.
+
+Every `send` kind is deadline-bounded, including fire-and-forget `message`, which uses a fixed 10-second exchange budget that callers cannot override. Exhausting that budget is reported as `timeout` for every kind, never as `peer_unreachable` (§5). When the budget expires after payload bytes may already have been written, the error `message` states that delivery status is unknown: a retry could deliver the payload twice, and for `message` the peer may already have broadcast it.
 
 For `message`:
 
@@ -228,11 +230,15 @@ reply then carries `truncated: true`). Candidates and disconnected peers are
 never listed; peers that publish no manifest simply contribute no matches.
 
 The reply is bounded to one framed line; whole matches and their leading
-services take precedence over the `unreachable` diagnostics. Anything omitted
-sets `truncated: true` on the reply, and a truncated listing is not an error.
+services take precedence over the `unreachable` diagnostics. A partial match is
+kept only with at least one service: against a match whose identity fits but
+whose services do not, the whole match is omitted rather than emitted with an
+empty `services` array. Anything omitted sets `truncated: true` on the reply,
+and a truncated listing is not an error.
 
-The daemon runs at most eight concurrent `who_can` evaluations. A query that
-arrives while that budget is exhausted is rejected immediately with
+The daemon admits at most eight in-flight `who_can` queries and evaluates them
+one at a time, so up to seven can be parked behind the running evaluation. A
+query that arrives while that budget is exhausted is rejected immediately with
 `send_capacity_exceeded` and an explanation in `message`; it may be retried.
 This budget is independent of the outbound send budget: `send` pressure never
 blocks `who_can`, and parked `who_can` work is bounded.
@@ -255,14 +261,17 @@ blocks `who_can`, and parked `who_can` work is bounded.
 | `peer_conflict` | Agent ID/public-key binding conflicts with enrolled state. |
 | `self_send` | Target is the local Agent ID. |
 | `peer_unreachable` | Peer is enrolled but no connection could be established. |
-| `timeout` | Request timed out waiting for a peer response. |
+| `timeout` | Send timed out before completion: the whole-exchange budget for dial, stream open, frame write, or response wait was exhausted. Applies to every `send` kind, including fire-and-forget `message`. |
 | `handler_busy` | Another IPC connection owns the handler lease. |
 | `not_handler` | The client attempted a handler-only operation without the lease. |
 | `request_not_found` | Request is unknown, expired, disconnected, or already completed. |
-| `send_capacity_exceeded` | A daemon concurrency budget is exhausted: the outbound send budget or the concurrent `who_can` query budget. Only the excess command (`send` or `who_can`) is rejected; all other commands remain served. Retry shortly. |
+| `send_capacity_exceeded` | A daemon concurrency budget is exhausted: the outbound send budget or the in-flight `who_can` query budget. Only the excess command (`send` or `who_can`) is rejected; all other commands remain served. Retry shortly. |
 | `internal_error` | Unexpected daemon or persistence failure. |
 
-Errors are instructive and MUST NOT report a timeout as `peer_unreachable`.
+A `timeout` whose budget expired after payload bytes may already have been
+written still uses the `timeout` code; its `message` states that delivery
+status is unknown, because a retry could duplicate delivery. Errors are
+instructive and MUST NOT report a timeout as `peer_unreachable`.
 
 ---
 

@@ -350,20 +350,24 @@ async fn send(
             }
             Ok((msg_id, response))
         }
-        Err(err) => Err(send_failure(err)),
+        Err(err) => Err(send_failure(kind, err)),
     }
 }
 
 /// Map a transport send failure onto an instructive IPC error
-/// (spec/IPC.md §5). Budget exhaustion is `timeout` for EVERY kind — a
-/// fire-and-forget send can time out too, and the spec forbids reporting a
-/// timeout as `peer_unreachable`. `ambiguous` means payload bytes may
-/// already have reached the peer, so the delivery status is surfaced
-/// explicitly (a retry could duplicate).
-fn send_failure(err: SendError) -> CommandFailure {
+/// (spec/IPC.md §4.1, §5, Q-011). Budget exhaustion is `timeout` for EVERY
+/// kind — a fire-and-forget `message` send has a budget too, and the spec
+/// forbids reporting a timeout as `peer_unreachable`. `ambiguous` means
+/// payload bytes may already have reached the peer, so the delivery status
+/// is surfaced explicitly (a retry could duplicate).
+fn send_failure(kind: IpcSendKind, err: SendError) -> CommandFailure {
     if err.timed_out {
         let message = if err.ambiguous {
             "send timed out; delivery status unknown".to_string()
+        } else if kind == IpcSendKind::Message {
+            // The request-oriented default message would misdescribe a
+            // fire-and-forget send, which waits for no response.
+            "message send timed out before delivery".to_string()
         } else {
             IpcErrorCode::Timeout.message().to_string()
         };

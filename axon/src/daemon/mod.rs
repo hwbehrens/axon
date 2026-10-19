@@ -3,6 +3,7 @@ mod handler_lifecycle;
 mod lockfile;
 mod who_can;
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -27,7 +28,7 @@ use crate::peer_directory::{
     PeerObservation, PeerStore, PeerTrust,
 };
 use crate::request_broker::RequestBroker;
-use crate::transport::{ConnectionManager, PairRequest};
+use crate::transport::{ConnectionManager, InboundReceiver, PairRequest};
 
 use handler_lifecycle::{make_response_handler, reconcile_after_lag, release_lease_if_client_gone};
 
@@ -118,7 +119,7 @@ pub async fn run_daemon(opts: DaemonOptions) -> Result<()> {
     let bound_port = transport.local_addr().map_or(port, |addr| addr.port());
     info!(agent_id = %local_agent_id, port = bound_port, "starting AXON daemon");
 
-    let mut inbound_rx = transport.subscribe_inbound();
+    let mut inbound_rx = subscribe_inbound_counted(&transport);
     let mut pair_request_rx = transport.subscribe_pair_requests();
     let mut disconnect_rx = ipc.subscribe_disconnects();
     let (discovery_tx, mut discovery_rx) = mpsc::channel(256);
@@ -145,7 +146,7 @@ pub async fn run_daemon(opts: DaemonOptions) -> Result<()> {
     let mut reconnect_interval = tokio::time::interval(Duration::from_secs(1));
     let who_can_budget = Arc::new(Semaphore::new(MAX_INFLIGHT_WHO_CAN));
     let mut discovery_open = true;
-    let mut last_candidate_broadcast: Option<Instant> = None;
+    let mut candidate_broadcast = CandidateBroadcast::default();
     let ctx = DaemonContext {
         ipc: ipc.clone(),
         directory: directory.clone(),
@@ -161,6 +162,8 @@ pub async fn run_daemon(opts: DaemonOptions) -> Result<()> {
     };
 
     loop {
+        // Candidate-broadcast flush deadline; guarded while queue is empty (I13).
+        let flush_at = candidate_broadcast.window.unwrap_or_else(Instant::now);
         tokio::select! {
             _ = cancel.cancelled() => {
                 info!("shutdown signal received");
@@ -213,17 +216,19 @@ pub async fn run_daemon(opts: DaemonOptions) -> Result<()> {
             inbound = inbound_rx.recv() => match inbound {
                 Ok(envelope) => handle_inbound(&ipc, &counters, &envelope).await,
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(count)) => {
-                    // Make the gap explicit and reconcile clients so lost
-                    // disconnects cannot pin a lease (I16).
-                    warn!(count, "inbound transport event gap; clients may have missed events");
+                    // Counted subscription: report the cumulative total (I16, R2).
+                    warn!(
+                        count,
+                        dropped = transport.inbound_gap_count(),
+                        "inbound transport event gap; clients may have missed events"
+                    );
                     reconcile_after_lag(&ipc, &broker).await;
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             },
             pair_request = pair_request_rx.recv() => match pair_request {
                 Ok(request) => {
-                    handle_pair_request(&directory, &ipc, request, &mut last_candidate_broadcast)
-                        .await
+                    handle_pair_request(&directory, &ipc, request, &mut candidate_broadcast).await
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(count)) => {
                     warn!(count, "daemon lagged behind rejected handshake observations");
@@ -232,13 +237,8 @@ pub async fn run_daemon(opts: DaemonOptions) -> Result<()> {
             },
             event = discovery_rx.recv(), if discovery_open => match event {
                 Some(DiscoveryEvent::Observed(observation)) => {
-                    observe_and_publish(
-                        &directory,
-                        &ipc,
-                        observation,
-                        &mut last_candidate_broadcast,
-                    )
-                    .await
+                    observe_and_publish(&directory, &ipc, observation, &mut candidate_broadcast)
+                        .await
                 }
                 Some(DiscoveryEvent::Lost(id)) => directory.remove_observation(&id).await,
                 // Closed is ready-forever and would spin; degraded, not fatal (I10).
@@ -258,6 +258,10 @@ pub async fn run_daemon(opts: DaemonOptions) -> Result<()> {
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             },
+            _ = tokio::time::sleep_until(flush_at.into()), if !candidate_broadcast.pending.is_empty() => {
+                let queued = std::mem::take(&mut candidate_broadcast.pending);
+                flush_candidates(&ipc, queued.into_values()).await;
+            }
             _ = stale_interval.tick() => {
                 let removed = directory
                     .expire_observations(Instant::now(), OBSERVATION_STALE_TIMEOUT)
@@ -321,7 +325,7 @@ async fn handle_pair_request(
     directory: &PeerDirectory,
     ipc: &IpcServer,
     request: PairRequest,
-    last_broadcast: &mut Option<Instant>,
+    candidate_broadcast: &mut CandidateBroadcast,
 ) {
     let result = (|| -> Result<PeerObservation> {
         let agent_id = AgentId::parse(&request.agent_id)?;
@@ -341,7 +345,9 @@ async fn handle_pair_request(
         )
     })();
     match result {
-        Ok(observation) => observe_and_publish(directory, ipc, observation, last_broadcast).await,
+        Ok(observation) => {
+            observe_and_publish(directory, ipc, observation, candidate_broadcast).await
+        }
         Err(err) => warn!(error = %err, "rejected invalid handshake candidate"),
     }
 }
@@ -350,7 +356,7 @@ async fn observe_and_publish(
     directory: &PeerDirectory,
     ipc: &IpcServer,
     observation: PeerObservation,
-    last_broadcast: &mut Option<Instant>,
+    candidate_broadcast: &mut CandidateBroadcast,
 ) {
     let agent_id = observation.identity.agent_id().clone();
     let source = match observation.source {
@@ -360,28 +366,22 @@ async fn observe_and_publish(
     let outcome = directory.observe(observation).await;
     match outcome {
         ObserveOutcome::CandidateAdded | ObserveOutcome::CandidateRefreshed => {
-            // Untrusted candidates share client queues; rate-limit (I13).
-            if !should_broadcast_candidate(last_broadcast, Instant::now()) {
-                return;
-            }
+            // Untrusted candidates share client queues; coalesce bursts (I13).
             if let Some(peer) = directory.list().await.into_iter().find(|peer| {
                 peer.trust == PeerTrust::Candidate && peer.identity.agent_id() == &agent_id
             }) {
-                let locators = peer
-                    .observed_endpoints
-                    .iter()
-                    .map(ToString::to_string)
-                    .collect();
-                if let Err(err) = ipc
-                    .broadcast_peer_candidate(
-                        peer.identity.agent_id().as_str(),
-                        peer.identity.public_key(),
-                        locators,
-                        source,
-                    )
-                    .await
-                {
-                    warn!(error = %err, "failed broadcasting peer candidate");
+                let candidate = (
+                    peer.identity.agent_id().clone(),
+                    peer.identity.public_key().to_string(),
+                    peer.observed_endpoints
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect(),
+                    source,
+                );
+                if candidate_broadcast.enqueue(candidate, Instant::now()) {
+                    let queued = std::mem::take(&mut candidate_broadcast.pending);
+                    flush_candidates(ipc, queued.into_values()).await;
                 }
             }
         }
@@ -413,13 +413,47 @@ fn reserve_who_can(
     })
 }
 
-/// Suppress candidate broadcasts that arrive inside the rate window (I13).
-fn should_broadcast_candidate(last: &mut Option<Instant>, now: Instant) -> bool {
-    if last.is_some_and(|at| now.saturating_duration_since(at) < CANDIDATE_BROADCAST_INTERVAL) {
-        return false;
+/// Queued candidate state: agent ID, public key, observed locators, source.
+type PendingCandidate = (AgentId, String, Vec<String>, &'static str);
+
+/// Rate-limited candidate-broadcast queue (I13): observations inside a rate
+/// window are queued (keyed by Agent ID, latest state per candidate) instead
+/// of dropped, and the whole queue is released when the window opens, so an
+/// mDNS refresh burst delays later candidates but never starves them.
+#[derive(Default)]
+struct CandidateBroadcast {
+    window: Option<Instant>,
+    pending: BTreeMap<AgentId, PendingCandidate>,
+}
+
+impl CandidateBroadcast {
+    /// Queue the latest state; `true` means the window is open and the queue
+    /// must be released now.
+    fn enqueue(&mut self, candidate: PendingCandidate, now: Instant) -> bool {
+        self.pending.insert(candidate.0.clone(), candidate);
+        if self.window.is_some_and(|closes| now < closes) {
+            return false;
+        }
+        self.window = Some(now + CANDIDATE_BROADCAST_INTERVAL);
+        true
     }
-    *last = Some(now);
-    true
+}
+
+/// Broadcast every queued candidate; the next observation reopens the window.
+async fn flush_candidates(ipc: &IpcServer, candidates: impl Iterator<Item = PendingCandidate>) {
+    for (agent_id, public_key, locators, source) in candidates {
+        if let Err(err) = ipc
+            .broadcast_peer_candidate(agent_id.as_str(), &public_key, locators, source)
+            .await
+        {
+            warn!(error = %err, "failed broadcasting peer candidate");
+        }
+    }
+}
+
+/// Subscribe with inbound gap accounting so lagged evictions are visible (R2).
+fn subscribe_inbound_counted(transport: &ConnectionManager) -> InboundReceiver {
+    transport.subscribe_inbound_counted()
 }
 
 fn truncate(input: &str, max: usize) -> String {
@@ -449,11 +483,9 @@ async fn wait_for_shutdown_signal(cancel: CancellationToken) -> Result<()> {
 async fn wait_for_shutdown_signal(cancel: CancellationToken) -> Result<()> {
     tokio::select! {
         _ = cancel.cancelled() => {}
-        result = tokio::signal::ctrl_c() => {
-            result.context("failed to install Ctrl-C handler")?;
-            cancel.cancel();
-        }
+        result = tokio::signal::ctrl_c() => result.context("failed to install Ctrl-C handler")?,
     }
+    cancel.cancel();
     Ok(())
 }
 

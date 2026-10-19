@@ -188,25 +188,49 @@ fn timed_out_transport_failure_is_timeout_for_every_kind() {
     // `message` sends share the transport deadline too; before I9 only
     // request/describe mapped to `timeout` and a message timeout fell
     // through to `peer_unreachable`, violating spec/IPC.md §5.
-    for ambiguous in [false, true] {
-        let failure = send_failure(transport_failure(ambiguous, true));
-        assert_eq!(
-            failure.code,
-            IpcErrorCode::Timeout,
-            "a timed-out send must never be reported as peer_unreachable"
-        );
-        if ambiguous {
-            assert!(
-                failure.message.contains("delivery status unknown"),
-                "post-delivery budget exhaustion must surface the ambiguity"
+    for kind in [
+        IpcSendKind::Request,
+        IpcSendKind::Describe,
+        IpcSendKind::Message,
+    ] {
+        for ambiguous in [false, true] {
+            let failure = send_failure(kind, transport_failure(ambiguous, true));
+            assert_eq!(
+                failure.code,
+                IpcErrorCode::Timeout,
+                "a timed-out {kind:?} send must never be reported as peer_unreachable"
             );
+            if ambiguous {
+                assert!(
+                    failure.message.contains("delivery status unknown"),
+                    "post-delivery budget exhaustion must surface the ambiguity"
+                );
+            }
         }
     }
 }
 
 #[test]
+fn timed_out_message_send_does_not_claim_it_waited_for_a_response() {
+    // Q-011: `timeout` covers every send kind, but the wording must match the
+    // kind. A fire-and-forget send waits for delivery, never for a response.
+    let failure = send_failure(IpcSendKind::Message, transport_failure(false, true));
+    assert_eq!(failure.code, IpcErrorCode::Timeout);
+    assert!(
+        failure.message.contains("message send timed out"),
+        "unexpected message: {}",
+        failure.message
+    );
+    assert!(
+        !failure.message.contains("waiting for a response"),
+        "a message send never waits for a response: {}",
+        failure.message
+    );
+}
+
+#[test]
 fn ambiguous_non_timeout_failure_surfaces_delivery_ambiguity() {
-    let failure = send_failure(transport_failure(true, false));
+    let failure = send_failure(IpcSendKind::Message, transport_failure(true, false));
     assert_eq!(failure.code, IpcErrorCode::PeerUnreachable);
     assert!(
         failure.message.contains("delivery status unknown"),
@@ -216,8 +240,204 @@ fn ambiguous_non_timeout_failure_surfaces_delivery_ambiguity() {
 
 #[test]
 fn pre_delivery_failure_keeps_the_transport_message() {
-    let failure = send_failure(transport_failure(false, false));
+    let failure = send_failure(IpcSendKind::Request, transport_failure(false, false));
     assert_eq!(failure.code, IpcErrorCode::PeerUnreachable);
     assert!(failure.message.contains("dial refused"));
     assert!(!failure.message.contains("delivery status unknown"));
+}
+
+// =========================================================================
+// I9 / Q-011: daemon-level timeout mapping.
+// =========================================================================
+
+/// A send that exhausts its exchange budget must surface as the IPC
+/// `timeout` error over the real daemon path, never as `peer_unreachable`.
+///
+/// This is a daemon-level regression (two in-process daemons over the public
+/// IPC surface) rather than a unit pin on `send_failure`: it proves the
+/// dispatch path, the transport deadline, and the reply encoding agree.
+mod timeout_mapping_e2e {
+    use std::collections::HashSet;
+    use std::path::{Path, PathBuf};
+    use std::sync::{Mutex, OnceLock};
+    use std::time::Duration;
+
+    use serde_json::{Value, json};
+    use tempfile::TempDir;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::UnixStream;
+    use tokio_util::sync::CancellationToken;
+
+    use crate::config::AxonPaths;
+    use crate::daemon::{DaemonOptions, run_daemon};
+    use crate::peer_token;
+
+    struct RunningDaemon {
+        paths: AxonPaths,
+        port: u16,
+        cancel: CancellationToken,
+        task: tokio::task::JoinHandle<anyhow::Result<()>>,
+        _root: TempDir,
+    }
+
+    impl RunningDaemon {
+        async fn spawn() -> Self {
+            let root = tempfile::tempdir().expect("tempdir");
+            let paths = AxonPaths::from_root(PathBuf::from(root.path()));
+            let port = free_port();
+            let cancel = CancellationToken::new();
+            let task_root = root.path().to_path_buf();
+            let task_cancel = cancel.clone();
+            let mut task = tokio::spawn(async move {
+                run_daemon(DaemonOptions {
+                    port: Some(port),
+                    disable_mdns: true,
+                    axon_root: Some(task_root),
+                    cancel: Some(task_cancel),
+                    max_inflight_sends: None,
+                })
+                .await
+            });
+            wait_for_socket(&paths.socket, &mut task).await;
+            Self {
+                paths,
+                port,
+                cancel,
+                task,
+                _root: root,
+            }
+        }
+
+        async fn stop(self) {
+            self.cancel.cancel();
+            tokio::time::timeout(Duration::from_secs(5), self.task)
+                .await
+                .expect("daemon shutdown timeout")
+                .expect("daemon task")
+                .expect("daemon result");
+        }
+    }
+
+    /// Bind-and-release a UDP port, remembering allocations so two daemons in
+    /// this test binary never share one.
+    fn free_port() -> u16 {
+        static CLAIMED: OnceLock<Mutex<HashSet<u16>>> = OnceLock::new();
+        let claimed = CLAIMED.get_or_init(|| Mutex::new(HashSet::new()));
+        loop {
+            let port = std::net::UdpSocket::bind("127.0.0.1:0")
+                .expect("probe port")
+                .local_addr()
+                .expect("probe address")
+                .port();
+            if claimed.lock().expect("port set").insert(port) {
+                return port;
+            }
+        }
+    }
+
+    /// Wait for the daemon's IPC socket, failing fast with the daemon's own
+    /// error when startup fails instead of reporting an opaque timeout.
+    async fn wait_for_socket(path: &Path, task: &mut tokio::task::JoinHandle<anyhow::Result<()>>) {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while !path.exists() {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "daemon socket did not appear: {}",
+                path.display()
+            );
+            tokio::select! {
+                result = &mut *task => {
+                    panic!("daemon exited before its socket appeared: {result:?}");
+                }
+                _ = tokio::time::sleep(Duration::from_millis(20)) => {}
+            }
+        }
+    }
+
+    async fn ipc_command(socket: &Path, command: Value) -> Value {
+        let mut stream = UnixStream::connect(socket).await.expect("ipc connect");
+        stream
+            .write_all(format!("{command}\n").as_bytes())
+            .await
+            .expect("ipc write");
+        let mut line = String::new();
+        BufReader::new(stream)
+            .read_line(&mut line)
+            .await
+            .expect("ipc read");
+        serde_json::from_str(&line).expect("ipc reply is JSON")
+    }
+
+    #[tokio::test]
+    async fn timed_out_request_is_reported_as_timeout_not_unreachable() {
+        let daemon_a = RunningDaemon::spawn().await;
+        let daemon_b = RunningDaemon::spawn().await;
+
+        let info_a = ipc_command(&daemon_a.paths.socket, json!({"cmd": "whoami"})).await;
+        let info_b = ipc_command(&daemon_b.paths.socket, json!({"cmd": "whoami"})).await;
+        let peer_b = info_b["agent_id"].as_str().expect("peer b id").to_string();
+        let key_a = info_a["public_key"].as_str().expect("peer a key");
+        let key_b = info_b["public_key"].as_str().expect("peer b key");
+        let token_a =
+            peer_token::encode(key_a, &format!("127.0.0.1:{}", daemon_a.port)).expect("token a");
+        let token_b =
+            peer_token::encode(key_b, &format!("127.0.0.1:{}", daemon_b.port)).expect("token b");
+        for (socket, token) in [
+            (&daemon_a.paths.socket, token_b),
+            (&daemon_b.paths.socket, token_a),
+        ] {
+            let reply = ipc_command(socket, json!({"cmd": "add_peer", "token": token})).await;
+            assert_eq!(reply["ok"], true, "enrollment failed: {reply}");
+        }
+
+        // B's handler holds the request without replying, so A's response
+        // wait (not the dial) exhausts the one-second exchange budget.
+        let handler = UnixStream::connect(&daemon_b.paths.socket)
+            .await
+            .expect("handler connect");
+        let (handler_read, mut handler_write) = handler.into_split();
+        let mut handler_reader = BufReader::new(handler_read);
+        handler_write
+            .write_all(b"{\"cmd\":\"serve\"}\n")
+            .await
+            .expect("serve write");
+        let mut ack = String::new();
+        handler_reader.read_line(&mut ack).await.expect("serve ack");
+        assert_eq!(
+            serde_json::from_str::<Value>(&ack).expect("serve reply")["serving"],
+            true
+        );
+
+        let reply = ipc_command(
+            &daemon_a.paths.socket,
+            json!({
+                "cmd": "send",
+                "to": peer_b,
+                "kind": "request",
+                "payload": {"question": "never answered"},
+                "timeout_secs": 1,
+                "req_id": "req-timeout"
+            }),
+        )
+        .await;
+
+        assert_eq!(reply["ok"], false, "unexpected reply: {reply}");
+        assert_eq!(
+            reply["error"], "timeout",
+            "a budget-exhausted send must be reported as timeout, not \
+             peer_unreachable: {reply}"
+        );
+        assert_eq!(reply["req_id"], "req-timeout");
+        assert!(
+            reply["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("timed out"),
+            "the timeout detail must explain the failure: {reply}"
+        );
+
+        drop(handler_write);
+        daemon_a.stop().await;
+        daemon_b.stop().await;
+    }
 }

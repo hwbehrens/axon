@@ -1,8 +1,8 @@
 //! Hegel stateful test: daemon-artifact states vs doctor verdicts.
 //!
-//! Rules drive the AXON root through artifact combinations (pid files,
-//! socket paths, their contents); invariants pin the doctor contract after
-//! every transition:
+//! Rules drive the AXON root through artifact combinations (lock files,
+//! socket paths, their contents, a held flock); invariants pin the doctor
+//! contract after every transition:
 //!
 //! - in check mode, `report.ok` mirrors actual artifact health exactly;
 //! - in fix mode, actionable problems are repaired and never fabricated;
@@ -10,9 +10,14 @@
 //!   (a regular file squatting on the socket path, or a live daemon whose
 //!   socket never appeared — doctor cannot start processes or delete
 //!   arbitrary files).
+//!
+//! A running daemon is modeled by holding the real `flock` the daemon holds:
+//! the PID line is only a diagnostic, so writing a live process's PID into
+//! the file (rule `write_live_process_pid`) must never make it healthy.
 
-use std::fs;
-use std::os::unix::fs::{FileTypeExt, PermissionsExt};
+use std::fs::{self, File, OpenOptions};
+use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
+use std::os::unix::io::AsRawFd;
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use hegel::{TestCase, generators as gs, stateful};
@@ -38,6 +43,8 @@ struct DoctorArtifactsMachine {
     rt: tokio::runtime::Runtime,
     _root: TempDir,
     paths: axon::config::AxonPaths,
+    /// The flock a running daemon would hold. `None` means no daemon runs.
+    held_lock: Option<File>,
 }
 
 impl DoctorArtifactsMachine {
@@ -57,7 +64,25 @@ impl DoctorArtifactsMachine {
             rt,
             _root: root,
             paths,
+            held_lock: None,
         }
+    }
+
+    /// Whether the held flock belongs to the file the lock path currently
+    /// names. A rule may unlink or replace the path while the descriptor
+    /// stays open; the kernel keeps that orphaned lock, but it no longer
+    /// guards the named file, exactly like the daemon's own inode checks.
+    fn lock_held_on_path(&self) -> bool {
+        let Some(file) = &self.held_lock else {
+            return false;
+        };
+        let (Ok(held), Ok(named)) = (
+            file.metadata(),
+            fs::symlink_metadata(self.paths.daemon_lock.clone()),
+        ) else {
+            return false;
+        };
+        held.dev() == named.dev() && held.ino() == named.ino()
     }
 
     fn pid_path(&self) -> std::path::PathBuf {
@@ -84,27 +109,21 @@ impl DoctorArtifactsMachine {
     /// Reference model of artifact health, mirroring the documented doctor
     /// contract rather than its implementation details.
     ///
-    /// Pid health: missing or dead-but-valid is fine; garbage is not; the
-    /// test's own pid counts as live. Socket health: a real unix socket is
-    /// fine; a regular file is not; absence is fine unless a live daemon
-    /// should be listening.
+    /// Lock health: a held flock is a running daemon regardless of the PID
+    /// line; a lock file no process holds is a fixable leftover regardless of
+    /// its contents. Socket health: a real unix socket is fine; a regular
+    /// file is not; absence is fine unless a live daemon should be listening.
     fn artifacts_healthy(&self) -> bool {
-        let live_pid_written = fs::read_to_string(self.pid_path())
-            .map(|raw| raw.trim() == std::process::id().to_string())
-            .unwrap_or(false);
-        // Missing or live is healthy; garbage and well-formed-dead are both
-        // findings (the latter fixable by removing the file).
-        let pid_healthy = match fs::read_to_string(self.pid_path()) {
-            Err(_) => true,
-            Ok(raw) => raw.trim().parse::<u32>() == Ok(std::process::id()),
-        };
+        let lock_held = self.lock_held_on_path();
+        let pid_healthy =
+            fs::symlink_metadata(self.paths.daemon_lock.clone()).is_err() || lock_held;
 
         let socket_health = fs::symlink_metadata(&self.paths.socket);
         // A socket is only healthy while its daemon lives; an abandoned one
-        // is a fixable finding even with no pid file at all.
+        // is a fixable finding even with no lock file at all.
         let socket_healthy = match socket_health {
-            Err(_) => !live_pid_written,
-            Ok(meta) => meta.file_type().is_socket() && live_pid_written,
+            Err(_) => !lock_held,
+            Ok(meta) => meta.file_type().is_socket() && lock_held,
         };
 
         // Peer store and config are seeded valid or left absent by the rules,
@@ -114,23 +133,50 @@ impl DoctorArtifactsMachine {
 
     /// Problems doctor cannot repair by deleting files.
     fn manual_only_remainder(&self) -> bool {
-        let live_pid_without_socket = fs::read_to_string(self.pid_path())
-            .map(|raw| {
-                raw.trim().parse::<u32>() == Ok(std::process::id()) && !self.paths.socket.exists()
-            })
-            .unwrap_or(false);
+        let running_without_socket = self.lock_held_on_path() && !self.paths.socket.exists();
         let regular_file_socket = fs::symlink_metadata(&self.paths.socket)
             .map(|meta| !meta.file_type().is_socket())
             .unwrap_or(false);
-        live_pid_without_socket || regular_file_socket
+        running_without_socket || regular_file_socket
     }
 }
 
 #[hegel::state_machine]
 impl DoctorArtifactsMachine {
+    /// Write the (live) PID of this test process without holding the lock:
+    /// a PID line alone is never evidence of a running daemon.
     #[rule]
-    fn write_live_pid(&mut self, _tc: TestCase) {
+    fn write_live_process_pid(&mut self, _tc: TestCase) {
         fs::write(self.pid_path(), std::process::id().to_string()).expect("pid file");
+    }
+
+    /// Start a "daemon": hold the real flock the daemon holds at startup.
+    #[rule]
+    fn hold_lock(&mut self, _tc: TestCase) {
+        if self.lock_held_on_path() {
+            return;
+        }
+        self.held_lock = None;
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(self.pid_path())
+            .expect("lock file");
+        let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        assert_eq!(rc, 0, "the state machine must be the only lock holder");
+        self.held_lock = Some(file);
+    }
+
+    /// Stop the "daemon": unlink while still holding the lock, then release
+    /// it — the daemon's own release sequence.
+    #[rule]
+    fn release_lock(&mut self, _tc: TestCase) {
+        if self.lock_held_on_path() {
+            let _ = fs::remove_file(self.pid_path());
+        }
+        self.held_lock = None;
     }
 
     #[rule]

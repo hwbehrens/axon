@@ -70,6 +70,30 @@ fn malformed_from_to_values_drop_from_the_round_tripped_form() {
 }
 
 #[test]
+fn wire_frames_tolerate_object_array_and_null_from_to() {
+    // D5 wire-path coverage: unlike `serde_json::from_value`, the streaming
+    // `decode` path leaves an unconsumed `{`/`[` token when a `String`
+    // deserializer rejects it, so object/array `from`/`to` used to drop the
+    // whole frame instead of being ignored like any other unknown field.
+    for shape in [json!({}), json!(["nested", 1]), json!(null)] {
+        let frame = json!({
+            "id": "6fc0ec4f-e59f-4bea-9d57-0d9fdd1108f1",
+            "kind": "message",
+            "payload": {"ok": true},
+            "from": shape.clone(),
+            "to": shape,
+        });
+        let raw = serde_json::to_vec(&frame).expect("frame serializes");
+        let decoded = decode(&raw)
+            .unwrap_or_else(|err| panic!("wire decode must tolerate from/to {frame}: {err}"));
+        assert_eq!(decoded.from, None, "from {frame} must decode as None");
+        assert_eq!(decoded.to, None, "to {frame} must decode as None");
+        assert_eq!(decoded.kind, MessageKind::Message);
+        assert_eq!(decoded.payload_value().unwrap()["ok"], json!(true));
+    }
+}
+
+#[test]
 fn well_formed_from_to_still_round_trip() {
     // IPC replies carry daemon-populated from/to; lenient decoding must not
     // discard well-formed values.

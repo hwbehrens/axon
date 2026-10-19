@@ -37,10 +37,10 @@ fn stale_lock_is_replaced() {
 }
 
 #[test]
-fn lock_file_with_live_unrelated_pid_is_replaced() {
-    // A PID line alone is not evidence of a running daemon: PID reuse (or a
-    // file left by a crashed daemon whose PID was recycled) must not lock a
-    // healthy daemon out. The flock, not the content, is the authority.
+fn lock_file_naming_this_process_is_replaced() {
+    // A PID line naming this very process is our own crashed record, not a
+    // foreign live daemon, so the transitional backstop must not trip and
+    // the flock holder replaces it.
     let dir = tempdir().unwrap();
     let path = dir.path().join(LOCK_FILE_NAME);
     fs::write(&path, format!("{}\n", std::process::id())).unwrap();
@@ -50,6 +50,74 @@ fn lock_file_with_live_unrelated_pid_is_replaced() {
     assert_eq!(raw.trim(), std::process::id().to_string());
 
     lock.release().unwrap();
+}
+
+#[test]
+fn lock_file_naming_a_live_foreign_process_fails_closed() {
+    // Transitional backstop: a pre-flock daemon published its PID here but
+    // held no flock, so the flock alone must not admit a second daemon whose
+    // PID is demonstrably alive and different.
+    let dir = tempdir().unwrap();
+    let path = dir.path().join(LOCK_FILE_NAME);
+    let mut child = std::process::Command::new("sleep")
+        .arg("30")
+        .spawn()
+        .expect("spawn a live sleeper");
+    fs::write(&path, format!("{}\n", child.id())).unwrap();
+
+    let err = match DaemonLock::acquire(&path) {
+        Ok(_) => panic!("a live foreign PID must fail closed"),
+        Err(err) => err,
+    };
+    assert!(
+        err.to_string().contains("refusing to start"),
+        "unexpected error: {err:#}"
+    );
+    assert!(path.exists(), "a refused acquire must keep the lock path");
+    assert_eq!(
+        fs::read_to_string(&path).unwrap(),
+        format!("{}\n", child.id()),
+        "a refused acquire must not overwrite the recorded PID"
+    );
+
+    // Once the recorded process is gone, the same record is provably stale.
+    child.kill().unwrap();
+    child.wait().unwrap();
+    let mut lock = DaemonLock::acquire(&path).expect("a dead PID is stale");
+    lock.release().unwrap();
+}
+
+#[test]
+fn release_restores_a_successor_file_swapped_mid_release() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join(LOCK_FILE_NAME);
+    let mut lock = DaemonLock::acquire(&path).unwrap();
+
+    // Force the TOCTOU window the capture design closes: a successor's file
+    // replaces the path after this process decided the lock was still its
+    // own, just where the old check-then-unlink would have removed it.
+    let swapped = path.clone();
+    super::release_hook::install(move || {
+        fs::remove_file(&swapped).unwrap();
+        fs::write(&swapped, "successor\n").unwrap();
+    });
+
+    lock.release().unwrap();
+    assert!(
+        path.exists(),
+        "release must not remove a successor's lock file"
+    );
+    assert_eq!(fs::read_to_string(&path).unwrap(), "successor\n");
+}
+
+#[test]
+fn release_is_idempotent() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join(LOCK_FILE_NAME);
+    let mut lock = DaemonLock::acquire(&path).unwrap();
+    lock.release().unwrap();
+    lock.release().expect("a second release is a no-op");
+    assert!(!path.exists());
 }
 
 #[test]
