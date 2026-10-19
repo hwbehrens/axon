@@ -18,9 +18,26 @@ Correct identity observations > zero-config LAN discovery > extensibility.
 - Agent ID must derive from the advertised Ed25519 public key before an observation reaches `PeerDirectory`.
 - Lost events remove only their observation; they do not revoke enrolled trust.
 - WAN discovery and static peer configuration are out of scope.
+- Instance names are attacker-controlled: sanitize control characters and bound length before a display name reaches tables, logs, or IPC.
+
+## Dependency behavior (mdns-sd 0.11.5)
+
+- `ServiceResolved` fires only for **new or changed** records. A live peer that
+  keeps re-announcing unchanged records emits nothing, so the browse loop
+  re-emits its cached observation set every `MDNS_REFRESH_INTERVAL` (30s) with
+  a fresh `observed_at`. That interval MUST stay below the peer directory's
+  `OBSERVATION_STALE_TIMEOUT` (60s); otherwise live peers expire. Do not
+  remove the refresh without replacing it with another liveness source.
+- `ServiceRemoved` is emitted when a PTR record expires and maps to `Lost`.
+- The dependency's DNS record cache is unbounded and not inspectable, so AXON
+  bounds only what it tracks and forwards: `MAX_TRACKED_SERVICES` services
+  and at most `MAX_OBSERVATIONS_PER_PEER` live observations per Agent ID.
+- Teardown must call `unregister` (multicasts the goodbye packet) and await
+  its acknowledgement before `shutdown`, so peers learn about withdrawal
+  promptly instead of waiting for TTL expiry.
 
 ## Test targets
 
-- Unit: `tests.rs`
+- Unit: `tests.rs` (includes fake-clock refresh, budget, and sanitizer tests)
 - Integration: `axon/tests/integration.rs`
 - Live host-network check (ignored by default): `axon/tests/mdns_live.rs`

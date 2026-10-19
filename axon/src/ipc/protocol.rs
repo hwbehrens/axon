@@ -310,6 +310,19 @@ pub enum DaemonReply {
         #[serde(skip_serializing_if = "Option::is_none")]
         req_id: Option<String>,
     },
+    /// `peers` reply bounded to the framed line limit by
+    /// [`crate::ipc::bounded_peers_reply`]. Same JSON shape as
+    /// [`DaemonReply::Peers`] plus an explicit `truncated` marker: advisory
+    /// fields or trailing peers were omitted, never silently. A distinct
+    /// variant keeps `DaemonReply::Peers` construction source-compatible for
+    /// existing consumers.
+    PeersBounded {
+        ok: bool,
+        peers: Vec<PeerSummary>,
+        truncated: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        req_id: Option<String>,
+    },
     Status {
         ok: bool,
         uptime_secs: u64,
@@ -350,6 +363,12 @@ pub enum DaemonReply {
         /// Connected enrolled peers that failed to answer a capability pull;
         /// named explicitly so partial results are never silently incomplete.
         unreachable: Vec<String>,
+        /// `true` when matches or unreachable peers were omitted to keep the
+        /// reply within the framed line limit
+        /// ([`crate::ipc::bounded_who_can_reply`]). The marker is omitted on
+        /// the wire when nothing was dropped.
+        #[serde(skip_serializing_if = "std::ops::Not::not")]
+        truncated: bool,
         #[serde(skip_serializing_if = "Option::is_none")]
         req_id: Option<String>,
     },
@@ -388,6 +407,7 @@ impl DaemonReply {
         match self {
             Self::SendOk { req_id, .. }
             | Self::Peers { req_id, .. }
+            | Self::PeersBounded { req_id, .. }
             | Self::Status { req_id, .. }
             | Self::Whoami { req_id, .. }
             | Self::PeerChanged { req_id, .. }

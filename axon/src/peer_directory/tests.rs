@@ -1,4 +1,6 @@
+use std::collections::BTreeMap;
 use std::net::SocketAddr;
+use std::sync::Arc;
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use tempfile::tempdir;
@@ -49,6 +51,33 @@ async fn discovery_candidate_does_not_enter_tls_pin_snapshot() {
             .expect("pin snapshot lock")
             .contains_key(remote.agent_id().as_str()),
         "an untrusted discovery observation must not establish TLS trust"
+    );
+}
+
+#[test]
+fn pinning_snapshot_handle_is_a_shared_published_view() {
+    // Transport captures the handle once and relies on in-place publication
+    // to observe later enrollments; cloning must share the same cell, and
+    // publishing through it must be visible to previously captured handles.
+    let handle = PinningSnapshotHandle::from_snapshot(Arc::new(BTreeMap::from([(
+        "ed25519.aaaa".to_string(),
+        "key-a".to_string(),
+    )])));
+    let captured = handle.clone();
+    assert!(
+        captured
+            .read()
+            .expect("read pins")
+            .contains_key("ed25519.aaaa")
+    );
+
+    handle.replace(Arc::new(BTreeMap::new()));
+    assert!(
+        !captured
+            .read()
+            .expect("read pins")
+            .contains_key("ed25519.aaaa"),
+        "publication must be visible through previously captured handles"
     );
 }
 

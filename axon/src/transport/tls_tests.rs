@@ -7,7 +7,7 @@ use rustls::server::danger::ClientCertVerifier;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::{Mutex, RwLock as StdRwLock};
+use std::sync::Mutex;
 use tempfile::tempdir;
 use tokio::sync::broadcast;
 
@@ -48,7 +48,7 @@ fn make_test_client_verifier() -> PeerClientCertVerifier {
 }
 
 fn pin_map<const N: usize>(entries: [(String, String); N]) -> PinningSnapshotHandle {
-    Arc::new(StdRwLock::new(Arc::new(entries.into_iter().collect())))
+    PinningSnapshotHandle::from_snapshot(Arc::new(entries.into_iter().collect()))
 }
 
 #[test]

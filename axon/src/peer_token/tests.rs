@@ -45,3 +45,56 @@ fn derive_agent_id_from_base64_rejects_wrong_length() {
     let err = derive_agent_id_from_pubkey_base64(&pubkey).expect_err("short key");
     assert!(err.to_string().contains("32 bytes"));
 }
+
+#[test]
+fn addr_validation_matches_peer_locator_parse() {
+    // One authority for the address segment: anything the enrollment path
+    // (`PeerLocator::parse`) rejects must be rejected by the token codec
+    // too, in both directions.
+    let pubkey = STANDARD.encode([7u8; 32]);
+    for addr in [
+        "127.0.0.1:7100",
+        "peer.local:7100",
+        "[::1]:7100",
+        "peer name:7100",
+        "peer.local:0",
+        "peer.local:65536",
+        "peer.local",
+        ":7100",
+        "peer.local:",
+    ] {
+        assert_eq!(
+            encode(&pubkey, addr).is_ok(),
+            PeerLocator::parse(addr).is_ok(),
+            "token encode and PeerLocator::parse disagree about {addr:?}"
+        );
+    }
+}
+
+#[test]
+fn decode_rejects_addr_that_peer_locator_rejects() {
+    let key = URL_SAFE_NO_PAD.encode([7u8; 32]);
+    for addr in ["peer name:7100", "peer.local:0"] {
+        assert!(
+            PeerLocator::parse(addr).is_err(),
+            "test input {addr:?} must be locator-invalid"
+        );
+        let err = decode(&format!("axon://{key}@{addr}"))
+            .expect_err("locator-invalid addr must fail token decode");
+        assert!(
+            err.to_string().contains("addr"),
+            "unexpected error for {addr:?}: {err:#}"
+        );
+    }
+}
+
+#[test]
+fn locator_valid_addrs_round_trip_through_decode() {
+    let pubkey = STANDARD.encode([7u8; 32]);
+    for addr in ["127.0.0.1:7100", "peer.local:7100", "[::1]:7100"] {
+        let token = encode(&pubkey, addr).expect("locator-valid addr must encode");
+        let decoded = decode(&token).expect("locator-valid token must decode");
+        assert_eq!(decoded.addr, addr);
+        assert_eq!(decoded.pubkey, pubkey);
+    }
+}

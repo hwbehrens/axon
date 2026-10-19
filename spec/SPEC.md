@@ -285,7 +285,7 @@ port: 7100                             # optional, default 7100
 advertise_addr: "my-host.tail:7100"    # optional `axon identity` output override
 ```
 
-Only `name`, `port`, and `advertise_addr` are configurable. Enrolled peers are not configuration; they are managed through IPC and stored in `peers.json`. All tuning values (timeouts, buffer sizes, intervals) are hardcoded as constants.
+Only `name`, `port`, and `advertise_addr` are configurable. Enrolled peers are not configuration; they are managed through IPC and stored in `peers.json`. All tuning values (timeouts, buffer sizes, intervals) are hardcoded as constants. Semantically invalid values that still deserialize are rejected at load: `port` must be non-zero and `name` must be non-blank. Saves replace `config.yaml` through a same-directory temporary file and an atomic rename so a crash never leaves a truncated document.
 
 ### Peer Store Format
 
@@ -311,14 +311,19 @@ The store is bounded to 256 enrolled peers and 8 configured locators per peer. E
 ## 8. Daemon Lifecycle
 
 ### Startup
-1. Load or generate identity keypair.
-2. Generate ephemeral self-signed X.509 cert from keypair.
-3. Read config.yaml (if exists) for port, name, and advertise_addr; reject legacy peer entries.
-4. Load and validate peers.json into PeerDirectory; reject unsupported known_peers.json state.
-5. Start Unix socket listener; clean it up if a later startup step fails.
-6. Start QUIC endpoint (bind port).
-7. Start mDNS advertisement + browsing.
-8. Initiate connections only to enrolled peers with current dial targets.
+1. Resolve the state root (CLI `--state-root`, then `AXON_ROOT`, then `~/.axon`). Create it if missing, reject a symlinked root, and normalize it to owner-only mode `0700`.
+2. Reject unsupported legacy `known_peers.json` state.
+3. Acquire the `daemon.pid` single-instance lock.
+4. Read config.yaml (if exists) for port, name, and advertise_addr; reject legacy peer entries and semantically invalid values.
+5. Load or generate the identity keypair and derive the local Agent ID.
+6. Reject an invalid system clock.
+7. Load and validate peers.json into PeerDirectory.
+8. Start Unix socket listener; clean it up if a later startup step fails.
+9. Generate the ephemeral self-signed X.509 cert from the keypair and bind the QUIC endpoint (port).
+10. Start mDNS advertisement + browsing (unless `--disable-mdns`).
+11. Initiate connections and reconnect maintenance only for enrolled peers with current dial targets.
+
+The order is deliberate: the state-root checks and single-instance lock run before any identity, trust, or config material is read, so a second daemon fails fast without touching shared state; config precedence is resolved before identity so the advertised port and name are known; the IPC socket is bound before the QUIC endpoint so a transport bind failure can tear it down cleanly (see DEC-027).
 
 ### Runtime
 - Accept inbound QUIC connections (mTLS validates peer certs against the current enrolled-pin snapshot).

@@ -8,7 +8,7 @@ use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use tokio::sync::mpsc;
+use tokio::sync::{Semaphore, mpsc};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, trace, warn};
@@ -19,7 +19,7 @@ use lockfile::DaemonLock;
 use crate::config::{AxonPaths, Config};
 use crate::discovery::{DiscoveryEvent, run_mdns_discovery};
 use crate::identity::Identity;
-use crate::ipc::{IpcServer, IpcServerConfig};
+use crate::ipc::{DaemonReply, IpcErrorCode, IpcServer, IpcServerConfig};
 use crate::message::{AgentId, Envelope};
 use crate::peer_directory::{
     OBSERVATION_STALE_TIMEOUT, ObservationId, ObservationSource, ObserveOutcome, PeerDirectory,
@@ -36,6 +36,9 @@ const INBOUND_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_IPC_CLIENTS: usize = 64;
 const MAX_CLIENT_QUEUE: usize = 1024;
 const MAX_INFLIGHT_SENDS: usize = 256;
+const MAX_INFLIGHT_WHO_CAN: usize = 8; // parked/running who_can; overflow rejected (I8)
+// Untrusted candidate broadcasts are rate-limited to protect client queues (I13).
+const CANDIDATE_BROADCAST_INTERVAL: Duration = Duration::from_millis(50);
 
 #[derive(Debug, Clone, Default)]
 pub struct DaemonOptions {
@@ -64,8 +67,6 @@ pub async fn run_daemon(opts: DaemonOptions) -> Result<()> {
     if crate::message::now_millis() == 0 {
         anyhow::bail!("system clock appears invalid; configure system time before starting AXON");
     }
-    info!(agent_id = %local_agent_id, port, "starting AXON daemon");
-
     let cancel = opts.cancel.unwrap_or_default();
     let start = Instant::now();
     let counters = Arc::new(Counters::default());
@@ -110,6 +111,10 @@ pub async fn run_daemon(opts: DaemonOptions) -> Result<()> {
         }
     };
 
+    // Advertise the bound port, not `--port 0` (nit).
+    let bound_port = transport.local_addr().map_or(port, |addr| addr.port());
+    info!(agent_id = %local_agent_id, port = bound_port, "starting AXON daemon");
+
     let mut inbound_rx = transport.subscribe_inbound();
     let mut pair_request_rx = transport.subscribe_pair_requests();
     let mut disconnect_rx = ipc.subscribe_disconnects();
@@ -125,7 +130,7 @@ pub async fn run_daemon(opts: DaemonOptions) -> Result<()> {
             run_mdns_discovery(
                 advertised_id,
                 advertised_key,
-                port,
+                bound_port,
                 discovery_tx,
                 discovery_cancel,
             )
@@ -135,6 +140,9 @@ pub async fn run_daemon(opts: DaemonOptions) -> Result<()> {
 
     let mut stale_interval = tokio::time::interval(Duration::from_secs(5));
     let mut reconnect_interval = tokio::time::interval(Duration::from_secs(1));
+    let who_can_budget = Arc::new(Semaphore::new(MAX_INFLIGHT_WHO_CAN));
+    let mut discovery_open = true;
+    let mut last_candidate_broadcast: Option<Instant> = None;
     let ctx = DaemonContext {
         ipc: ipc.clone(),
         directory: directory.clone(),
@@ -157,23 +165,38 @@ pub async fn run_daemon(opts: DaemonOptions) -> Result<()> {
             }
             maybe_command = command_rx.recv() => {
                 let Some(command) = maybe_command else { break };
-                if matches!(
-                    &command.command,
-                    crate::ipc::IpcCommand::Send { .. } | crate::ipc::IpcCommand::WhoCan { .. }
-                ) {
-                    // Send capacity is reserved inside `handle_command` itself,
-                    // so the budget counts exactly the sends being processed.
-                    // `who_can` reserves no send capacity but is spawned for
-                    // the same reason sends are: it can await bounded network
-                    // pulls (`WHO_CAN_PULL_TIMEOUT`), and the control loop must
-                    // stay responsive to discovery, disconnects, and shutdown
-                    // while it runs.
+                let cmd = command.command.cmd_name();
+                let client_id = command.client_id;
+                // `who_can` awaits network work on the task set; budgeted below (I8).
+                let permit = if cmd == "who_can" {
+                    match reserve_who_can(
+                        &who_can_budget,
+                        command.command.req_id().map(str::to_string),
+                    ) {
+                        Ok(permit) => Some(permit),
+                        Err(reply) => {
+                            if let Err(err) = ipc.send_reply(client_id, &reply).await {
+                                warn!(error = %err, "failed sending who_can capacity rejection");
+                            }
+                            None
+                        }
+                    }
+                } else {
+                    None
+                };
+                if cmd == "send" || permit.is_some() {
                     let command_ctx = ctx.clone();
                     send_tasks.spawn(async move {
+                        let _permit = permit;
                         handle_command(command, &command_ctx).await
                     });
-                } else if let Err(err) = handle_command(command, &ctx).await {
-                    error!(error = %err, "failed handling IPC command");
+                } else if cmd != "who_can" {
+                    if let Err(err) = handle_command(command, &ctx).await {
+                        error!(error = %err, "failed handling IPC command");
+                    }
+                    if cmd == "serve" {
+                        release_lease_if_client_gone(&ipc, &broker, client_id).await;
+                    }
                 }
             }
             completed = send_tasks.join_next(), if !send_tasks.is_empty() => {
@@ -187,23 +210,40 @@ pub async fn run_daemon(opts: DaemonOptions) -> Result<()> {
             inbound = inbound_rx.recv() => match inbound {
                 Ok(envelope) => handle_inbound(&ipc, &counters, &envelope).await,
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(count)) => {
-                    warn!(count, "daemon lagged behind inbound transport events");
+                    // Make the gap explicit and reconcile clients so lost
+                    // disconnects cannot pin a lease (I16).
+                    warn!(count, "inbound transport event gap; clients may have missed events");
+                    let live: std::collections::HashSet<_> =
+                        ipc.connected_client_ids().await.into_iter().collect();
+                    broker.reconcile_clients(&live).await;
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             },
             pair_request = pair_request_rx.recv() => match pair_request {
-                Ok(request) => handle_pair_request(&directory, &ipc, request).await,
+                Ok(request) => {
+                    handle_pair_request(&directory, &ipc, request, &mut last_candidate_broadcast)
+                        .await
+                }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(count)) => {
                     warn!(count, "daemon lagged behind rejected handshake observations");
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             },
-            event = discovery_rx.recv() => match event {
-                Some(event) => handle_discovery_event(&directory, &ipc, event).await,
-                // A closed channel would otherwise be ready-forever and spin.
+            event = discovery_rx.recv(), if discovery_open => match event {
+                Some(DiscoveryEvent::Observed(observation)) => {
+                    observe_and_publish(
+                        &directory,
+                        &ipc,
+                        observation,
+                        &mut last_candidate_broadcast,
+                    )
+                    .await
+                }
+                Some(DiscoveryEvent::Lost(id)) => directory.remove_observation(&id).await,
+                // Closed is ready-forever and would spin; degraded, not fatal (I10).
                 None => {
-                    warn!("discovery event channel closed; stopping discovery handling");
-                    break;
+                    warn!("discovery event channel closed; continuing without discovery");
+                    discovery_open = false;
                 }
             },
             disconnected = disconnect_rx.recv() => match disconnected {
@@ -273,25 +313,13 @@ fn make_response_handler(ipc: IpcServer, broker: RequestBroker) -> ResponseHandl
             match broker.begin(request.clone(), INBOUND_REQUEST_TIMEOUT).await {
                 BeginRequest::Respond(response) => Some(response),
                 BeginRequest::Deliver(delivery) => {
-                    let request_id = delivery.request_id;
                     if ipc
                         .send_request_event(delivery.client_id, &request)
                         .await
                         .is_err()
                     {
-                        // `from` is TLS-authenticated before broker entry, so
-                        // it scopes the terminal failure to this peer's key.
-                        if let Some(peer) = request.from.as_ref() {
-                            broker
-                                .fail(
-                                    peer,
-                                    request_id,
-                                    "overloaded",
-                                    "request handler queue is unavailable",
-                                    true,
-                                )
-                                .await;
-                        }
+                        // Release the gone/overflow-closed handler's lease (B1).
+                        broker.disconnect(delivery.client_id).await;
                     }
                     Some(
                         broker
@@ -307,7 +335,8 @@ fn make_response_handler(ipc: IpcServer, broker: RequestBroker) -> ResponseHandl
 async fn handle_inbound(ipc: &IpcServer, counters: &Counters, envelope: &Envelope) {
     counters.received.fetch_add(1, Ordering::Relaxed);
     let from = envelope.from.as_ref().map_or("unknown", AgentId::as_str);
-    info!(msg_id = %envelope.id, from, kind = %envelope.kind, "message received");
+    let kind = truncate(envelope.kind.as_str(), 64);
+    info!(msg_id = %envelope.id, from, kind = %kind, "message received");
     let raw = envelope.payload.get();
     debug!(msg_id = %envelope.id, payload = %truncate(raw, 256), "message payload preview");
     trace!(msg_id = %envelope.id, payload = raw, "message payload");
@@ -316,16 +345,12 @@ async fn handle_inbound(ipc: &IpcServer, counters: &Counters, envelope: &Envelop
     }
 }
 
-async fn handle_discovery_event(directory: &PeerDirectory, ipc: &IpcServer, event: DiscoveryEvent) {
-    match event {
-        DiscoveryEvent::Observed(observation) => {
-            observe_and_publish(directory, ipc, observation).await
-        }
-        DiscoveryEvent::Lost(id) => directory.remove_observation(&id).await,
-    }
-}
-
-async fn handle_pair_request(directory: &PeerDirectory, ipc: &IpcServer, request: PairRequest) {
+async fn handle_pair_request(
+    directory: &PeerDirectory,
+    ipc: &IpcServer,
+    request: PairRequest,
+    last_broadcast: &mut Option<Instant>,
+) {
     let result = (|| -> Result<PeerObservation> {
         let agent_id = AgentId::parse(&request.agent_id)?;
         let endpoint = request.addr.as_deref().and_then(|addr| addr.parse().ok());
@@ -344,7 +369,7 @@ async fn handle_pair_request(directory: &PeerDirectory, ipc: &IpcServer, request
         )
     })();
     match result {
-        Ok(observation) => observe_and_publish(directory, ipc, observation).await,
+        Ok(observation) => observe_and_publish(directory, ipc, observation, last_broadcast).await,
         Err(err) => warn!(error = %err, "rejected invalid handshake candidate"),
     }
 }
@@ -353,6 +378,7 @@ async fn observe_and_publish(
     directory: &PeerDirectory,
     ipc: &IpcServer,
     observation: PeerObservation,
+    last_broadcast: &mut Option<Instant>,
 ) {
     let agent_id = observation.identity.agent_id().clone();
     let source = match observation.source {
@@ -362,6 +388,10 @@ async fn observe_and_publish(
     let outcome = directory.observe(observation).await;
     match outcome {
         ObserveOutcome::CandidateAdded | ObserveOutcome::CandidateRefreshed => {
+            // Untrusted candidates share client queues; rate-limit (I13).
+            if !should_broadcast_candidate(last_broadcast, Instant::now()) {
+                return;
+            }
             if let Some(peer) = directory.list().await.into_iter().find(|peer| {
                 peer.trust == PeerTrust::Candidate && peer.identity.agent_id() == &agent_id
             }) {
@@ -394,6 +424,37 @@ async fn observe_and_publish(
         }
         ObserveOutcome::IgnoredSelf | ObserveOutcome::EnrolledPeerRefreshed => {}
     }
+}
+
+/// Release the handler lease if its client is already gone (B1).
+async fn release_lease_if_client_gone(ipc: &IpcServer, broker: &RequestBroker, client_id: u64) {
+    if !ipc.connected_client_ids().await.contains(&client_id) {
+        broker.disconnect(client_id).await;
+    }
+}
+
+/// Reserve a `who_can` slot or return typed backpressure (I8).
+fn reserve_who_can(
+    budget: &Arc<Semaphore>,
+    req_id: Option<String>,
+) -> std::result::Result<tokio::sync::OwnedSemaphorePermit, Box<DaemonReply>> {
+    budget.clone().try_acquire_owned().map_err(|_| {
+        Box::new(DaemonReply::Error {
+            ok: false,
+            error: IpcErrorCode::SendCapacityExceeded,
+            message: "too many concurrent who_can queries; retry shortly".to_string(),
+            req_id,
+        })
+    })
+}
+
+/// Suppress candidate broadcasts that arrive inside the rate window (I13).
+fn should_broadcast_candidate(last: &mut Option<Instant>, now: Instant) -> bool {
+    if last.is_some_and(|at| now.saturating_duration_since(at) < CANDIDATE_BROADCAST_INTERVAL) {
+        return false;
+    }
+    *last = Some(now);
+    true
 }
 
 fn truncate(input: &str, max: usize) -> String {
@@ -430,3 +491,7 @@ async fn wait_for_shutdown_signal(cancel: CancellationToken) -> Result<()> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "tests.rs"]
+mod tests;

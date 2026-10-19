@@ -44,7 +44,7 @@ AXON is purpose-built for agents talking to agents. It's structured, authenticat
 Agent ←→ [Unix Socket IPC] ←→ AXON Daemon ←→ [QUIC/UDP] ←→ AXON Daemon ←→ [Unix Socket IPC] ←→ Agent
 ```
 
-Each machine runs a lightweight daemon (<5 MB RSS, negligible CPU when idle). Agents connect to it over a Unix socket and exchange structured JSON messages. The daemon handles everything else:
+Each machine runs a lightweight daemon (on the order of 10 MB RSS when idle in a local release build, measured on macOS; debug builds are larger. CPU is negligible when idle — no RSS budget is gated or benchmarked). Agents connect to it over a Unix socket and exchange structured JSON messages. The daemon handles everything else:
 
 - **Identity** — Ed25519 keypair generated on first run. `identity.key` stores a base64-encoded 32-byte seed (strictly required; non-base64 or raw legacy formats are rejected). Agent ID is `ed25519.` plus the first 16 bytes of SHA-256(public key), lowercase hex-encoded. Self-signed X.509 cert for QUIC/TLS 1.3.
 - **Discovery** — Bonjour/mDNS finds LAN candidates; candidates remain untrusted until explicitly enrolled.
@@ -210,6 +210,7 @@ axon --help
   - `-vv` — `trace` level (full untruncated payloads)
   - `--quiet` and `-v` are mutually exclusive
   - if `RUST_LOG` is explicitly set, it takes precedence over all flags
+  - all log lines go to stderr; stdout carries command output only, so `--json` output stays machine-parseable under `-v`/`-vv`
   - **for high-throughput LLM relay**, use `-q` to avoid per-message log overhead
 - Request payload shape:
   - `axon request` always sends payload as `{"message":"<string>"}` (including when the string itself is JSON text)
@@ -255,7 +256,7 @@ Located at `~/.axon/config.yaml` by default (or `<state_root>/config.yaml` when 
 |-----|------|---------|-------------|
 | `name` | `String` | _(none)_ | Optional display name for this agent. |
 | `port` | `u16` | `7100` | QUIC listen port. CLI `--port` overrides this. |
-| `advertise_addr` | `String` | _(none)_ | Optional `host:port` override used by `axon identity` URI output. |
+| `advertise_addr` | `String` | _(none)_ | Optional `host:port` override used by `axon identity` URI output. The CLI accepts both `advertise_addr` (canonical, matching this key and `--list`/JSON output) and the historical `advertise-addr` alias. |
 
 Example:
 
@@ -265,7 +266,9 @@ port: 7100
 advertise_addr: "alice.tailnet:7100" # optional
 ```
 
-Legacy `peers:` entries are rejected rather than silently imported.
+Legacy `peers:` entries are rejected rather than silently imported. Semantically invalid values are rejected at load even when they deserialize into `u16`/`String`: `port` must be non-zero and `name` must be non-blank. Saves replace `config.yaml` atomically through a same-directory temporary file and rename.
+
+The daemon normalizes the state root directory (default `~/.axon`, or `<state_root>` when overridden) to owner-only mode `0700` on startup, because it stores `identity.key` and the peer trust store. An existing user-supplied root with wider permissions is narrowed, and a warning is logged; an existing symlinked root is rejected.
 
 ### Peer enrollments
 
@@ -281,14 +284,14 @@ These are compile-time constants and cannot be changed via configuration.
 
 | Constant | Value | Location | Description |
 |----------|-------|----------|-------------|
-| `MAX_MESSAGE_SIZE` | `65536` (64 KB) | `message/envelope.rs` | Maximum encoded envelope size. Messages exceeding this are rejected. |
+| `MAX_MESSAGE_SIZE` | `65536` (64 KiB) | `message/envelope.rs` | Maximum encoded envelope size. Messages exceeding this are rejected. |
 | `REQUEST_TIMEOUT` | `30s` | `transport/mod.rs` | Timeout for bidirectional request/response exchanges. |
 | `OBSERVATION_STALE_TIMEOUT` | `60s` | `peer_directory/mod.rs` | Live discovery observations expire after this duration. Enrollments remain. |
 | `MAX_ENROLLED_PEERS` | `256` | `peer_directory/mod.rs` | Maximum durable peer enrollments. |
 | `MAX_CANDIDATE_PEERS` | `256` | `peer_directory/mod.rs` | Maximum simultaneous untrusted candidates. |
 | `MAX_LOCATORS_PER_PEER` | `8` | `peer_directory/mod.rs` | Maximum configured locators per enrollment. |
 | `MAX_OBSERVATIONS_PER_PEER` | `16` | `peer_directory/mod.rs` | Maximum live observations retained per peer. |
-| `MAX_IPC_LINE_LENGTH` | `64 KB` | `ipc/protocol.rs` | Maximum length of a single IPC command line. Overlong lines are rejected with `command_too_large`. |
+| `MAX_IPC_LINE_LENGTH` | `64 KiB` | `ipc/protocol.rs` | Maximum length of a single IPC command line. Overlong lines are rejected with `command_too_large`. |
 | `MAX_CONNECTIONS` | `128` | `daemon/mod.rs` | Maximum simultaneous QUIC peer connections. |
 | `KEEPALIVE` | `15s` | `daemon/mod.rs` | QUIC keepalive interval. |
 | `IDLE_TIMEOUT` | `60s` | `daemon/mod.rs` | QUIC idle timeout. Connections with no traffic for this duration are closed. |
@@ -307,6 +310,13 @@ These are compile-time constants and cannot be changed via configuration.
 | `MAX_REQ_ID_BYTES` | `1,024` | `ipc/protocol.rs` | Upper bound on the echoed `req_id`; commands with a longer `req_id` are rejected with `invalid_command` so replies stay within the framed line limit. |
 | `MAX_MANIFEST_BYTES` | `32 KiB` | `manifest/types.rs` | Encoded-size bound for a published capability manifest; larger manifests are rejected with `invalid_command` so `describe` responses stay under the wire limit. |
 | `MAX_SERVICES` | `64` | `manifest/types.rs` | Maximum services listed in one capability manifest. |
+| `MAX_NAME_BYTES` | `128` | `manifest/types.rs` | Maximum UTF-8 length of a manifest display name. |
+| `MAX_VERSION_BYTES` | `64` | `manifest/types.rs` | Maximum UTF-8 length of a manifest version string. |
+| `MAX_SERVICE_ID_BYTES` | `128` | `manifest/types.rs` | Maximum UTF-8 length of a service id. |
+| `MAX_DESCRIPTION_BYTES` | `2048` | `manifest/types.rs` | Maximum UTF-8 length of a service description. |
+| `MAX_ERROR_CODES` | `32` | `manifest/types.rs` | Maximum declared error codes per service. |
+| `MAX_ERROR_CODE_BYTES` | `64` | `manifest/types.rs` | Maximum UTF-8 length of one declared error code. |
+| `MAX_CONCURRENCY` | `1024` | `manifest/types.rs` | Maximum declared service concurrency. |
 | `WHO_CAN_PULL_TIMEOUT` | `5s` | `daemon/who_can.rs` | Whole-exchange deadline for one `describe` capability pull issued by `who_can`. |
 | `WHO_CAN_CACHE_TTL` | `60s` | `daemon/who_can.rs` | Cached peer manifests older than this are re-pulled on the next `who_can` query. |
 | `MAX_MANIFEST_CACHE_ENTRIES` | `256` | `manifest/cache.rs` | Maximum cached remote manifests; overflow evicts the oldest-inserted entry. |
@@ -314,6 +324,7 @@ These are compile-time constants and cannot be changed via configuration.
 | `PEER_STORE_VERSION` | `1` | `peer_directory/store.rs` | Schema version of the canonical `peers.json` document; stores with any other version are rejected on load. |
 | `MAX_CLIENT_QUEUE` | `1024` | `daemon/mod.rs` | Per-IPC-client outbound message queue depth; overflow disconnects lagging clients. |
 | `MAX_INFLIGHT_SENDS` | `256` | `daemon/mod.rs` | Maximum concurrent outbound IPC send operations; excess `send` commands are rejected with `send_capacity_exceeded`, while control commands remain responsive. |
+| `MAX_ACQUIRE_ATTEMPTS` | `8` | `daemon/lockfile.rs` | Bounded retries when acquiring the `daemon.pid` lock; real acquisition succeeds on the first attempt. |
 | Maximum reconnect backoff | `30s` | `transport/reconnect.rs` | Maximum delay between versioned reconnect attempts. |
 | Stale cleanup interval | `5s` | `daemon/mod.rs` | How often the daemon checks for and removes stale discovered peers. |
 | Reconnect interval | `1s` | `daemon/mod.rs` | How often the daemon checks for peers needing reconnection. |

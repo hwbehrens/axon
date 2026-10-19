@@ -1,9 +1,9 @@
 use super::fixtures::{make_transport_pair, make_transport_pair_with_options};
 use crate::message::{AgentId, Envelope, MessageKind};
-use crate::transport::{ResponseHandlerFn, default_error_response};
+use crate::transport::{DialPeer, ResponseHandlerFn, default_error_response};
 use serde_json::json;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[tokio::test]
 async fn send_request_bidirectional_default_error() {
@@ -67,6 +67,52 @@ async fn send_request_rejects_invalid_bidirectional_reply() {
     assert!(
         !pair.transport_a.has_connection(&peer_b).await,
         "failed exchange must invalidate the connection slot"
+    );
+}
+
+/// The spec-compliance test `describe_on_legacy_peer_yields_unsupported_kind`
+/// constructs the mandated reply itself; this drives the transport's own
+/// `handle_authenticated_bidi` unknown-kind branch end to end.
+#[tokio::test]
+async fn unknown_bidi_kind_is_answered_with_unsupported_kind() {
+    let pair = make_transport_pair().await;
+    let agent_a = AgentId::parse(pair.id_a.agent_id()).unwrap();
+    let peer_b = AgentId::parse(pair.id_b.agent_id()).unwrap();
+    let addr = pair.transport_b.local_addr().unwrap();
+    let connection = pair
+        .transport_a
+        .ensure_connection(&DialPeer {
+            agent_id: peer_b.clone(),
+            addr,
+        })
+        .await
+        .expect("connect");
+
+    let request = Envelope::new(
+        agent_a.clone(),
+        peer_b,
+        MessageKind::unknown("future_kind_v99"),
+        json!({"future": true}),
+    );
+    let response = crate::transport::connection::send_request(
+        &connection,
+        request.clone(),
+        &agent_a,
+        Instant::now() + Duration::from_secs(5),
+    )
+    .await
+    .expect("unknown kind must be answered, not dropped");
+
+    assert_eq!(response.kind, MessageKind::Error);
+    assert_eq!(response.ref_id, Some(request.id));
+    let payload = response.payload_value().unwrap();
+    assert_eq!(payload["code"], json!("unsupported_kind"));
+    assert!(
+        payload["message"]
+            .as_str()
+            .unwrap()
+            .contains("future_kind_v99"),
+        "reply must name the original bounded kind: {payload}"
     );
 }
 

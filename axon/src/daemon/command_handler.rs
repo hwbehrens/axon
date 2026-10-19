@@ -5,12 +5,13 @@ use anyhow::Result;
 
 use crate::ipc::{
     CommandEvent, DaemonReply, IpcCommand, IpcErrorCode, IpcSendKind, IpcServer, PeerSummary,
+    bounded_peers_reply,
 };
 use crate::message::{AgentId, Envelope};
 use crate::peer_directory::{DirectoryError, PeerDirectory, PeerIdentity, PeerLocator, PeerTrust};
 use crate::peer_token;
 use crate::request_broker::{BrokerError, RequestBroker};
-use crate::transport::{ConnectionManager, REQUEST_TIMEOUT};
+use crate::transport::{ConnectionManager, REQUEST_TIMEOUT, SendError};
 
 use super::who_can;
 
@@ -168,11 +169,7 @@ pub(crate) async fn handle_command(cmd: CommandEvent, ctx: &DaemonContext) -> Re
                     services,
                 });
             }
-            DaemonReply::Peers {
-                ok: true,
-                peers,
-                req_id,
-            }
+            bounded_peers_reply(peers, req_id)
         }
         IpcCommand::Status { req_id } => DaemonReply::Status {
             ok: true,
@@ -231,13 +228,7 @@ pub(crate) async fn handle_command(cmd: CommandEvent, ctx: &DaemonContext) -> Re
                 Err(err) => error_reply(broker_failure(err), req_id),
             }
         }
-        IpcCommand::WhoCan { query, req_id } => {
-            let mut reply = who_can::handle(ctx, query).await;
-            if let DaemonReply::WhoCan { req_id: slot, .. } = &mut reply {
-                *slot = req_id;
-            }
-            reply
-        }
+        IpcCommand::WhoCan { query, req_id } => who_can::handle(ctx, query, req_id).await,
         IpcCommand::Reply {
             request_id,
             peer,
@@ -359,21 +350,31 @@ async fn send(
             }
             Ok((msg_id, response))
         }
-        Err(err)
-            if err.timed_out && matches!(kind, IpcSendKind::Request | IpcSendKind::Describe) =>
-        {
-            // Spec: timeouts must surface as `timeout`, never
-            // `peer_unreachable`.
-            Err(CommandFailure::new(
-                IpcErrorCode::Timeout,
-                IpcErrorCode::Timeout.message(),
-            ))
-        }
-        Err(err) => Err(CommandFailure::new(
-            IpcErrorCode::PeerUnreachable,
-            err.inner.to_string(),
-        )),
+        Err(err) => Err(send_failure(err)),
     }
+}
+
+/// Map a transport send failure onto an instructive IPC error
+/// (spec/IPC.md §5). Budget exhaustion is `timeout` for EVERY kind — a
+/// fire-and-forget send can time out too, and the spec forbids reporting a
+/// timeout as `peer_unreachable`. `ambiguous` means payload bytes may
+/// already have reached the peer, so the delivery status is surfaced
+/// explicitly (a retry could duplicate).
+fn send_failure(err: SendError) -> CommandFailure {
+    if err.timed_out {
+        let message = if err.ambiguous {
+            "send timed out; delivery status unknown".to_string()
+        } else {
+            IpcErrorCode::Timeout.message().to_string()
+        };
+        return CommandFailure::new(IpcErrorCode::Timeout, message);
+    }
+    let message = if err.ambiguous {
+        format!("{}; delivery status unknown", err.inner)
+    } else {
+        err.inner.to_string()
+    };
+    CommandFailure::new(IpcErrorCode::PeerUnreachable, message)
 }
 
 fn send_timeout(

@@ -3,6 +3,7 @@ use std::time::Duration;
 use serde_json::json;
 
 use super::*;
+use crate::message::MAX_MESSAGE_SIZE;
 
 pub(super) fn agent(value: char) -> AgentId {
     AgentId::parse(&format!("ed25519.{}", value.to_string().repeat(32))).expect("valid Agent ID")
@@ -151,6 +152,47 @@ async fn handler_deadline_removes_pending_request() {
 }
 
 #[tokio::test]
+async fn timeout_replays_a_reply_recorded_after_the_deadline_fired() {
+    let broker = RequestBroker::new(agent('b'));
+    broker.register(1, None).await.expect("handler");
+    let original = request();
+    let BeginRequest::Deliver(delivery) = broker.begin(original.clone(), REQUEST_TTL).await else {
+        panic!("delivery expected");
+    };
+
+    // Reproduce the window between the deadline firing (which drops the
+    // receiver) and this branch taking the state lock: the handler's reply
+    // critical section has completed and recorded its outcome.
+    let handler_response = Envelope::response_to(
+        &original,
+        agent('b'),
+        MessageKind::Response,
+        json!({"answer": "recorded"}),
+    );
+    let pending = {
+        let mut state = broker.state.lock().await;
+        let pending = state.pending.remove(&delivery.key).expect("pending entry");
+        state
+            .completed
+            .remember(delivery.key.clone(), handler_response.clone());
+        pending
+    };
+    // Keep the handler's sender alive: dropping it without sending would
+    // close the receiver and take the disconnected branch instead of the
+    // deadline this test pins.
+    let _handler_side = pending;
+
+    let response = broker
+        .await_response(delivery, Duration::from_millis(1))
+        .await;
+
+    assert_eq!(
+        response, handler_response,
+        "a recorded handler outcome must win over a divergent timeout"
+    );
+}
+
+#[tokio::test]
 async fn pending_request_capacity_is_bounded() {
     let broker = RequestBroker::new(agent('b'));
     broker.register(1, None).await.expect("handler");
@@ -214,6 +256,64 @@ async fn oversized_reply_is_rejected_without_consuming_the_request() {
         )
         .await
         .expect("reply within the wire limit must be accepted");
+    let response = delivery.response.await.expect("terminal response");
+    assert_eq!(response.payload_value().unwrap()["answer"], "fits");
+}
+
+#[tokio::test]
+async fn wire_legal_reply_that_overflows_the_ipc_frame_is_rejected() {
+    let broker = RequestBroker::new(agent('a'));
+    broker.register(1, None).await.unwrap();
+    let original = request();
+    let BeginRequest::Deliver(delivery) = broker.begin(original.clone(), REQUEST_TTL).await else {
+        panic!("delivery expected");
+    };
+
+    // A response envelope sized exactly at the QUIC wire limit. The IPC-only
+    // `from`/`to` routing fields plus the requester's `send` reply wrapper
+    // push the framed line past the 65,536-byte IPC bound.
+    let base = Envelope::response_to(
+        &original,
+        agent('a'),
+        MessageKind::Response,
+        json!({"blob": ""}),
+    );
+    let base_wire = base.wire_encode().unwrap().len();
+    let payload = json!({"blob": "x".repeat(MAX_MESSAGE_SIZE as usize - base_wire)});
+    let at_wire_limit = Envelope::response_to(
+        &original,
+        agent('a'),
+        MessageKind::Response,
+        payload.clone(),
+    );
+    assert_eq!(
+        at_wire_limit.wire_encode().unwrap().len(),
+        MAX_MESSAGE_SIZE as usize
+    );
+    assert!(
+        serde_json::to_vec(&at_wire_limit).unwrap().len() > crate::ipc::MAX_IPC_LINE_LENGTH,
+        "fixture must overflow the IPC frame"
+    );
+
+    assert_eq!(
+        broker
+            .reply(1, original.id, MessageKind::Response, payload, None)
+            .await,
+        Err(BrokerError::InvalidPayload),
+        "an IPC-frame overflow must be rejected before the handler is acked"
+    );
+
+    // The request is still pending: a smaller reply succeeds.
+    broker
+        .reply(
+            1,
+            original.id,
+            MessageKind::Response,
+            json!({"answer": "fits"}),
+            None,
+        )
+        .await
+        .expect("reply within both bounds must be accepted");
     let response = delivery.response.await.expect("terminal response");
     assert_eq!(response.payload_value().unwrap()["answer"], "fits");
 }

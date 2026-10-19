@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
+use std::time::Duration;
 
 use serde_json::json;
 use tokio::sync::{Mutex, broadcast, mpsc};
@@ -278,5 +279,57 @@ async fn oversized_reply_fallback_never_panics_even_with_pathological_req_id() {
     assert!(
         decoded.get("req_id").is_none(),
         "the overbound echo is dropped, never truncated"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// I7 + accept-loop hygiene (round-nine review): reply delivery must never
+// await queue capacity on the daemon control loop, and persistent accept
+// errors must back off instead of spinning.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn reply_to_a_full_queue_disconnects_without_stalling_the_control_loop() {
+    let (tx, _rx) = mpsc::channel::<Arc<str>>(1);
+    tx.try_send(Arc::from("{\"prefill\":true}"))
+        .expect("prefill the slow client's queue");
+    let mut clients = HashMap::new();
+    clients.insert(1u64, tx);
+    let server = test_server_with_clients(clients);
+
+    let reply = DaemonReply::Status {
+        ok: true,
+        uptime_secs: 1,
+        peers_connected: 0,
+        messages_sent: 0,
+        messages_received: 0,
+        req_id: None,
+    };
+    // The old implementation awaited queue capacity for up to 2 seconds,
+    // stalling every other client's control commands; 200ms discriminates
+    // the try_send policy from that stall.
+    tokio::time::timeout(Duration::from_millis(200), server.send_reply(1, &reply))
+        .await
+        .expect("reply delivery must not await queue capacity")
+        .expect("the delivery attempt itself succeeds");
+    assert_eq!(
+        server.client_count().await,
+        0,
+        "the lagging client is disconnected, never silently dropped"
+    );
+}
+
+#[test]
+fn accept_backoff_is_monotonic_and_capped() {
+    assert!(accept_backoff(0) >= Duration::from_millis(1));
+    assert!(accept_backoff(1) >= accept_backoff(0));
+    assert!(
+        accept_backoff(u32::MAX) <= Duration::from_secs(1),
+        "a persistent accept error must not back off without bound"
+    );
+    assert_eq!(
+        accept_backoff(u32::MAX),
+        accept_backoff(6),
+        "the backoff must cap once the exponent saturates"
     );
 }

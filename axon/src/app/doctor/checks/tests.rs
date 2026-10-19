@@ -235,6 +235,24 @@ async fn regular_file_at_socket_path_requires_manual_cleanup() {
 }
 
 // ---------------------------------------------------------------------------
+// backups
+// ---------------------------------------------------------------------------
+
+#[test]
+fn backups_in_the_same_second_do_not_collide() {
+    let root = tempdir().expect("tempdir");
+    let config = root.path().join("config.yaml");
+    fs::write(&config, "first").expect("first config");
+    let first = backup_file_with_timestamp(&config).expect("first backup");
+    fs::write(&config, "second").expect("second config");
+    let second = backup_file_with_timestamp(&config).expect("second backup");
+
+    assert_ne!(first, second, "backup names must not collide");
+    assert_eq!(fs::read_to_string(&first).unwrap(), "first");
+    assert_eq!(fs::read_to_string(&second).unwrap(), "second");
+}
+
+// ---------------------------------------------------------------------------
 // config
 // ---------------------------------------------------------------------------
 
@@ -267,6 +285,27 @@ async fn valid_config_parses_cleanly() {
     let check = check_named(&report, "config");
     assert!(check.message.contains("alice"));
     assert!(check.message.contains("7200"));
+}
+
+#[tokio::test]
+async fn semantically_invalid_config_fails_the_check() {
+    for invalid in ["port: 0\n", "name: \"\"\n", "name: \"  \"\n"] {
+        let root = tempdir().expect("tempdir");
+        let paths = AxonPaths::from_root(root.path().to_path_buf());
+        fs::write(&paths.config, invalid).expect("config");
+
+        let mut report = DoctorReport::new(&paths, false);
+        check_config(&paths, &args(false), &mut report)
+            .await
+            .expect("check runs");
+
+        let check = check_named(&report, "config");
+        assert!(
+            !check.ok,
+            "config {invalid:?} must fail the doctor check, got: {check:?}"
+        );
+        assert!(check.fixable, "reset-to-defaults is the offered repair");
+    }
 }
 
 #[tokio::test]

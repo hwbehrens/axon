@@ -11,7 +11,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use crate::ipc::{IpcErrorCode, IpcSendKind};
 
 use super::{
-    MAX_REQUEST_TIMEOUT_SECS, SendSlotGuard, directory_failure, reserve_slot, send_timeout,
+    MAX_REQUEST_TIMEOUT_SECS, SendSlotGuard, directory_failure, reserve_slot, send_failure,
+    send_timeout,
 };
 
 #[test]
@@ -155,4 +156,68 @@ fn directory_failures_map_to_instructive_ipc_codes() {
         IpcErrorCode::InternalError,
         "persistence failures must not masquerade as peer_not_observed"
     );
+}
+
+// ---------------------------------------------------------------------------
+// I9: budget exhaustion is `timeout` for EVERY send kind, never
+// `peer_unreachable`; delivery ambiguity is surfaced explicitly. The daemon
+// path calls `send_failure` for every kind (it no longer inspects `kind`),
+// so these mappings are the single chokepoint.
+// ---------------------------------------------------------------------------
+
+fn transport_failure(ambiguous: bool, timed_out: bool) -> crate::transport::SendError {
+    use crate::transport::SendError;
+    match (ambiguous, timed_out) {
+        (false, false) => SendError::pre_send(anyhow::anyhow!("dial refused")),
+        (true, false) => SendError {
+            inner: anyhow::anyhow!("write failed"),
+            ambiguous: true,
+            timed_out: false,
+        },
+        (false, true) => SendError::pre_send_timeout(anyhow::anyhow!("dial budget exhausted")),
+        (true, true) => SendError {
+            inner: anyhow::anyhow!("write budget exhausted"),
+            ambiguous: true,
+            timed_out: true,
+        },
+    }
+}
+
+#[test]
+fn timed_out_transport_failure_is_timeout_for_every_kind() {
+    // `message` sends share the transport deadline too; before I9 only
+    // request/describe mapped to `timeout` and a message timeout fell
+    // through to `peer_unreachable`, violating spec/IPC.md §5.
+    for ambiguous in [false, true] {
+        let failure = send_failure(transport_failure(ambiguous, true));
+        assert_eq!(
+            failure.code,
+            IpcErrorCode::Timeout,
+            "a timed-out send must never be reported as peer_unreachable"
+        );
+        if ambiguous {
+            assert!(
+                failure.message.contains("delivery status unknown"),
+                "post-delivery budget exhaustion must surface the ambiguity"
+            );
+        }
+    }
+}
+
+#[test]
+fn ambiguous_non_timeout_failure_surfaces_delivery_ambiguity() {
+    let failure = send_failure(transport_failure(true, false));
+    assert_eq!(failure.code, IpcErrorCode::PeerUnreachable);
+    assert!(
+        failure.message.contains("delivery status unknown"),
+        "an ambiguous failure must warn that a retry could duplicate"
+    );
+}
+
+#[test]
+fn pre_delivery_failure_keeps_the_transport_message() {
+    let failure = send_failure(transport_failure(false, false));
+    assert_eq!(failure.code, IpcErrorCode::PeerUnreachable);
+    assert!(failure.message.contains("dial refused"));
+    assert!(!failure.message.contains("delivery status unknown"));
 }

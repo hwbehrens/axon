@@ -108,3 +108,19 @@ Each entry: ID, date opened, context, resolution path, owner, status (open/resol
 - Follow-up: Specify the `peers.json` schema and bound, implement crash-safe temporary-write/sync/rename persistence, make `PeerDirectory` the only caller of the store adapter, and remove the replaced config/cache paths completely.
 - Owner: product, config, peer directory, persistence
 - Status: resolved
+
+## Q-011: Timeout reporting for unidirectional `message` sends
+
+- Date opened: 2026-10-19
+- Context: `spec/IPC.md` §5 says errors "MUST NOT report a timeout as `peer_unreachable`", but the error table defines `timeout` only as "Request timed out waiting for a peer response" and §4.1 documents `timeout_secs` as valid only for `request` and `describe`. The daemon maps a timed-out `request`/`describe` to `timeout`, yet a timed-out unidirectional `message` send (dial or write deadline) falls through to `peer_unreachable` (`axon/src/daemon/command_handler.rs`). The MUST NOT sentence and the request-only `timeout` code therefore disagree for `message` sends.
+- Resolution path: Decide whether the timeout rule applies to every `send` kind or only response-bearing kinds. Either broaden `timeout` to "Send timed out before completion" and state that `message` sends use it too, or scope the MUST NOT sentence to `request`/`describe` and explicitly permit `peer_unreachable` for a timed-out `message` send after dial/write failure. Edit `spec/IPC.md` §4.1 and §5 once decided; the daemon-side mapping change belongs to the ipc workstream.
+- Owner: protocol, ipc
+- Status: open
+
+## Q-012: "Durable success" wording for peer-store saves after a post-rename fsync failure
+
+- Date opened: 2026-10-19
+- Context: DEC-022 deliberately treats a post-rename parent-directory fsync failure as a warning: the renamed file content is live, so `PeerStore::save` returns success and `add_peer`/`remove_peer` acknowledge the mutation. `spec/SPEC.md` §7 says peer-store writes use "file sync, atomic rename, and parent-directory sync", and `peer_directory/AGENTS.md` says "Validate and durably persist a mutation before publishing its new immutable pinning snapshot", which reads as a stronger durability guarantee than the acknowledged-success behavior provides.
+- Resolution path: Keep the acknowledged-success behavior (an `Err` after the rename would falsely report "nothing persisted" while new content is live) and qualify the wording: durable means the write is atomic and crash-localized to the rename, not that a power loss immediately after the rename cannot lose the directory entry; or make the directory sync a hard requirement and fail the mutation before publishing the pin snapshot. Until decided, the warning-and-success behavior in `axon/src/peer_directory/store.rs` is authoritative; `peer_directory/AGENTS.md` already notes that `store.save` never errors after its rename.
+- Owner: protocol, peer directory, persistence
+- Status: open

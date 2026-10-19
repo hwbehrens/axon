@@ -5,6 +5,8 @@
 //! module, so the inherent `impl` below retains access to the manager's
 //! private fields.
 
+use std::collections::HashSet;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -56,11 +58,16 @@ impl ConnectionManager {
         .map_err(|_| {
             SendError::pre_send_timeout(anyhow!("peer lookup for {peer} exceeded send budget"))
         })?;
-        let mut addresses = Vec::new();
+        // Configured locators are explicit, administrator-entered trust
+        // anchors; observed mDNS candidates are unvalidated. Keep them in
+        // separate buckets so a blackholed observation can never displace a
+        // configured locator, then dial configured addresses first.
+        let mut configured = Vec::new();
+        let mut observed = Vec::new();
         let mut last_error = None;
         for target in targets {
             match target {
-                DialTarget::Observed(address) => addresses.push(address),
+                DialTarget::Observed(address) => observed.push(address),
                 DialTarget::Configured(locator) => {
                     // DNS resolution is unbounded by nature; bound it with
                     // the remaining budget so a stalled resolver cannot
@@ -94,7 +101,7 @@ impl ConnectionManager {
                             )));
                             break;
                         }
-                        Some(Ok(Ok(resolved))) => addresses.extend(resolved),
+                        Some(Ok(Ok(resolved))) => configured.extend(resolved),
                         Some(Ok(Err(err))) => last_error = Some(SendError::pre_send(err)),
                         Some(Err(_)) => {
                             last_error = Some(SendError::pre_send_timeout(anyhow!(
@@ -105,27 +112,32 @@ impl ConnectionManager {
                 }
             }
         }
-        addresses.sort();
-        addresses.dedup();
-        for addr in addresses {
+        let addresses = order_dial_addresses(configured, observed);
+        for (index, addr) in addresses.iter().enumerate() {
             if dial_cancel.is_cancelled() {
                 return Err(SendError::pre_send(anyhow!(
                     "dial to peer {peer} was cancelled"
                 )));
             }
-            if deadline.checked_duration_since(Instant::now()).is_none() {
+            let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
                 last_error = Some(SendError::pre_send_timeout(anyhow!(
                     "send budget exhausted before dialing {addr}"
                 )));
                 break;
             };
+            // Bound per-endpoint effort to a fair share of the remaining
+            // budget: with N endpoints left, each attempt gets at most 1/N.
+            // A blackholed address therefore cannot consume the whole
+            // exchange and starve the endpoints behind it.
+            let endpoints_left = (addresses.len() - index) as u32;
+            let endpoint_deadline = (Instant::now() + remaining / endpoints_left).min(deadline);
             match self
                 .dial(
                     &DialPeer {
                         agent_id: peer.clone(),
-                        addr,
+                        addr: *addr,
                     },
-                    deadline,
+                    endpoint_deadline,
                 )
                 .await
             {
@@ -263,4 +275,22 @@ impl ConnectionManager {
             ),
         }
     }
+}
+
+/// Dial order for one exchange: configured locators first (explicitly
+/// entered trust anchors, in resolution order), then observed mDNS
+/// candidates (sorted for stable order). Duplicates are removed while
+/// keeping the first occurrence.
+pub(super) fn order_dial_addresses(
+    configured: Vec<SocketAddr>,
+    mut observed: Vec<SocketAddr>,
+) -> Vec<SocketAddr> {
+    observed.sort();
+    observed.dedup();
+    let mut seen = HashSet::new();
+    configured
+        .into_iter()
+        .chain(observed)
+        .filter(|addr| seen.insert(*addr))
+        .collect()
 }

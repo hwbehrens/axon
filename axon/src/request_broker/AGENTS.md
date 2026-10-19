@@ -9,6 +9,7 @@ Exactly one terminal outcome > bounded state > handler convenience.
 ## File responsibilities
 
 - `mod.rs`: single handler lease, pending request correlation, reply authorization, disconnect/failure completion.
+- `reply_admission.rs`: admission bounds for handler replies (wire frame plus the requester-side IPC `send` reply wrapper).
 
 ## Guardrails
 

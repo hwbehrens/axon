@@ -11,6 +11,9 @@ use tokio::process::Command;
 pub enum ConfigKey {
     Name,
     Port,
+    /// Canonical spelling matches the YAML key, list output, and JSON output;
+    /// the historical hyphenated CLI spelling stays accepted as an alias.
+    #[value(name = "advertise_addr", alias = "advertise-addr")]
     AdvertiseAddr,
 }
 
@@ -138,7 +141,7 @@ fn key_display_name(key: ConfigKey) -> &'static str {
     match key {
         ConfigKey::Name => "name",
         ConfigKey::Port => "port",
-        ConfigKey::AdvertiseAddr => "advertise-addr",
+        ConfigKey::AdvertiseAddr => "advertise_addr",
     }
 }
 
@@ -176,6 +179,9 @@ fn apply_set(config: &mut PersistedConfig, key: ConfigKey, value: &str) -> Resul
             config.advertise_addr = Some(parsed.to_string());
         }
     }
+    // Refuse to persist a document that a fresh `Config::load` would reject
+    // (e.g. an invalid pre-existing sibling key being carried through a set).
+    config.validate()?;
     Ok(())
 }
 

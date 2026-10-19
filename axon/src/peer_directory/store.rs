@@ -88,7 +88,11 @@ impl PeerStore {
         Ok(document.peers)
     }
 
-    pub(crate) async fn save(&self, peers: Vec<StoredPeer>) -> Result<()> {
+    /// Persist peers atomically. `Ok(true)` means the rename is durable;
+    /// `Ok(false)` means the content is live but the post-rename directory
+    /// sync failed, so the rename may not survive a crash. `Err` always
+    /// means the store file is unchanged.
+    pub(crate) async fn save(&self, peers: Vec<StoredPeer>) -> Result<bool> {
         let path = self.path.clone();
         tokio::task::spawn_blocking(move || save_sync(&path, peers))
             .await
@@ -133,7 +137,7 @@ fn load_sync(path: &Path) -> Result<Vec<StoredPeer>> {
     PeerStore::decode(&data).with_context(|| format!("in peer store {}", path.display()))
 }
 
-fn save_sync(path: &Path, peers: Vec<StoredPeer>) -> Result<()> {
+fn save_sync(path: &Path, peers: Vec<StoredPeer>) -> Result<bool> {
     validate_peers(&peers)?;
     let parent = path
         .parent()
@@ -179,7 +183,7 @@ fn save_sync(path: &Path, peers: Vec<StoredPeer>) -> Result<()> {
     result
 }
 
-fn write_and_replace(path: &Path, temp_path: &Path, parent: &Path, data: &[u8]) -> Result<()> {
+fn write_and_replace(path: &Path, temp_path: &Path, parent: &Path, data: &[u8]) -> Result<bool> {
     let mut temp = OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -215,24 +219,34 @@ fn write_and_replace(path: &Path, temp_path: &Path, parent: &Path, data: &[u8]) 
     // Post-rename the file content is already live: a directory-sync
     // failure is a durability concern, NOT a content change. Returning it
     // as an error would tell the caller "nothing was persisted" while the
-    // rename already landed, leaving disk ahead of memory. Warn and report
-    // success so the caller still applies the persisted state.
-    note_post_rename_sync(
+    // rename already landed, leaving disk ahead of memory. Warn, report
+    // success, and flag durability as uncertain so the caller can record
+    // the residual risk explicitly instead of claiming a durable write.
+    let durable = note_post_rename_sync(
         File::open(parent).and_then(|directory| directory.sync_all()),
         path,
     );
-    Ok(())
+    Ok(durable)
 }
 
-/// Map a post-rename directory-sync result onto the save result: never
-/// fatal, because the renamed file already holds the new content.
-pub(super) fn note_post_rename_sync(result: std::io::Result<()>, path: &Path) {
-    if let Err(err) = result {
-        warn!(
-            error = %err,
-            path = %path.display(),
-            "peer-store directory sync failed after rename; new content is live"
-        );
+/// Map a post-rename directory-sync result onto the save outcome: never
+/// fatal, because the renamed file already holds the new content. Returns
+/// `true` when the parent-directory sync succeeded (the rename is durable),
+/// `false` when durability is uncertain (content live, rename may not
+/// survive a crash).
+#[must_use]
+pub(super) fn note_post_rename_sync(result: std::io::Result<()>, path: &Path) -> bool {
+    match result {
+        Ok(()) => true,
+        Err(err) => {
+            warn!(
+                error = %err,
+                path = %path.display(),
+                durable = false,
+                "peer-store directory sync failed after rename; new content is live but durability is uncertain"
+            );
+            false
+        }
     }
 }
 

@@ -29,5 +29,5 @@ pub struct PairRequest {
 }
 
 pub use connection::{SendError, default_error_response};
-pub use quic_transport::{ConnectionManager, ResponseHandlerFn};
+pub use quic_transport::{ConnectionManager, InboundReceiver, ResponseHandlerFn};
 pub use tls::extract_ed25519_pubkey_from_cert_der;

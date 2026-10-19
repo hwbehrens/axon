@@ -239,10 +239,41 @@ pub struct Envelope {
     #[serde(rename = "ref", default, skip_serializing_if = "Option::is_none")]
     pub ref_id: Option<Uuid>,
     pub payload: Box<RawValue>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_agent_id",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub from: Option<AgentId>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_agent_id",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub to: Option<AgentId>,
+}
+
+/// Deserialize a daemon-local `from`/`to` field leniently.
+///
+/// `from` and `to` are not part of the on-wire envelope schema
+/// (`spec/WIRE_FORMAT.md` §6.2): they are populated by the daemon from the
+/// authenticated TLS peer before an envelope reaches a handler or an IPC
+/// client. A frame that carries them anyway is therefore treated like any
+/// unknown field: a well-formed value is parsed for round-tripping, and a
+/// malformed value (wrong JSON type, invalid Agent ID, or `null`) decodes as
+/// `None` instead of failing the whole envelope. Nothing on this path is
+/// trusted as identity — overwriting from authenticated key material happens
+/// in the transport layer after decode.
+fn deserialize_optional_agent_id<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<AgentId>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Ok(Option::<String>::deserialize(deserializer)
+        .ok()
+        .flatten()
+        .and_then(|raw| AgentId::parse(&raw).ok()))
 }
 
 impl PartialEq for Envelope {
@@ -359,3 +390,7 @@ pub fn now_millis() -> u64 {
 #[cfg(test)]
 #[path = "envelope_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "envelope_from_to_tests.rs"]
+mod from_to_tests;

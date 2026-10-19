@@ -2,8 +2,10 @@ mod state;
 mod store;
 mod types;
 
+mod pins;
+
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::{Arc, RwLock as StdRwLock};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, bail};
@@ -12,6 +14,7 @@ use tokio::sync::{Mutex as SaveMutex, RwLock};
 use crate::message::AgentId;
 use state::{CandidatePeer, DirectoryState, EnrolledPeer, LiveObservation};
 
+pub use pins::{PinningSnapshot, PinningSnapshotHandle};
 pub use store::{MAX_PEER_STORE_BYTES, PeerStore, StoredPeer};
 pub use types::{
     DialTarget, DirectoryError, ObservationId, ObservationSource, ObserveOutcome, PeerIdentity,
@@ -25,9 +28,6 @@ pub const MAX_CANDIDATE_PEERS: usize = 256;
 pub const MAX_LOCATORS_PER_PEER: usize = 8;
 pub const MAX_OBSERVATIONS_PER_PEER: usize = 16;
 pub const OBSERVATION_STALE_TIMEOUT: Duration = Duration::from_secs(60);
-
-pub type PinningSnapshot = Arc<BTreeMap<String, String>>;
-pub type PinningSnapshotHandle = Arc<StdRwLock<PinningSnapshot>>;
 
 #[derive(Debug, Clone)]
 pub struct PeerDirectory {
@@ -71,7 +71,7 @@ impl PeerDirectory {
                 bail!("peer store contains duplicate Agent ID {}", peer.agent_id);
             }
         }
-        let pins = Arc::new(StdRwLock::new(state.pinning_snapshot()));
+        let pins = PinningSnapshotHandle::from_snapshot(state.pinning_snapshot());
         Ok(Self {
             local_agent_id,
             state: Arc::new(RwLock::new(state)),
@@ -81,6 +81,7 @@ impl PeerDirectory {
         })
     }
 
+    /// Read-only handle to the published pin/enrollment snapshot.
     pub fn pinning_snapshot(&self) -> PinningSnapshotHandle {
         self.pins.clone()
     }

@@ -12,7 +12,7 @@ use std::time::Duration;
 use serde_json::json;
 use tracing::{debug, warn};
 
-use crate::ipc::{DaemonReply, ServiceMatch, ServiceSummary};
+use crate::ipc::{DaemonReply, ServiceMatch, ServiceSummary, bounded_who_can_reply};
 use crate::manifest::Manifest;
 use crate::message::{AgentId, Envelope, MessageKind};
 use crate::peer_directory::PeerTrust;
@@ -25,7 +25,11 @@ pub(crate) const WHO_CAN_PULL_TIMEOUT: Duration = Duration::from_secs(5);
 /// Cached manifests older than this are re-pulled on the next `who_can`.
 pub(crate) const WHO_CAN_CACHE_TTL: Duration = Duration::from_secs(60);
 
-pub(super) async fn handle(ctx: &DaemonContext, query: Option<String>) -> DaemonReply {
+pub(super) async fn handle(
+    ctx: &DaemonContext,
+    query: Option<String>,
+    req_id: Option<String>,
+) -> DaemonReply {
     // Backpressure: one `who_can` computation runs at a time. Concurrent
     // queries would stack unbounded concurrent pulls; queued queries instead
     // wait here, then re-read the now-fresh cache cheaply.
@@ -104,12 +108,7 @@ pub(super) async fn handle(ctx: &DaemonContext, query: Option<String>) -> Daemon
     unreachable.sort();
     unreachable.dedup();
 
-    DaemonReply::WhoCan {
-        ok: true,
-        matches,
-        unreachable,
-        req_id: None,
-    }
+    bounded_who_can_reply(matches, unreachable, req_id)
 }
 
 enum PullOutcome {

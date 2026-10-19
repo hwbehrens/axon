@@ -54,7 +54,7 @@ pub(in crate::app::doctor) async fn check_config(
                     false,
                     true,
                     format!(
-                        "config.yaml parse/load error: {err}; run `axon doctor --fix` to back up and reset"
+                        "config.yaml parse/load error: {err:#}; run `axon doctor --fix` to back up and reset"
                     ),
                 );
             }

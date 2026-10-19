@@ -1,9 +1,10 @@
 use std::collections::HashMap;
 use std::fs;
-use std::os::unix::fs::{FileTypeExt, PermissionsExt};
+use std::os::unix::fs::FileTypeExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use tokio::net::UnixListener;
@@ -12,6 +13,7 @@ use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
 use super::auth;
+use super::bind::bind_socket;
 use super::client_handler::handle_client;
 use super::protocol::{
     CommandEvent, DaemonReply, EncodeLineError, IpcErrorCode, WhoamiInfo, encode_reply_line,
@@ -94,24 +96,11 @@ impl IpcServer {
                 })?;
         }
 
-        if let Some(parent) = socket_path.parent()
-            && !parent.exists()
-        {
-            tokio::fs::create_dir_all(parent)
-                .await
-                .with_context(|| format!("failed to create socket dir: {}", parent.display()))?;
-        }
-
-        let listener = UnixListener::bind(&socket_path)
-            .with_context(|| format!("failed to bind unix socket: {}", socket_path.display()))?;
-        tokio::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600))
-            .await
-            .with_context(|| {
-                format!(
-                    "failed to set socket permissions: {}",
-                    socket_path.display()
-                )
-            })?;
+        // Bind inside a private staging dir, then rename into place. The
+        // final path must never exist with a umask-derived mode between bind
+        // and chmod (spec/IPC.md §2 requires 0600); `bind_socket` publishes
+        // it already chmodded and creates missing parents.
+        let listener = bind_socket(&socket_path)?;
 
         let owner_uid = unsafe { libc::getuid() };
         let max_client_queue = config.max_client_queue;
@@ -168,13 +157,14 @@ impl IpcServer {
             clients.get(&client_id).map(|client| client.tx.clone())
         };
         if let Some(tx) = tx {
-            let send_result =
-                tokio::time::timeout(std::time::Duration::from_secs(2), tx.send(line)).await;
-            match send_result {
-                Ok(Ok(())) => {}
-                Ok(Err(_)) | Err(_) => {
-                    self.close_client(client_id).await;
-                }
+            // Non-blocking: control commands send their replies from the
+            // daemon's control loop, so awaiting queue capacity here would
+            // let one non-reading client stall every other client's
+            // commands (I7). Queue overflow disconnects the lagging client
+            // instead of silently dropping the reply (spec/IPC.md §7), the
+            // same policy broadcasts already use.
+            if tx.try_send(line).is_err() {
+                self.close_client(client_id).await;
             }
         }
         Ok(())
@@ -377,15 +367,31 @@ impl IpcServer {
         let tasks = self.tasks.clone();
 
         self.tasks.spawn(async move {
+            let mut accept_failures: u32 = 0;
             loop {
                 let accepted = tokio::select! {
                     _ = server_cancel.cancelled() => break,
                     accepted = listener.accept() => accepted,
                 };
                 let (socket, _) = match accepted {
-                    Ok(v) => v,
+                    Ok(v) => {
+                        accept_failures = 0;
+                        v
+                    }
                     Err(err) => {
-                        tracing::warn!(error = %err, "failed to accept IPC connection");
+                        // Persistent accept errors (e.g. EMFILE) must not
+                        // spin the loop at 100% CPU; back off, bounded, and
+                        // stay cancellable for shutdown.
+                        accept_failures = accept_failures.saturating_add(1);
+                        tracing::warn!(
+                            error = %err,
+                            failures = accept_failures,
+                            "failed to accept IPC connection"
+                        );
+                        tokio::select! {
+                            _ = server_cancel.cancelled() => break,
+                            _ = tokio::time::sleep(accept_backoff(accept_failures)) => {}
+                        }
                         continue;
                     }
                 };
@@ -457,6 +463,13 @@ impl IpcServer {
             }
         });
     }
+}
+
+/// Bounded exponential backoff for repeated accept failures (EMFILE,
+/// resource exhaustion). Capped at one second so recovery stays prompt
+/// while a persistent error can no longer spin the accept loop.
+fn accept_backoff(failures: u32) -> Duration {
+    Duration::from_millis((10u64 << failures.min(6)).min(1_000))
 }
 
 #[cfg(test)]

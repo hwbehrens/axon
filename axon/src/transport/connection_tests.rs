@@ -10,6 +10,27 @@ fn agent_b() -> AgentId {
 }
 
 #[test]
+fn malformed_envelope_reason_is_bounded() {
+    // serde_json embeds an unexpected string in its error text; an attacker
+    // could otherwise push the whole message into a log line. SPEC.md §9
+    // requires the drop to be logged, so the logged reason must be capped.
+    let huge = "x".repeat(4096);
+    let err = serde_json::from_str::<u64>(&format!("\"{huge}\"")).expect_err("not a u64");
+    let text = err.to_string();
+    let reason = super::streams::bounded_malformed_reason(&err);
+    assert!(
+        reason.chars().count() <= 257,
+        "logged reason must be bounded, got {} chars",
+        reason.chars().count()
+    );
+    if text.chars().count() > 257 {
+        assert!(reason.ends_with('…'), "truncation must be marked");
+    } else {
+        assert_eq!(reason, text, "short reasons pass through unchanged");
+    }
+}
+
+#[test]
 fn default_error_response_contract() {
     let req = Envelope::new(agent_a(), agent_b(), MessageKind::Request, json!({}));
     let resp = default_error_response(&req, &agent_b());

@@ -29,7 +29,7 @@
 
 use anyhow::anyhow;
 use tokio::task::JoinHandle;
-use tracing::debug;
+use tracing::{debug, warn};
 
 use super::state::DirectoryState;
 use super::types::DirectoryError;
@@ -113,7 +113,8 @@ impl PeerDirectory {
             let state = self.state.read().await;
             build(&state)?
         };
-        self.store
+        let durable = self
+            .store
             .save(plan.saved_state.stored_peers())
             .await
             .map_err(DirectoryError::Persist)?;
@@ -122,6 +123,16 @@ impl PeerDirectory {
         let pins = state.pinning_snapshot();
         drop(state);
         self.publish_pins(pins);
+        if !durable {
+            // The edit is committed and live, but the rename's durability is
+            // uncertain (parent-directory fsync failed after rename; see
+            // `store.rs`). Surface that here rather than letting a caller
+            // treat the edit as fully durable.
+            warn!(
+                durable = false,
+                "peer-directory edit committed with uncertain durability: content is live but the store rename may not survive a crash"
+            );
+        }
         Ok(plan.value)
     }
 
@@ -132,9 +143,6 @@ impl PeerDirectory {
     /// `Arc<StdRwLock<..>>` would strand them on a frozen snapshot. See the
     /// field doc on `PeerDirectory::pins`.
     fn publish_pins(&self, pins: PinningSnapshot) {
-        match self.pins.write() {
-            Ok(mut guard) => *guard = pins,
-            Err(poisoned) => *poisoned.into_inner() = pins,
-        }
+        self.pins.replace(pins);
     }
 }
