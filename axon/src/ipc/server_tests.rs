@@ -245,6 +245,13 @@ async fn oversized_request_event_fails_delivery_explicitly() {
         MessageKind::Request,
         json!({"pad": "x".repeat(70_000)}),
     );
+    let typed = server.try_send_request_event(1, &huge_request).await;
+    assert!(
+        matches!(typed, Err(RequestEventError::TooLarge(_))),
+        "an oversized event must be classified TooLarge so the daemon keeps \
+         a live handler's lease: {typed:?}"
+    );
+    // The historical `anyhow::Result` entry point stays source-compatible.
     let result = server.send_request_event(1, &huge_request).await;
     assert!(
         result.is_err(),
@@ -252,6 +259,27 @@ async fn oversized_request_event_fails_delivery_explicitly() {
          remote requester one terminal error response"
     );
     assert!(rx.try_recv().is_err(), "nothing may be delivered");
+}
+
+#[tokio::test]
+async fn overflowed_request_event_closes_the_handler_and_is_classified() {
+    let (tx, _rx) = mpsc::channel::<Arc<str>>(1);
+    tx.try_send(Arc::from("{\"prefill\":true}"))
+        .expect("prefill the handler's bounded queue");
+    let mut clients = HashMap::new();
+    clients.insert(1u64, tx);
+    let server = test_server_with_clients(clients);
+
+    let small = Envelope::new(agent_a(), agent_b(), MessageKind::Request, json!({"q": 1}));
+    let result = server.try_send_request_event(1, &small).await;
+    assert!(
+        matches!(result, Err(RequestEventError::QueueOverflow)),
+        "queue overflow must be classified so the lease is terminated: {result:?}"
+    );
+    assert!(
+        server.connected_client_ids().await.is_empty(),
+        "an overflowed handler is closed, never silently skipped (spec/IPC.md §7)"
+    );
 }
 
 #[tokio::test]

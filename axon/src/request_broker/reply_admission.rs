@@ -11,7 +11,7 @@
 
 use uuid::Uuid;
 
-use crate::ipc::{DaemonReply, encode_reply_line};
+use crate::ipc::{DaemonReply, MAX_REQ_ID_BYTES, encode_reply_line};
 use crate::message::{Envelope, MAX_MESSAGE_SIZE};
 
 /// True when `response` survives the wire bound and the requester-side
@@ -21,9 +21,13 @@ use crate::message::{Envelope, MAX_MESSAGE_SIZE};
 /// `Envelope::response_to` sets the same `from`/`to` the requester's daemon
 /// restores on receipt and the serialization shape is identical, so the
 /// wrapped size computed here matches the frame the requester will build.
-/// The optional `req_id` echo is bounded at IPC ingress; a caller that
-/// combines a near-limit response with a long `req_id` still receives the
-/// spec'd explicit `message_too_large` instead of a truncated line.
+///
+/// The requester's `req_id` is NOT carried on the wire, so the model
+/// reserves its worst case: `MAX_REQ_ID_BYTES` raw bytes, each escaped by
+/// serde_json into a 6-byte `\uXXXX` sequence. Modeling only the ingress
+/// bound let a near-limit response be admitted and acked here, then replaced
+/// by the requester's `message_too_large` fallback — completing the request
+/// without delivering the response.
 pub(super) fn admits(msg_id: Uuid, response: &Envelope) -> bool {
     let wire_fits = response
         .wire_encode()
@@ -31,10 +35,13 @@ pub(super) fn admits(msg_id: Uuid, response: &Envelope) -> bool {
     if !wire_fits {
         return false;
     }
+    // NUL escapes to `\u0000` (six bytes), the maximal JSON expansion per
+    // input byte, so this models the largest possible echoed `req_id`.
+    let worst_case_req_id = "\u{0}".repeat(MAX_REQ_ID_BYTES);
     let send_reply = DaemonReply::SendOk {
         ok: true,
         msg_id,
-        req_id: None,
+        req_id: Some(worst_case_req_id),
         response: Some(response.clone()),
     };
     encode_reply_line(&send_reply).is_ok()

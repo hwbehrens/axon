@@ -1,4 +1,5 @@
 pub(crate) mod command_handler;
+mod handler_lifecycle;
 mod lockfile;
 mod who_can;
 
@@ -25,8 +26,10 @@ use crate::peer_directory::{
     OBSERVATION_STALE_TIMEOUT, ObservationId, ObservationSource, ObserveOutcome, PeerDirectory,
     PeerObservation, PeerStore, PeerTrust,
 };
-use crate::request_broker::{BeginRequest, RequestBroker};
-use crate::transport::{ConnectionManager, PairRequest, ResponseHandlerFn};
+use crate::request_broker::RequestBroker;
+use crate::transport::{ConnectionManager, PairRequest};
+
+use handler_lifecycle::{make_response_handler, reconcile_after_lag, release_lease_if_client_gone};
 
 const MAX_CONNECTIONS: usize = 128;
 const KEEPALIVE: Duration = Duration::from_secs(15);
@@ -213,9 +216,7 @@ pub async fn run_daemon(opts: DaemonOptions) -> Result<()> {
                     // Make the gap explicit and reconcile clients so lost
                     // disconnects cannot pin a lease (I16).
                     warn!(count, "inbound transport event gap; clients may have missed events");
-                    let live: std::collections::HashSet<_> =
-                        ipc.connected_client_ids().await.into_iter().collect();
-                    broker.reconcile_clients(&live).await;
+                    reconcile_after_lag(&ipc, &broker).await;
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             },
@@ -253,9 +254,7 @@ pub async fn run_daemon(opts: DaemonOptions) -> Result<()> {
                     // lease and pending-request state against live clients so
                     // a disconnected handler cannot retain its lease.
                     warn!(count, "IPC disconnect notifications lagged; reconciling");
-                    let live: std::collections::HashSet<_> =
-                        ipc.connected_client_ids().await.into_iter().collect();
-                    broker.reconcile_clients(&live).await;
+                    reconcile_after_lag(&ipc, &broker).await;
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             },
@@ -303,33 +302,6 @@ pub async fn run_daemon(opts: DaemonOptions) -> Result<()> {
     cleanup_result?;
     info!("shutdown complete");
     Ok(())
-}
-
-fn make_response_handler(ipc: IpcServer, broker: RequestBroker) -> ResponseHandlerFn {
-    Arc::new(move |request| {
-        let ipc = ipc.clone();
-        let broker = broker.clone();
-        Box::pin(async move {
-            match broker.begin(request.clone(), INBOUND_REQUEST_TIMEOUT).await {
-                BeginRequest::Respond(response) => Some(response),
-                BeginRequest::Deliver(delivery) => {
-                    if ipc
-                        .send_request_event(delivery.client_id, &request)
-                        .await
-                        .is_err()
-                    {
-                        // Release the gone/overflow-closed handler's lease (B1).
-                        broker.disconnect(delivery.client_id).await;
-                    }
-                    Some(
-                        broker
-                            .await_response(delivery, INBOUND_REQUEST_TIMEOUT)
-                            .await,
-                    )
-                }
-            }
-        })
-    })
 }
 
 async fn handle_inbound(ipc: &IpcServer, counters: &Counters, envelope: &Envelope) {
@@ -423,13 +395,6 @@ async fn observe_and_publish(
             warn!(peer = %agent_id, "peer observation capacity reached");
         }
         ObserveOutcome::IgnoredSelf | ObserveOutcome::EnrolledPeerRefreshed => {}
-    }
-}
-
-/// Release the handler lease if its client is already gone (B1).
-async fn release_lease_if_client_gone(ipc: &IpcServer, broker: &RequestBroker, client_id: u64) {
-    if !ipc.connected_client_ids().await.contains(&client_id) {
-        broker.disconnect(client_id).await;
     }
 }
 

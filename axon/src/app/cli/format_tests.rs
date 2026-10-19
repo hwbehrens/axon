@@ -24,6 +24,65 @@ fn peers_renderer_outputs_table_headers() {
     assert!(output.contains("alice"));
 }
 
+/// The bounded `peers` reply marks dropped detail with `truncated`; the
+/// human path must surface it instead of printing a subset as complete.
+#[test]
+fn peers_renderer_discloses_truncation_for_retained_peers() {
+    let output = render_peers_human(&json!({
+        "ok": true,
+        "truncated": true,
+        "peers": [{
+            "agent_id": "ed25519.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "public_key": "Zm9v",
+            "trust": "enrolled",
+            "locators": [],
+            "status": "enrolled",
+            "display_name": null
+        }]
+    }))
+    .expect("table output");
+
+    assert!(
+        output.contains("truncated"),
+        "a truncated reply must be disclosed, never rendered as complete: {output}"
+    );
+}
+
+/// The minimal bounded reply (not even a bare peer fits) must not read as
+/// an empty directory.
+#[test]
+fn peers_renderer_discloses_truncation_with_no_retained_peers() {
+    let output = render_peers_human(&json!({
+        "ok": true,
+        "truncated": true,
+        "peers": []
+    }))
+    .expect("truncation notice");
+
+    assert!(!output.contains("No peers."), "{output}");
+    assert!(output.contains("truncated"), "{output}");
+}
+
+/// A complete reply keeps its plain rendering: no marker when nothing was
+/// dropped.
+#[test]
+fn peers_renderer_stays_silent_when_complete() {
+    let output = render_peers_human(&json!({
+        "ok": true,
+        "peers": [{
+            "agent_id": "ed25519.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "public_key": "Zm9v",
+            "trust": "enrolled",
+            "locators": ["127.0.0.1:7100"],
+            "status": "connected",
+            "display_name": "alice"
+        }]
+    }))
+    .expect("table output");
+
+    assert!(!output.contains("truncated"), "{output}");
+}
+
 #[test]
 fn status_renderer_outputs_key_lines() {
     let output = render_status_human(&json!({

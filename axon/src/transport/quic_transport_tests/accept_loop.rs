@@ -8,6 +8,10 @@
 //!    peer was re-enrolled while the revocation pair was parked. The
 //!    existing epoch tests drive the gate synthetically; this interleaves a
 //!    real mTLS handshake with `revoke_peer`.
+//! 3. The pre-authentication handshake bound must saturate: once every
+//!    pre-auth permit is held by a handshake that has not finished, the next
+//!    inbound handshake is refused outright (`Incoming::refuse`, i.e. a
+//!    transport-level `CONNECTION_REFUSED`) instead of being queued.
 
 use std::net::SocketAddr;
 use std::sync::atomic::Ordering;
@@ -20,7 +24,7 @@ use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer, ServerName, UnixTime
 use rustls::{DigitallySignedStruct, SignatureScheme};
 use serde_json::json;
 
-use super::fixtures::make_transport_pair;
+use super::fixtures::{make_transport_pair, make_transport_pair_with_options};
 use crate::identity::Identity;
 use crate::message::{AgentId, Envelope, MessageKind};
 use crate::peer_directory::{PeerIdentity, PeerLocator};
@@ -97,7 +101,54 @@ impl ServerCertVerifier for StallingVerifier {
     }
 }
 
-fn stalling_client_endpoint(identity: &Identity, stall: Arc<StallingVerifier>) -> quinn::Endpoint {
+/// Client certificate verifier that accepts any server certificate, so a
+/// plain client can complete a normal handshake against the test daemons.
+#[derive(Debug)]
+struct AcceptAnyVerifier;
+
+impl ServerCertVerifier for AcceptAnyVerifier {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _server_name: &ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: UnixTime,
+    ) -> Result<ServerCertVerified, rustls::Error> {
+        Ok(ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        Err(rustls::Error::General("TLS 1.2 not supported".to_string()))
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls13_signature(
+            message,
+            cert,
+            dss,
+            &rustls::crypto::ring::default_provider().signature_verification_algorithms,
+        )
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        rustls::crypto::ring::default_provider()
+            .signature_verification_algorithms
+            .supported_schemes()
+    }
+}
+
+fn client_endpoint(identity: &Identity, verifier: Arc<dyn ServerCertVerifier>) -> quinn::Endpoint {
     rustls::crypto::ring::default_provider()
         .install_default()
         .ok();
@@ -108,7 +159,7 @@ fn stalling_client_endpoint(identity: &Identity, stall: Arc<StallingVerifier>) -
     let key = PrivatePkcs8KeyDer::from(cert.key_der);
     let mut config = rustls::ClientConfig::builder()
         .dangerous()
-        .with_custom_certificate_verifier(stall)
+        .with_custom_certificate_verifier(verifier)
         .with_client_auth_cert(cert_chain, key.into())
         .expect("client auth config");
     config.alpn_protocols = vec![b"axon/1".to_vec()];
@@ -146,7 +197,7 @@ fn spawn_stalling_client(
             .build()
             .expect("client runtime");
         runtime.block_on(async move {
-            let endpoint = stalling_client_endpoint(&identity, stall);
+            let endpoint = client_endpoint(&identity, stall);
             match endpoint.connect(addr, &server_name) {
                 Ok(connecting) => {
                     if let Ok(connection) = connecting.await {
@@ -172,6 +223,37 @@ async fn wait_for_verifier(entered_rx: mpsc::Receiver<()>) {
 async fn release_client(release_tx: mpsc::Sender<()>, handle: std::thread::JoinHandle<()>) {
     let _ = release_tx.send(());
     let _ = tokio::task::spawn_blocking(move || handle.join()).await;
+}
+
+/// Attempt one complete handshake with a client that accepts any server
+/// certificate. Returns how long the attempt took and its outcome, so a test
+/// can distinguish a prompt refusal from a slow timeout.
+async fn attempt_connection(
+    identity: &Identity,
+    addr: SocketAddr,
+    server_name: &str,
+) -> (Duration, Result<quinn::Connection, quinn::ConnectionError>) {
+    let endpoint = client_endpoint(identity, Arc::new(AcceptAnyVerifier));
+    let started = Instant::now();
+    let result = tokio::time::timeout(
+        Duration::from_secs(5),
+        endpoint.connect(addr, server_name).expect("connect start"),
+    )
+    .await
+    .expect("connection attempt must resolve instead of hanging");
+    let elapsed = started.elapsed();
+    endpoint.close(0u32.into(), b"test attempt complete");
+    (elapsed, result)
+}
+
+/// True when the server refused the handshake before authentication, which
+/// is the only thing that produces a transport-level `CONNECTION_REFUSED`.
+fn refused_before_auth(result: &Result<quinn::Connection, quinn::ConnectionError>) -> bool {
+    matches!(
+        result,
+        Err(quinn::ConnectionError::ConnectionClosed(close))
+            if close.error_code == quinn::TransportErrorCode::CONNECTION_REFUSED
+    )
 }
 
 #[tokio::test]
@@ -209,6 +291,56 @@ async fn stalled_handshake_does_not_block_later_inbound_connections() {
     );
 
     release_client(release_tx, handle).await;
+}
+
+#[tokio::test]
+async fn saturated_preauth_handshake_bound_refuses_further_inbound_handshakes() {
+    // B tolerates exactly one pre-authentication handshake, so a single
+    // parked handshake saturates the bound.
+    let pair = make_transport_pair_with_options(128, 1, None).await;
+    let agent_a = AgentId::parse(pair.id_a.agent_id()).unwrap();
+    let addr_b = pair.transport_b.local_addr().unwrap();
+    let server_name = pair.id_b.agent_id().to_string();
+
+    // Park one real inbound handshake at B mid-flight: it holds B's only
+    // pre-auth permit until the test releases it.
+    let (entered_rx, release_tx, handle) =
+        spawn_stalling_client(pair.id_a.clone(), addr_b, server_name.clone());
+    wait_for_verifier(entered_rx).await;
+
+    // The next inbound handshake must be refused at the accept path, i.e. it
+    // fails fast with a transport-level CONNECTION_REFUSED rather than
+    // waiting for a permit or being admitted.
+    let (elapsed, result) = attempt_connection(&pair.id_a, addr_b, &server_name).await;
+    assert!(
+        refused_before_auth(&result),
+        "a saturated pre-auth handshake bound must refuse the next handshake, got {result:?}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "a saturated bound must refuse promptly, took {elapsed:?}"
+    );
+    assert!(
+        !pair.transport_b.has_connection(&agent_a).await,
+        "a refused pre-auth handshake must not be admitted"
+    );
+
+    // Releasing the parked handshake frees the permit: the bound refuses only
+    // while it is actually saturated, so later attempts are no longer
+    // refused before authentication.
+    release_client(release_tx, handle).await;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let (_, result) = attempt_connection(&pair.id_a, addr_b, &server_name).await;
+        if !refused_before_auth(&result) {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "pre-auth handshake permit must be released after the parked handshake finishes"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
 }
 
 #[tokio::test]

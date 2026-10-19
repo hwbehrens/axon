@@ -17,7 +17,6 @@ mod capabilities;
 mod drain;
 mod enrollment;
 mod lease;
-mod lease_probe;
 mod saturation;
 mod traffic;
 

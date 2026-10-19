@@ -21,6 +21,10 @@ use super::protocol::{
 };
 use crate::message::Envelope;
 
+#[path = "request_event.rs"]
+mod request_event;
+pub use request_event::RequestEventError;
+
 #[derive(Clone)]
 struct ClientHandle {
     tx: mpsc::Sender<Arc<str>>,
@@ -198,41 +202,6 @@ impl IpcServer {
             }
         };
         self.broadcast_line(line).await
-    }
-
-    pub async fn send_request_event(&self, client_id: u64, envelope: &Envelope) -> Result<()> {
-        let event = DaemonReply::RequestEvent {
-            event: "request",
-            request_id: envelope.id,
-            from: envelope
-                .from
-                .as_ref()
-                .map(ToString::to_string)
-                .unwrap_or_default(),
-            envelope: envelope.clone(),
-        };
-        // An oversized request event fails delivery explicitly: the caller
-        // (the daemon's response handler) sends the remote requester one
-        // terminal error response, per spec/IPC.md §6.2.
-        let line = match encode_reply_line(&event) {
-            Ok(line) => line,
-            Err(EncodeLineError::TooLarge(bytes)) => anyhow::bail!(
-                "IPC request event for {} exceeds the line limit ({bytes} bytes)",
-                envelope.id
-            ),
-            Err(EncodeLineError::Serialize(err)) => {
-                anyhow::bail!("failed to serialize request event: {err}")
-            }
-        };
-        let client = self.clients.lock().await.get(&client_id).cloned();
-        let Some(client) = client else {
-            anyhow::bail!("IPC request handler disconnected");
-        };
-        if client.tx.try_send(line).is_err() {
-            self.close_client(client_id).await;
-            anyhow::bail!("IPC request handler queue overflowed");
-        }
-        Ok(())
     }
 
     pub fn subscribe_disconnects(&self) -> broadcast::Receiver<u64> {

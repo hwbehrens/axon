@@ -3,6 +3,7 @@ use std::time::Duration;
 use serde_json::json;
 
 use super::*;
+use crate::ipc::{DaemonReply, MAX_IPC_LINE_LENGTH, encode_reply_line};
 use crate::message::MAX_MESSAGE_SIZE;
 
 pub(super) fn agent(value: char) -> AgentId {
@@ -314,6 +315,73 @@ async fn wire_legal_reply_that_overflows_the_ipc_frame_is_rejected() {
         )
         .await
         .expect("reply within both bounds must be accepted");
+    let response = delivery.response.await.expect("terminal response");
+    assert_eq!(response.payload_value().unwrap()["answer"], "fits");
+}
+
+/// The requester's daemon frames its `send` reply with the requester-side
+/// `req_id`, which is not carried on the wire. Admission must reserve the
+/// worst-case escaped echo, or a near-limit response is acked here and then
+/// lost to the requester's `message_too_large` fallback.
+#[tokio::test]
+async fn reply_admission_reserves_the_requester_req_id_echo() {
+    let broker = RequestBroker::new(agent('a'));
+    broker.register(1, None).await.unwrap();
+    let original = request();
+    let BeginRequest::Deliver(delivery) = broker.begin(original.clone(), REQUEST_TTL).await else {
+        panic!("delivery expected");
+    };
+
+    // Size the response so the frame fits with a small margin when no
+    // `req_id` is echoed, but cannot fit with the worst-case echo.
+    let frame = |req_id: Option<String>, pad: usize| DaemonReply::SendOk {
+        ok: true,
+        msg_id: original.id,
+        req_id,
+        response: Some(Envelope::response_to(
+            &original,
+            agent('a'),
+            MessageKind::Response,
+            json!({"pad": "x".repeat(pad)}),
+        )),
+    };
+    let empty_len = serde_json::to_string(&frame(None, 0)).unwrap().len();
+    let pad = MAX_IPC_LINE_LENGTH - 1 - empty_len - 64;
+    let worst_case_req_id = "\u{0}".repeat(crate::ipc::MAX_REQ_ID_BYTES);
+    assert!(
+        encode_reply_line(&frame(None, pad)).is_ok(),
+        "the fixture must fit without the req_id echo"
+    );
+    assert!(
+        encode_reply_line(&frame(Some(worst_case_req_id), pad)).is_err(),
+        "the fixture must overflow once the worst-case req_id echo is modeled"
+    );
+
+    assert_eq!(
+        broker
+            .reply(
+                1,
+                original.id,
+                MessageKind::Response,
+                json!({"pad": "x".repeat(pad)}),
+                None,
+            )
+            .await,
+        Err(BrokerError::InvalidPayload),
+        "a response that cannot survive the requester's frame must be rejected before acking"
+    );
+
+    // The request is still pending: a smaller reply is still admitted.
+    broker
+        .reply(
+            1,
+            original.id,
+            MessageKind::Response,
+            json!({"answer": "fits"}),
+            None,
+        )
+        .await
+        .expect("a fitting reply must be admitted after the rejection");
     let response = delivery.response.await.expect("terminal response");
     assert_eq!(response.payload_value().unwrap()["answer"], "fits");
 }

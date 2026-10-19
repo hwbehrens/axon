@@ -28,7 +28,10 @@ pub(crate) fn bind_socket(socket_path: &Path) -> Result<UnixListener> {
     // The staging name only has to be unique and short: `sockaddr_un.sun_path`
     // is 108 bytes on Linux and 104 on macOS (NUL included), so a verbose
     // name would reject otherwise-valid long socket paths.
-    let staging = parent.join(format!(".s{:08x}", uuid::Uuid::new_v4().as_u128() as u32));
+    let staging = parent.join(format!(
+        "{STAGING_DIR_PREFIX}{:08x}",
+        uuid::Uuid::new_v4().as_u128() as u32
+    ));
     let staged = staging.join("s");
     if staged.as_os_str().len() > max_socket_path_bytes() {
         // The fallback keeps the historical bind-then-chmod order for paths
@@ -83,6 +86,10 @@ fn bind_and_restrict(socket_path: &Path) -> Result<UnixListener> {
     )?;
     Ok(listener)
 }
+
+/// Prefix of the private staging directory name. Shared with the cleanup
+/// tests so their leftover guard cannot drift from the real producer name.
+pub(super) const STAGING_DIR_PREFIX: &str = ".s";
 
 /// Platform `sun_path` capacity excluding the NUL terminator.
 fn max_socket_path_bytes() -> usize {
