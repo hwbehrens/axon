@@ -3,8 +3,16 @@ use serde_json::Value;
 
 pub fn render_peers_human(response: &Value) -> Option<String> {
     let peers = response.get("peers")?.as_array()?;
+    let truncated = response
+        .get("truncated")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     if peers.is_empty() {
-        return Some("No peers.".to_string());
+        return Some(if truncated {
+            "Peers omitted: the reply was truncated to fit the IPC line limit.".to_string()
+        } else {
+            "No peers.".to_string()
+        });
     }
 
     let mut rows: Vec<[String; 5]> = Vec::with_capacity(peers.len());
@@ -91,7 +99,11 @@ pub fn render_peers_human(response: &Value) -> Option<String> {
         ));
     }
 
-    Some(out.trim_end().to_string())
+    let mut rendered = out.trim_end().to_string();
+    if truncated {
+        rendered.push_str("\n\nNote: reply truncated; some peers or peer details were omitted.");
+    }
+    Some(rendered)
 }
 
 pub fn render_status_human(response: &Value) -> Option<String> {

@@ -386,7 +386,12 @@ pub(crate) fn init_tracing(verbose: u8, quiet: bool) {
     };
     let default = format!("{level},mdns_sd=warn");
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default));
-    let _ = tracing_subscriber::fmt().with_env_filter(filter).try_init();
+    // Logs go to stderr so stdout stays reserved for command output; otherwise
+    // `-v` interleaves log lines with `--json` on machine-readable commands.
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr)
+        .try_init();
 }
 
 fn parse_agent_id_arg(input: &str) -> std::result::Result<String, String> {

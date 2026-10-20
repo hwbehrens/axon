@@ -108,3 +108,47 @@ async fn send_unknown_unidirectional_kind_preserves_name() {
     assert_eq!(received.kind, MessageKind::unknown(future_kind));
     assert_eq!(received.kind.as_str(), future_kind);
 }
+
+/// I16 publisher half: broadcast eviction must be observable as a gap, not
+/// silently dropped. A counted subscription folds `RecvError::Lagged` into
+/// the manager's gap counter while preserving the raw receiver contract.
+#[tokio::test]
+async fn counted_subscription_records_broadcast_gaps() {
+    use crate::transport::InboundReceiver;
+
+    let pair = make_transport_pair().await;
+    let mut rx: InboundReceiver = pair.transport_b.subscribe_inbound_counted();
+    let envelope = std::sync::Arc::new(Envelope::new(
+        AgentId::parse(pair.id_a.agent_id()).unwrap(),
+        AgentId::parse(pair.id_b.agent_id()).unwrap(),
+        MessageKind::Message,
+        json!({"seq": 0}),
+    ));
+
+    // Fill the broadcast ring and then some while the subscriber never
+    // polls: the oldest envelopes are evicted and must be reported.
+    for _ in 0..600 {
+        pair.transport_b
+            .inbound_tx
+            .send(envelope.clone())
+            .expect("counted receiver is subscribed");
+    }
+
+    let err = rx
+        .recv()
+        .await
+        .expect_err("lagging receiver must observe a gap");
+    let tokio::sync::broadcast::error::RecvError::Lagged(missed) = err else {
+        panic!("expected Lagged, got {err:?}");
+    };
+    assert!(missed > 0, "the ring must have evicted envelopes");
+    assert_eq!(
+        pair.transport_b.inbound_gap_count(),
+        missed,
+        "the gap counter must match the reported lag"
+    );
+    assert!(
+        rx.recv().await.is_ok(),
+        "surviving envelopes remain readable"
+    );
+}

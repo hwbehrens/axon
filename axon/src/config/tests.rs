@@ -51,6 +51,91 @@ async fn legacy_peer_entries_are_rejected_instead_of_imported() {
 }
 
 #[tokio::test]
+async fn config_load_rejects_semantically_invalid_values() {
+    let root = tempdir().expect("tempdir");
+    let path = root.path().join("config.yaml");
+    tokio::fs::write(&path, "port: 0\n")
+        .await
+        .expect("write config");
+    let error = Config::load(&path)
+        .await
+        .expect_err("port 0 must not load as a valid config");
+    assert!(format!("{error:#}").contains("port 0"), "error: {error:#}");
+
+    tokio::fs::write(&path, "name: \"   \"\n")
+        .await
+        .expect("write config");
+    let error = Config::load(&path)
+        .await
+        .expect_err("blank name must not load as a valid config");
+    assert!(
+        format!("{error:#}").contains("name must not be empty"),
+        "error: {error:#}"
+    );
+}
+
+#[test]
+fn persisted_config_validate_accepts_defaults_and_boundaries() {
+    PersistedConfig::default().validate().expect("defaults");
+    PersistedConfig {
+        name: Some("alice".to_string()),
+        port: Some(1),
+        advertise_addr: Some("alice.local:7100".to_string()),
+    }
+    .validate()
+    .expect("boundary values");
+}
+
+#[tokio::test]
+async fn save_persisted_config_replaces_atomically_and_leaves_no_temp_files() {
+    let root = tempdir().expect("tempdir");
+    let path = root.path().join("config.yaml");
+    tokio::fs::write(&path, "name: old\n")
+        .await
+        .expect("seed config");
+    let replacement = PersistedConfig {
+        name: Some("new".to_string()),
+        port: Some(7200),
+        advertise_addr: None,
+    };
+
+    save_persisted_config(&path, &replacement)
+        .await
+        .expect("save config");
+
+    assert_eq!(
+        load_persisted_config(&path).await.expect("load config"),
+        replacement
+    );
+    let leftovers: Vec<_> = std::fs::read_dir(root.path())
+        .expect("read dir")
+        .map(|entry| entry.expect("dir entry").file_name())
+        .filter(|name| name != "config.yaml")
+        .collect();
+    assert!(
+        leftovers.is_empty(),
+        "atomic save must not leave temporary files: {leftovers:?}"
+    );
+}
+
+#[tokio::test]
+async fn parse_error_context_is_accurate_without_legacy_peers() {
+    let root = tempdir().expect("tempdir");
+    let path = root.path().join("config.yaml");
+    tokio::fs::write(&path, "name: [unclosed\n")
+        .await
+        .expect("write config");
+
+    let error = load_persisted_config(&path)
+        .await
+        .expect_err("invalid YAML must fail");
+    assert!(
+        !error.to_string().contains("Legacy `peers` entries"),
+        "generic parse errors must not carry legacy-peer guidance: {error}"
+    );
+}
+
+#[tokio::test]
 async fn persisted_config_roundtrips() {
     let root = tempdir().expect("tempdir");
     let path = root.path().join("config.yaml");

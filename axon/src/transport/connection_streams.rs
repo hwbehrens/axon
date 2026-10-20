@@ -51,7 +51,11 @@ pub(super) async fn handle_uni_stream(
                 }
             }
             Err(err) => {
-                debug!(error = %err, "dropping malformed uni envelope");
+                warn!(
+                    error = %bounded_malformed_reason(&err),
+                    peer = peer_id,
+                    "dropping malformed uni envelope"
+                );
             }
         },
         Ok(Err(err)) => {
@@ -136,7 +140,11 @@ pub(super) async fn handle_bidi_stream(
         Ok(Ok(bytes)) => match serde_json::from_slice::<Envelope>(&bytes) {
             Ok(r) => r,
             Err(err) => {
-                debug!(error = %err, "dropping malformed bidi envelope");
+                warn!(
+                    error = %bounded_malformed_reason(&err),
+                    peer = peer_id,
+                    "dropping malformed bidi envelope"
+                );
                 return;
             }
         },
@@ -157,6 +165,19 @@ pub(super) async fn handle_bidi_stream(
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// SPEC.md §9 requires malformed-message drops to be logged at warning.
+/// serde_json's error text can embed attacker-controlled fragments (for an
+/// unexpected string it includes the string itself), so cap what is logged.
+pub(super) fn bounded_malformed_reason(err: &serde_json::Error) -> String {
+    const MAX_CHARS: usize = 256;
+    let text = err.to_string();
+    let mut bounded: String = text.chars().take(MAX_CHARS).collect();
+    if bounded.len() < text.len() {
+        bounded.push('…');
+    }
+    bounded
+}
 
 async fn send_response(send: &mut quinn::SendStream, response: &Envelope) {
     if let Ok(response_bytes) = response.wire_encode()

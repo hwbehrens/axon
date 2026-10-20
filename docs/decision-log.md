@@ -10,6 +10,8 @@ Each entry: ID, date, subsystem, one-paragraph summary covering motivation, deci
 
 | ID | Date | Subsystem | Title |
 |---|---|---|---|
+| DEC-028 | 2026-10-19 | daemon, app/doctor, docs | `daemon.pid` authority: the `flock` is authoritative, live-PID records are manual-only for doctor |
+| DEC-027 | 2026-10-19 | daemon, config, docs | Daemon startup ordering: state-root/lock first, then config, identity, peers, IPC, QUIC, discovery |
 | DEC-026 | 2026-02-17 | message, manifest, request_broker, ipc, daemon | Capability manifests: daemon-answered `describe`, `serve`-time publication, `who_can` derived view |
 | DEC-025 | 2026-09-01 | transport, daemon | Structural revocation pairing (`revoke_peer`) and fail-closed epoch-lock poisoning |
 | DEC-024 | 2026-08-26 | transport, peer_directory, ipc, daemon | Maintainability simplification: synchronous pin-snapshot admission gate, tripwire removal, registry read-path clarity, whoami flattening |
@@ -40,6 +42,18 @@ Each entry: ID, date, subsystem, one-paragraph summary covering motivation, deci
 ---
 
 ## Entries
+
+### DEC-028: `daemon.pid` authority — the `flock` is authoritative, live-PID records are manual-only for doctor
+
+Date: 2026-10-19 | Subsystem: daemon, app/doctor, docs
+
+`daemon.pid` has exactly one mutual-exclusion authority: the `flock(2)` a daemon holds for its lifetime. The PID line is a diagnostic publication, so a dead, empty, or malformed record never blocks startup and `doctor --fix` may remove it; the kernel releases a crashed daemon's lock when its descriptor closes. Two consequences are now explicit. **(1) Fail-closed backstop:** `DaemonLock::acquire` refuses to start when it wins the flock but the lock file names a live foreign process, because a pre-flock AXON daemon (or a daemon whose lock file was replaced) may still be running against the same state root. This deliberately trades availability for safety under PID reuse: a leftover record whose PID an unrelated live process later recycles keeps refusing startup until the record is removed, and the error names the file plus the removal guidance. No config flag disables the guard; PID reuse may refuse startup, never admit a second daemon. **(2) Doctor parity:** `axon doctor` classifies a lock with no live `flock` holder as stale only when its PID record is dead, empty, or malformed. A record naming a live process is a manual-only finding — `--fix` must never delete the record or the IPC socket, because both may belong to the recorded pre-flock daemon. Without that parity, `doctor --fix` could delete the guard record and the live daemon's socket, defeating the daemon's own backstop and enabling two daemons on one state root. The Hegel doctor machine models the live-PID-without-flock state as manual-only and asserts fix mode leaves the record in place.
+
+### DEC-027: Daemon startup ordering — state-root/lock first, then config, identity, peers, IPC, QUIC, discovery
+
+Date: 2026-10-19 | Subsystem: daemon, config, docs
+
+`spec/SPEC.md` §8 had drifted from the deliberate `run_daemon` order: it omitted state-root preparation and the single-instance lock, and put identity ahead of config. The order is now normative as implemented. **(1) State-root checks and lock precede all reads:** `ensure_root_exists` (create, symlink rejection, owner-only `0700` normalization) and `reject_legacy_peer_state` run before `DaemonLock::acquire`, and the lock is taken before config, identity, or `peers.json` are read, so a second daemon fails fast without observing or mutating shared state. **(2) Config precedes identity:** port/name are resolved before identity generation so a config error cannot leave a freshly created keypair behind and the advertised port is known when the identity is used. **(3) Peers load after identity:** `PeerDirectory` needs the local Agent ID for self-enrollment rejection, and a `peers.json` failure must not publish a listener. **(4) IPC socket before QUIC endpoint:** a transport bind failure tears the already-bound IPC listener down (`ipc.shutdown()`), and the ephemeral cert/bind happen inside `ConnectionManager::bind_cancellable`. **(5) Discovery last:** mDNS advertisement and reconnect/stale maintenance start only after both listeners exist. The clock sanity check between identity and peer load stays as a separate guard because every persisted observation timestamp depends on a plausible clock. `ensure_root_exists` continues to normalize an existing user-supplied root to `0700` (the directory holds identity and trust material) and now logs a warning; the README documents that behavior. Config saves also moved to same-directory temporary-file + atomic rename so startup cannot observe a truncated `config.yaml`.
 
 ### DEC-026: Capability manifests — daemon-answered `describe`, `serve`-time publication, `who_can` derived view
 

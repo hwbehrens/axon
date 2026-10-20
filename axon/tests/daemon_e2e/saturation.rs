@@ -39,77 +39,14 @@ async fn install_silent_handler(
 #[tokio::test]
 async fn saturated_sends_reject_excess_and_keep_control_responsive() {
     const TINY_BUDGET: usize = 2;
-    let port_a = free_port();
-    let port_b = free_port();
-
-    let root_a = tempfile::tempdir().unwrap();
-    let paths_a = AxonPaths::from_root(root_a.path().to_path_buf());
-    paths_a.ensure_root_exists().unwrap();
-    let identity_a = Identity::load_or_generate(&paths_a).unwrap();
-
-    let root_b = tempfile::tempdir().unwrap();
-    let paths_b = AxonPaths::from_root(PathBuf::from(root_b.path()));
-    paths_b.ensure_root_exists().unwrap();
-    let identity_b = Identity::load_or_generate(&paths_b).unwrap();
 
     // Mutual enrollment with known ports before either daemon starts; both
-    // daemons load the persisted pins at startup.
-    {
-        let directory_a = PeerDirectory::load(
-            AgentId::parse(identity_a.agent_id()).unwrap(),
-            PeerStore::new(paths_a.peers.clone()),
-        )
-        .await
-        .unwrap();
-        directory_a
-            .enroll(
-                PeerIdentity::from_public_key(identity_b.public_key_base64()).unwrap(),
-                vec![PeerLocator::Socket(
-                    format!("127.0.0.1:{port_b}").parse().unwrap(),
-                )],
-            )
-            .await
-            .unwrap();
-        let directory_b = PeerDirectory::load(
-            AgentId::parse(identity_b.agent_id()).unwrap(),
-            PeerStore::new(paths_b.peers.clone()),
-        )
-        .await
-        .unwrap();
-        directory_b
-            .enroll(
-                PeerIdentity::from_public_key(identity_a.public_key_base64()).unwrap(),
-                vec![PeerLocator::Socket(
-                    format!("127.0.0.1:{port_a}").parse().unwrap(),
-                )],
-            )
-            .await
-            .unwrap();
-    }
-
-    let spawn_daemon = |port: u16, root: &Path, budget: Option<usize>| {
-        let cancel = CancellationToken::new();
-        let task_cancel = cancel.clone();
-        let axon_root = root.to_path_buf();
-        let task = tokio::spawn(async move {
-            run_daemon(DaemonOptions {
-                port: Some(port),
-                disable_mdns: true,
-                axon_root: Some(axon_root),
-                cancel: Some(task_cancel),
-                max_inflight_sends: budget,
-            })
-            .await
-        });
-        (cancel, task)
-    };
-
-    let socket_b = paths_b.socket.clone();
-    let (cancel_b, task_b) = spawn_daemon(port_b, root_b.path(), None);
-    wait_for_socket(&socket_b).await;
-    let (cancel_a, task_a) = spawn_daemon(port_a, root_a.path(), Some(TINY_BUDGET));
-    let socket_a = paths_a.socket.clone();
-    wait_for_socket(&socket_a).await;
+    // daemons load the persisted pins at startup. The shared pair helper
+    // re-enrolls from scratch if a probed port is lost to the probe-to-bind
+    // race, so the enrolled locators always name the bound ports.
+    let (daemon_a, daemon_b) = prepare_pair_with(free_port, free_port, Some(TINY_BUDGET)).await;
+    let socket_a = daemon_a.paths.socket.clone();
+    let socket_b = daemon_b.paths.socket.clone();
 
     // Holding these open keeps the serve lease alive for the whole test.
     let _handler_conn = install_silent_handler(&socket_b).await;
@@ -123,7 +60,7 @@ async fn saturated_sends_reject_excess_and_keep_control_responsive() {
     let mut slots_taken = 0;
     for index in 0..(TINY_BUDGET * 4) {
         let socket = socket_a.clone();
-        let to = identity_b.agent_id().to_string();
+        let to = daemon_b.identity.agent_id().to_string();
         let outcome = tokio::time::timeout(
             PROBE_WINDOW,
             ipc_command(
@@ -175,12 +112,5 @@ async fn saturated_sends_reject_excess_and_keep_control_responsive() {
 
     // Teardown: cancelling the daemons fails the held sends; their IPC
     // clients observe closed connections, which is expected here.
-    cancel_a.cancel();
-    cancel_b.cancel();
-    tokio::time::timeout(Duration::from_secs(30), async {
-        let _ = task_a.await;
-        let _ = task_b.await;
-    })
-    .await
-    .expect("daemons shut down");
+    tokio::join!(daemon_a.cancel_and_join(), daemon_b.cancel_and_join());
 }

@@ -1,5 +1,6 @@
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
+use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
@@ -368,4 +369,95 @@ fn doctor_default_output_is_human_readable() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("Doctor:"));
     assert!(!stdout.trim_start().starts_with('{'));
+}
+
+/// A `daemon.pid` naming a live process that does not hold the lock is the
+/// state the daemon's own startup backstop refuses to start beside (a
+/// pre-flock daemon may still be running, DEC-028). Both report and fix mode
+/// must keep the record and any socket manual-only and apply no fixes, so a
+/// second daemon cannot start beside the recorded process.
+#[test]
+fn doctor_manual_only_for_live_pid_without_lock() {
+    let root = tempdir().expect("tempdir");
+    fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).expect("set perms");
+    let _identity = axon::identity::Identity::load_or_generate(
+        &axon::config::AxonPaths::from_root(root.path().to_path_buf()),
+    )
+    .expect("generate identity");
+
+    let lock = root.path().join("daemon.pid");
+    let socket = root.path().join("axon.sock");
+    // This test process is a live PID the doctor child sees as foreign, and
+    // it never locks the record, so the lock is provably unheld.
+    fs::write(&lock, std::process::id().to_string()).expect("write live pid");
+    let _listener = UnixListener::bind(&socket).expect("bind socket");
+
+    let output = run_doctor_json(root.path(), &[]);
+    assert_eq!(output.status.code(), Some(2));
+    let report = parse_report(&output);
+    let pid_check = check_by_name(&report, "daemon_pid");
+    assert_eq!(pid_check["ok"], false);
+    assert_eq!(pid_check["fixable"], false);
+    assert!(
+        pid_check["message"]
+            .as_str()
+            .expect("pid message")
+            .contains("live process"),
+        "live-PID guard must be manual-only: {}",
+        pid_check["message"]
+    );
+    assert_eq!(check_by_name(&report, "ipc_socket")["fixable"], false);
+    assert_eq!(report["fixes_applied"].as_array().expect("fixes").len(), 0);
+
+    let output = run_doctor_json(root.path(), &["--fix"]);
+    assert_eq!(output.status.code(), Some(2));
+    let fix_report = parse_report(&output);
+    assert_eq!(fix_report["ok"], false);
+    let pid_check = check_by_name(&fix_report, "daemon_pid");
+    assert_eq!(pid_check["ok"], false);
+    assert_eq!(pid_check["fixable"], false);
+    assert_eq!(
+        fix_report["fixes_applied"].as_array().expect("fixes").len(),
+        0,
+        "fix mode must not touch a live-PID guard or its socket: {}",
+        fix_report["fixes_applied"]
+    );
+    assert!(lock.exists(), "fix mode must leave the guard record");
+    assert!(socket.exists(), "fix mode must leave the daemon's socket");
+}
+
+/// Without a live guard, a dead or malformed record is a stale artifact:
+/// report mode marks it fixable and fix mode removes it.
+#[test]
+fn doctor_fix_removes_dead_or_malformed_pid_record() {
+    for contents in ["1999999999", "not-a-pid at all"] {
+        let root = tempdir().expect("tempdir");
+        fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).expect("set perms");
+        let _identity = axon::identity::Identity::load_or_generate(
+            &axon::config::AxonPaths::from_root(root.path().to_path_buf()),
+        )
+        .expect("generate identity");
+        let lock = root.path().join("daemon.pid");
+        fs::write(&lock, contents).expect("write pid record");
+
+        let output = run_doctor_json(root.path(), &[]);
+        assert_eq!(output.status.code(), Some(2));
+        let report = parse_report(&output);
+        let pid_check = check_by_name(&report, "daemon_pid");
+        assert_eq!(
+            pid_check["ok"], false,
+            "record '{contents}' must fail closed"
+        );
+        assert_eq!(
+            pid_check["fixable"], true,
+            "record '{contents}' must stay auto-fixable"
+        );
+
+        let output = run_doctor_json(root.path(), &["--fix"]);
+        assert!(
+            output.status.success(),
+            "fix of record '{contents}' must succeed"
+        );
+        assert!(!lock.exists(), "fix must remove record '{contents}'");
+    }
 }

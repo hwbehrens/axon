@@ -23,7 +23,7 @@ Ordinary inbound messages are broadcast to connected clients with deliver-or-dis
 
 **Protocol:** Line-delimited JSON. Each command, response, or event is one complete JSON object terminated by `\n`. Literal newlines inside strings MUST be escaped. There is no handshake or version negotiation.
 
-**Maximum line size:** 65,536 bytes including the trailing newline. An overlong command receives `command_too_large` when possible and the connection is closed. The limit binds BOTH directions: clients must refuse to send a body whose length plus newline exceeds it, and the daemon never writes an oversized line. A reply that would exceed the limit is replaced by an explicit `message_too_large` error reply (never truncated); a broadcast event that would exceed it is dropped with a warning (never truncated); a handler request delivery that would exceed it fails so the broker sends the remote requester one terminal error response.
+**Maximum line size:** 65,536 bytes including the trailing newline. An overlong command receives `command_too_large` when possible and the connection is closed. The limit binds BOTH directions: clients must refuse to send a body whose length plus newline exceeds it, and the daemon never writes an oversized line. A reply that would exceed the limit is replaced by an explicit `message_too_large` error reply (never truncated), except the variable-length `peers` and `who_can` replies, which are bounded by construction and marked `truncated` instead (§4.2, §4.9); a broadcast event that would exceed it is dropped with a warning (never truncated); a handler request delivery that would exceed it fails so the broker sends the remote requester one terminal error response, and the handler keeps its lease unless it disconnected or overflowed its queue (§6.2, §7).
 
 **Permissions:** The daemon creates the socket with mode `0600`.
 
@@ -49,7 +49,9 @@ Send a message to an enrolled peer.
 {"cmd":"send","to":"<agent_id>","kind":"request|message|describe","payload":{},"timeout_secs":30,"ref":"<uuid-optional>"}
 ```
 
-`timeout_secs` is optional and only valid for `request` and `describe`. It bounds the WHOLE exchange (dial, stream open, frame write, and response read share one deadline; phases never receive independent budgets). Values above `3600` are rejected with `invalid_command`.
+`timeout_secs` is optional and only valid for `request` and `describe`. It bounds the WHOLE exchange (dial, stream open, frame write, and response read share one deadline; phases never receive independent budgets). Values above `3600` are rejected with `invalid_command`; the default is 30 seconds.
+
+Every `send` kind is deadline-bounded, including fire-and-forget `message`, which uses a fixed 10-second exchange budget that callers cannot override. Exhausting that budget is reported as `timeout` for every kind, never as `peer_unreachable` (§5). When the budget expires after payload bytes may already have been written, the error `message` states that delivery status is unknown: a retry could deliver the payload twice, and for `message` the peer may already have broadcast it.
 
 For `message`:
 
@@ -99,6 +101,11 @@ advisory summary of the peer's last observed capability manifest (service ids
 only) and is omitted until a manifest has been observed. Candidate entries
 always use `status=discovered`; they are not trusted and cannot be messaged
 until enrolled.
+
+The reply is bounded to one framed line. When advisory detail or entire
+trailing peers must be omitted to fit, the reply carries `truncated: true`
+(the field is omitted, meaning false, when the complete listing fits). A
+truncated listing is not an error; clients MUST NOT treat it as complete.
 
 ### 4.3 `status`
 
@@ -217,7 +224,24 @@ Query which connected enrolled peers expose a matching service. The daemon consu
 }
 ```
 
-Connected enrolled peers that failed to answer a capability pull are named in `unreachable` rather than silently omitted. Candidates and disconnected peers are never listed; peers that publish no manifest simply contribute no matches.
+Connected enrolled peers that failed to answer a capability pull are named in
+`unreachable` rather than silently omitted, unless the reply is bounded (the
+reply then carries `truncated: true`). Candidates and disconnected peers are
+never listed; peers that publish no manifest simply contribute no matches.
+
+The reply is bounded to one framed line; whole matches and their leading
+services take precedence over the `unreachable` diagnostics. A partial match is
+kept only with at least one service: against a match whose identity fits but
+whose services do not, the whole match is omitted rather than emitted with an
+empty `services` array. Anything omitted sets `truncated: true` on the reply,
+and a truncated listing is not an error.
+
+The daemon admits at most eight in-flight `who_can` queries and evaluates them
+one at a time, so up to seven can be parked behind the running evaluation. A
+query that arrives while that budget is exhausted is rejected immediately with
+`send_capacity_exceeded` and an explanation in `message`; it may be retried.
+This budget is independent of the outbound send budget: `send` pressure never
+blocks `who_can`, and parked `who_can` work is bounded.
 
 ---
 
@@ -231,20 +255,23 @@ Connected enrolled peers that failed to answer a capability pull are named in `u
 |---|---|
 | `invalid_command` | Malformed JSON, unknown command, or invalid/mutually exclusive fields. |
 | `command_too_large` | IPC command exceeds 65,536 bytes. |
-| `message_too_large` | A reply or event would exceed the 65,536-byte line limit. The payload was refused, never truncated. |
+| `message_too_large` | A reply or event would exceed the 65,536-byte line limit. The payload was refused, never truncated. The variable-length `peers` and `who_can` replies are bounded by construction instead and marked `truncated` (§4.2, §4.9). |
 | `peer_not_found` | Target is not an enrolled peer. |
 | `peer_not_observed` | Candidate enrollment names no current observation. |
 | `peer_conflict` | Agent ID/public-key binding conflicts with enrolled state. |
 | `self_send` | Target is the local Agent ID. |
 | `peer_unreachable` | Peer is enrolled but no connection could be established. |
-| `timeout` | Request timed out waiting for a peer response. |
+| `timeout` | Send timed out before completion: the whole-exchange budget for dial, stream open, frame write, or response wait was exhausted. Applies to every `send` kind, including fire-and-forget `message`. |
 | `handler_busy` | Another IPC connection owns the handler lease. |
 | `not_handler` | The client attempted a handler-only operation without the lease. |
 | `request_not_found` | Request is unknown, expired, disconnected, or already completed. |
-| `send_capacity_exceeded` | The daemon's outbound send budget is exhausted; only `send` commands are rejected, control commands remain served. Retry shortly. |
+| `send_capacity_exceeded` | A daemon concurrency budget is exhausted: the outbound send budget or the in-flight `who_can` query budget. Only the excess command (`send` or `who_can`) is rejected; all other commands remain served. Retry shortly. |
 | `internal_error` | Unexpected daemon or persistence failure. |
 
-Errors are instructive and MUST NOT report a timeout as `peer_unreachable`.
+A `timeout` whose budget expired after payload bytes may already have been
+written still uses the `timeout` code; its `message` states that delivery
+status is unknown, because a retry could duplicate delivery. Errors are
+instructive and MUST NOT report a timeout as `peer_unreachable`.
 
 ---
 
@@ -270,7 +297,12 @@ Delivered only to the handler lease holder:
 {"event":"request","request_id":"<request-uuid>","from":"<agent_id>","envelope":{}}
 ```
 
-If no handler exists, handler delivery overflows, the handler disconnects, or the handler deadline expires, the broker sends one terminal `error` response to the remote requester. AXON guarantees at most one protocol reply, not exactly-once application execution.
+If no handler exists, the delivered event would exceed the line limit,
+handler delivery overflows, the handler disconnects, or the handler deadline
+expires, the broker sends one terminal `error` response to the remote
+requester. An oversized delivery fails that request only: the still-connected
+handler keeps its lease. AXON guarantees at most one protocol reply, not
+exactly-once application execution.
 
 ### 6.3 Peer candidate
 

@@ -11,7 +11,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use crate::ipc::{IpcErrorCode, IpcSendKind};
 
 use super::{
-    MAX_REQUEST_TIMEOUT_SECS, SendSlotGuard, directory_failure, reserve_slot, send_timeout,
+    MAX_REQUEST_TIMEOUT_SECS, SendSlotGuard, directory_failure, reserve_slot, send_failure,
+    send_timeout,
 };
 
 #[test]
@@ -154,5 +155,222 @@ fn directory_failures_map_to_instructive_ipc_codes() {
         directory_failure(DirectoryError::Persist(anyhow::anyhow!("disk on fire"))).code,
         IpcErrorCode::InternalError,
         "persistence failures must not masquerade as peer_not_observed"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// I9: budget exhaustion is `timeout` for EVERY send kind, never
+// `peer_unreachable`; delivery ambiguity is surfaced explicitly. The daemon
+// path calls `send_failure` for every kind, so these mappings are the single
+// chokepoint.
+// ---------------------------------------------------------------------------
+
+fn transport_failure(ambiguous: bool, timed_out: bool) -> crate::transport::SendError {
+    use crate::transport::SendError;
+    match (ambiguous, timed_out) {
+        (false, false) => SendError::pre_send(anyhow::anyhow!("dial refused")),
+        (true, false) => SendError {
+            inner: anyhow::anyhow!("write failed"),
+            ambiguous: true,
+            timed_out: false,
+        },
+        (false, true) => SendError::pre_send_timeout(anyhow::anyhow!("dial budget exhausted")),
+        (true, true) => SendError {
+            inner: anyhow::anyhow!("write budget exhausted"),
+            ambiguous: true,
+            timed_out: true,
+        },
+    }
+}
+
+#[test]
+fn timed_out_transport_failure_is_timeout_for_every_kind() {
+    // `message` sends share the transport deadline too; before I9 only
+    // request/describe mapped to `timeout` and a message timeout fell
+    // through to `peer_unreachable`, violating spec/IPC.md §5.
+    for kind in [
+        IpcSendKind::Request,
+        IpcSendKind::Describe,
+        IpcSendKind::Message,
+    ] {
+        for ambiguous in [false, true] {
+            let failure = send_failure(kind, transport_failure(ambiguous, true));
+            assert_eq!(
+                failure.code,
+                IpcErrorCode::Timeout,
+                "a timed-out {kind:?} send must never be reported as peer_unreachable"
+            );
+            if ambiguous {
+                assert!(
+                    failure.message.contains("delivery status unknown"),
+                    "post-delivery budget exhaustion must surface the ambiguity"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn timed_out_message_send_does_not_claim_it_waited_for_a_response() {
+    // Q-011: `timeout` covers every send kind, but the wording must match the
+    // kind. A fire-and-forget send waits for delivery, never for a response.
+    let failure = send_failure(IpcSendKind::Message, transport_failure(false, true));
+    assert_eq!(failure.code, IpcErrorCode::Timeout);
+    assert!(
+        failure.message.contains("message send timed out"),
+        "unexpected message: {}",
+        failure.message
+    );
+    assert!(
+        !failure.message.contains("waiting for a response"),
+        "a message send never waits for a response: {}",
+        failure.message
+    );
+}
+
+#[test]
+fn ambiguous_non_timeout_failure_surfaces_delivery_ambiguity() {
+    let failure = send_failure(IpcSendKind::Message, transport_failure(true, false));
+    assert_eq!(failure.code, IpcErrorCode::PeerUnreachable);
+    assert!(
+        failure.message.contains("delivery status unknown"),
+        "an ambiguous failure must warn that a retry could duplicate"
+    );
+}
+
+#[test]
+fn pre_delivery_failure_keeps_the_transport_message() {
+    let failure = send_failure(IpcSendKind::Request, transport_failure(false, false));
+    assert_eq!(failure.code, IpcErrorCode::PeerUnreachable);
+    assert!(failure.message.contains("dial refused"));
+    assert!(!failure.message.contains("delivery status unknown"));
+}
+
+#[test]
+fn pre_send_timeout_keeps_the_transport_detail_without_a_response_claim() {
+    // A no-payload-byte timeout (dial lock, resolution, handshake, stream
+    // open) must keep the transport's phase detail without claiming a
+    // response was awaited.
+    for (kind, operation) in [
+        (IpcSendKind::Request, "request"),
+        (IpcSendKind::Describe, "describe"),
+    ] {
+        let failure = send_failure(kind, transport_failure(false, true));
+        assert_eq!(failure.code, IpcErrorCode::Timeout);
+        assert!(
+            failure
+                .message
+                .starts_with(&format!("{operation} timed out before it was sent")),
+            "pre-send {operation} wording must not imply a response wait: {}",
+            failure.message
+        );
+        assert!(
+            failure.message.contains("dial budget exhausted"),
+            "the transport's dial detail must survive: {}",
+            failure.message
+        );
+        assert!(
+            !failure.message.contains("waiting for a response"),
+            "no payload byte was written, so no response awaited: {}",
+            failure.message
+        );
+    }
+}
+
+#[test]
+fn post_connect_stream_open_timeout_does_not_claim_the_peer_was_unreached() {
+    // The stream-open budget check runs AFTER the peer is connected but
+    // BEFORE any payload byte is written: it must stay non-ambiguous and
+    // keep the exact phase detail. Before the fix every remaining_budget
+    // error was worded "timed out before connecting to the peer", which is
+    // false on this path and dropped the request's phase detail.
+    for kind in [IpcSendKind::Request, IpcSendKind::Describe] {
+        let failure = send_failure(
+            kind,
+            crate::transport::SendError {
+                inner: anyhow::anyhow!("send budget exhausted before bidi stream open"),
+                ambiguous: false,
+                timed_out: true,
+            },
+        );
+        assert_eq!(failure.code, IpcErrorCode::Timeout);
+        assert!(
+            failure
+                .message
+                .contains("send budget exhausted before bidi stream open"),
+            "the stream-open phase detail must survive: {}",
+            failure.message
+        );
+        assert!(
+            !failure.message.contains("connecting to the peer"),
+            "the peer was already connected when the stream open failed: {}",
+            failure.message
+        );
+        assert!(
+            !failure.message.contains("waiting for a response"),
+            "no request byte was written, so no response was awaited: {}",
+            failure.message
+        );
+        assert!(!failure.message.contains("delivery status unknown"));
+    }
+}
+
+#[test]
+fn post_write_timeout_wording_is_kind_aware() {
+    // Budget exhaustion after the request bytes were written is ambiguous:
+    // the response-wait wording and the duplicate-delivery warning apply to
+    // every kind, and a describe must not borrow the request wording.
+    let response_read = || crate::transport::SendError {
+        inner: anyhow::anyhow!("send budget exhausted before response read"),
+        ambiguous: true,
+        timed_out: true,
+    };
+
+    let request = send_failure(IpcSendKind::Request, response_read());
+    assert_eq!(request.code, IpcErrorCode::Timeout);
+    assert!(
+        request
+            .message
+            .starts_with("request timed out waiting for a response;"),
+        "{}",
+        request.message
+    );
+    assert!(
+        request.message.contains("delivery status unknown"),
+        "a post-write timeout must warn that a retry could duplicate: {}",
+        request.message
+    );
+
+    let describe = send_failure(IpcSendKind::Describe, response_read());
+    assert_eq!(describe.code, IpcErrorCode::Timeout);
+    assert!(
+        describe
+            .message
+            .starts_with("describe timed out waiting for a response;"),
+        "a describe timeout must not reuse the request wording: {}",
+        describe.message
+    );
+    assert!(
+        describe.message.contains("delivery status unknown"),
+        "a post-write timeout must warn that a retry could duplicate: {}",
+        describe.message
+    );
+}
+
+#[test]
+fn post_write_request_timeout_keeps_the_response_wait_and_ambiguity_wording() {
+    // The response wait happens after the request bytes were written: the
+    // response-phase wording is kept and the retry warning is appended.
+    let failure = send_failure(IpcSendKind::Request, transport_failure(true, true));
+    assert_eq!(failure.code, IpcErrorCode::Timeout);
+    assert!(
+        failure.message.contains("waiting for a response"),
+        "the response phase must keep its wording: {}",
+        failure.message
+    );
+    assert!(
+        failure.message.contains("delivery status unknown"),
+        "a post-write timeout must warn about duplicate delivery: {}",
+        failure.message
     );
 }

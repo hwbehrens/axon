@@ -8,7 +8,7 @@ mod checks;
 mod identity_check;
 
 #[cfg(test)]
-#[path = "artifacts_machine.rs"]
+#[path = "artifacts_machine_tests.rs"]
 mod artifacts_machine_tests;
 
 #[derive(Debug, Clone, Args)]

@@ -10,6 +10,27 @@ fn agent_b() -> AgentId {
 }
 
 #[test]
+fn malformed_envelope_reason_is_bounded() {
+    // serde_json embeds an unexpected string in its error text; an attacker
+    // could otherwise push the whole message into a log line. SPEC.md §9
+    // requires the drop to be logged, so the logged reason must be capped.
+    let huge = "x".repeat(4096);
+    let err = serde_json::from_str::<u64>(&format!("\"{huge}\"")).expect_err("not a u64");
+    let text = err.to_string();
+    let reason = super::streams::bounded_malformed_reason(&err);
+    assert!(
+        reason.chars().count() <= 257,
+        "logged reason must be bounded, got {} chars",
+        reason.chars().count()
+    );
+    if text.chars().count() > 257 {
+        assert!(reason.ends_with('…'), "truncation must be marked");
+    } else {
+        assert_eq!(reason, text, "short reasons pass through unchanged");
+    }
+}
+
+#[test]
 fn default_error_response_contract() {
     let req = Envelope::new(agent_a(), agent_b(), MessageKind::Request, json!({}));
     let resp = default_error_response(&req, &agent_b());
@@ -73,6 +94,79 @@ fn remaining_budget_is_recomputed_against_the_absolute_deadline() {
     let error = remaining_budget(past, "test phase").expect_err("exhausted deadline");
     assert!(error.timed_out);
     assert!(!error.ambiguous, "nothing was delivered yet");
+}
+
+#[test]
+fn budget_exhaustion_classifies_phases_by_payload_delivery() {
+    // PRE-delivery budget checks (dial lock, resolution, handshake, stream
+    // open, and EVERY pre-write frame check) can only fail before a payload
+    // byte exists: they stay non-ambiguous so an at-most-once retry remains
+    // safe and the daemon can keep the transport's phase detail without
+    // claiming a response was awaited. The request-frame-write check runs
+    // before `write_framed` is polled, so it belongs to this group even
+    // though the in-flight write timeout arm stays ambiguous.
+    let past = Instant::now() - Duration::from_secs(1);
+    for phase in [
+        "per-peer dial lock",
+        "QUIC handshake",
+        "bidi stream open",
+        "uni frame write",
+        "request frame write",
+    ] {
+        let error = remaining_budget(past, phase).expect_err("exhausted deadline");
+        assert!(error.timed_out, "{phase} must stay a timeout: {error}");
+        assert!(
+            !error.ambiguous,
+            "{phase} happens before any payload byte was written"
+        );
+        assert!(
+            error.inner.to_string().contains(phase),
+            "the phase detail must survive for {phase}: {error}"
+        );
+    }
+
+    // The response-read check runs after `write_framed` returned Ok and
+    // `send.finish()` succeeded: the request may already be delivered, so
+    // it stays ambiguous and the daemon keeps the delivery-status warning.
+    let error =
+        remaining_budget_after_write(past, "response read").expect_err("exhausted deadline");
+    assert!(
+        error.timed_out && error.ambiguous,
+        "response read may already be delivered, so it must be ambiguous: {error}"
+    );
+    assert!(
+        error.inner.to_string().contains("response read"),
+        "the phase detail must survive for response read: {error}"
+    );
+}
+
+#[test]
+fn in_flight_timeout_arms_classify_by_payload_boundary() {
+    // A timed-out stream open returns no stream, so `write_framed` never
+    // ran: the open arms must classify as pre-send (non-ambiguous) and keep
+    // the phase detail for the daemon's "before it was sent" wording.
+    for phase in ["uni stream open", "bidi stream open"] {
+        let error = SendError::pre_send_timeout(anyhow!("{phase} exceeded send budget"));
+        assert!(error.timed_out && !error.ambiguous, "{error}");
+        assert!(
+            error.to_string().contains(phase),
+            "the phase detail must survive for {phase}: {error}"
+        );
+    }
+
+    // In-flight frame-write and response-read timeouts can race a partial
+    // write and stay ambiguous so the daemon surfaces the delivery-status
+    // warning instead of claiming the peer was never reached.
+    for inner in [
+        anyhow!("request frame write exceeded send budget"),
+        anyhow!("request timed out after 100ms"),
+    ] {
+        let error = SendError::timeout(inner);
+        assert!(
+            error.timed_out && error.ambiguous,
+            "in-flight post-write timeouts must stay ambiguous: {error}"
+        );
+    }
 }
 
 #[test]

@@ -290,13 +290,63 @@ async fn save_refuses_serialized_store_over_the_load_cap() {
 }
 
 #[test]
-fn post_rename_sync_failure_is_a_warning_not_an_error() {
+fn post_rename_sync_failure_is_non_durable_not_an_error() {
     // After a successful rename the new content is already live on disk.
     // Reporting the directory-sync failure as an error would tell callers
     // "nothing was persisted" while the rename already landed — disk ahead
-    // of memory. The mapping must swallow it.
+    // of memory. The mapping must swallow the error and report the residual
+    // uncertainty explicitly instead.
     let failing: std::io::Result<()> = Err(std::io::Error::other("directory sync failed"));
-    super::store::note_post_rename_sync(failing, std::path::Path::new("/tmp/peers.json"));
+    assert!(!super::store::note_post_rename_sync(
+        failing,
+        std::path::Path::new("/tmp/peers.json")
+    ));
     let ok: std::io::Result<()> = Ok(());
-    super::store::note_post_rename_sync(ok, std::path::Path::new("/tmp/peers.json"));
+    assert!(super::store::note_post_rename_sync(
+        ok,
+        std::path::Path::new("/tmp/peers.json")
+    ));
+}
+
+#[test]
+fn store_decode_accepts_literal_spec_fixture() {
+    // Hand-transcribed from spec/SPEC.md "Peer Store Format": the document
+    // shape and field names come from the spec text, not from the struct.
+    // A rename or typo (e.g. "public_key" replacing "pubkey") must fail
+    // here rather than silently loading through serde's derive.
+    let pubkey = STANDARD.encode([7u8; 32]);
+    let agent_id = AgentId::from_pubkey_base64(&pubkey).expect("valid fixture key");
+    let document = format!(
+        r#"{{
+  "version": 1,
+  "peers": [
+    {{
+      "agent_id": "{agent_id}",
+      "pubkey": "{pubkey}",
+      "locators": ["peer-host-or-ip:7100"]
+    }}
+  ]
+}}"#
+    );
+
+    let decoded = PeerStore::decode(document.as_bytes()).expect("literal spec fixture must decode");
+    assert_eq!(decoded.len(), 1);
+    assert_eq!(decoded[0].agent_id, agent_id);
+    assert_eq!(decoded[0].public_key, pubkey);
+    assert_eq!(
+        decoded[0].locators,
+        vec![PeerLocator::parse("peer-host-or-ip:7100").expect("spec locator parses")]
+    );
+
+    // Canonical output too: a committed store must emit the spec's field
+    // name so every reader (including future versions) agrees with the spec.
+    let encoded = serde_json::to_string(&decoded[0]).expect("encode stored peer");
+    assert!(
+        encoded.contains("\"pubkey\""),
+        "stored peer must serialize as the spec's `pubkey`: {encoded}"
+    );
+    assert!(
+        !encoded.contains("\"public_key\""),
+        "the legacy read alias must never be emitted: {encoded}"
+    );
 }

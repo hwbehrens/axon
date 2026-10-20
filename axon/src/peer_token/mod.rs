@@ -5,6 +5,7 @@ use base64::{
 };
 
 use crate::message::AgentId;
+use crate::peer_directory::PeerLocator;
 
 const SCHEME_PREFIX: &str = "axon://";
 
@@ -74,24 +75,15 @@ fn decode_pubkey_bytes(key_bytes: &[u8]) -> Result<(String, AgentId)> {
     Ok((pubkey, agent_id))
 }
 
+/// Validate the address segment with the SAME parser the enrollment path
+/// uses (`PeerLocator::parse`). Keeping a looser local check admitted
+/// tokens whose address could never be enrolled, so a user could hold a
+/// syntactically valid token that failed at `add_peer` time; one authority
+/// makes encode, decode, and enrollment agree.
 fn validate_addr(addr: &str) -> Result<()> {
-    let addr = addr.trim();
-    if addr.is_empty() {
-        anyhow::bail!("peer token addr cannot be empty");
-    }
-    if addr.parse::<std::net::SocketAddr>().is_ok() {
-        return Ok(());
-    }
-    let (host, port) = addr
-        .rsplit_once(':')
-        .ok_or_else(|| anyhow!("peer token addr must be host:port or ip:port"))?;
-    if host.is_empty() {
-        anyhow::bail!("peer token addr host cannot be empty");
-    }
-    let _ = port
-        .parse::<u16>()
-        .with_context(|| format!("peer token addr has invalid port '{port}'"))?;
-    Ok(())
+    PeerLocator::parse(addr)
+        .map(|_| ())
+        .map_err(|err| anyhow!("peer token addr is invalid: {err}"))
 }
 
 fn derive_agent_id(key_bytes: &[u8]) -> AgentId {

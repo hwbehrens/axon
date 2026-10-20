@@ -16,9 +16,11 @@ Spec compliance first — envelope schema must match `spec/WIRE_FORMAT.md` §6.
 - Five kinds have defined v1 semantics (`request`, `response`, `message`, `error`, `describe`), but unknown kind strings must be retained exactly for forward compatibility. `describe` is answered by the receiving daemon from the manifest published at `serve` time (see `axon/src/manifest/`); it is never delivered to an application handler.
 - `AgentId` values must be validated at construction; do not add unchecked string constructors.
 - Unknown JSON fields must be tolerated (forward compatibility).
+- `from`/`to` are daemon-local IPC fields, **not** on the wire: deserialization must treat them as unknown fields (a malformed value decodes as `None` and must never fail the frame), and only the transport layer may set identity from the authenticated peer.
 - `MAX_MESSAGE_SIZE` changes require README.md Configuration Reference update.
 
 ## Test targets
 
-- Unit: `envelope_tests.rs`
+- Unit: `envelope_tests.rs`, `envelope_from_to_tests.rs` (lenient `from`/`to` decode and round-trip tests)
+- Constraint: keep each test file under the 500-line limit; split additional cases into a sibling `_tests.rs` module wired from `envelope.rs`.
 - Spec compliance: `axon/tests/spec_compliance.rs`

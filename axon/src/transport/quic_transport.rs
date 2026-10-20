@@ -1,15 +1,18 @@
 use std::collections::HashMap;
-use std::future::{Future, IntoFuture};
+use std::future::Future;
 use std::net::SocketAddr;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex as StdMutex, atomic::AtomicU64};
+use std::sync::{
+    Arc, Mutex as StdMutex,
+    atomic::{AtomicU64, Ordering},
+};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow};
-use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore, broadcast};
+use tokio::sync::{Mutex, Semaphore, broadcast};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
-use tracing::{debug, info, warn};
+use tracing::{debug, warn};
 
 #[cfg(test)]
 use revoke::RevocationPause;
@@ -20,17 +23,58 @@ use crate::peer_directory::PeerDirectory;
 use crate::transport::PairRequest;
 
 use super::DIAL_TIMEOUT;
-use super::connection::{
-    SendError, derive_peer_id_from_connection, retry_permitted, run_connection, send_request,
-    send_unidirectional,
-};
-use super::connection_registry::{Admission, ConnectionRegistry, Direction};
+use super::connection::{SendError, retry_permitted, send_request, send_unidirectional};
+use super::connection_registry::ConnectionRegistry;
 use super::reconnect::ReconnectBook;
-use super::tls::{build_endpoint, with_handshake_remote_addr};
+use super::tls::build_endpoint;
 
 pub type ResponseHandlerFn = Arc<
     dyn Fn(Arc<Envelope>) -> Pin<Box<dyn Future<Output = Option<Envelope>> + Send>> + Send + Sync,
 >;
+
+/// Inbound-envelope receiver that records broadcast gaps.
+///
+/// `recv` has exactly the same contract as
+/// [`broadcast::Receiver::recv`], including surfacing `RecvError::Lagged(n)`
+/// for evicted envelopes; it additionally folds `n` into the manager's gap
+/// counter so a consumer can observe the loss even if it only logs the
+/// error. Every other [`broadcast::Receiver`] method stays available through
+/// `Deref`, so subscriber code written against the raw receiver keeps
+/// working.
+///
+/// Created by [`ConnectionManager::subscribe_inbound_counted`]; the plain
+/// [`ConnectionManager::subscribe_inbound`] API is unchanged for callers
+/// that do not opt into gap accounting.
+pub struct InboundReceiver {
+    rx: broadcast::Receiver<Arc<Envelope>>,
+    gaps: Arc<AtomicU64>,
+}
+
+impl InboundReceiver {
+    pub async fn recv(&mut self) -> Result<Arc<Envelope>, broadcast::error::RecvError> {
+        match self.rx.recv().await {
+            Err(broadcast::error::RecvError::Lagged(missed)) => {
+                self.gaps.fetch_add(missed, Ordering::Relaxed);
+                Err(broadcast::error::RecvError::Lagged(missed))
+            }
+            other => other,
+        }
+    }
+}
+
+impl std::ops::Deref for InboundReceiver {
+    type Target = broadcast::Receiver<Arc<Envelope>>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.rx
+    }
+}
+
+impl std::ops::DerefMut for InboundReceiver {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.rx
+    }
+}
 
 #[derive(Clone)]
 pub struct ConnectionManager {
@@ -45,6 +89,18 @@ pub struct ConnectionManager {
     inbound_tx: broadcast::Sender<Arc<Envelope>>,
     pair_request_tx: broadcast::Sender<PairRequest>,
     connection_semaphore: Arc<Semaphore>,
+    /// Bounds concurrent PRE-AUTHENTICATION inbound handshakes. One stalled
+    /// handshake must not block later inbound connections, and unbounded
+    /// handshake tasks must not accumulate, so each accepted `Incoming`
+    /// holds one permit until its handshake finishes; beyond the bound the
+    /// incoming connection is refused immediately. The authoritative
+    /// connection limit stays on `connection_semaphore` (checked after
+    /// mTLS completes).
+    handshake_semaphore: Arc<Semaphore>,
+    /// Cumulative inbound envelopes evicted from counted subscribers' views
+    /// (see [`Self::subscribe_inbound_counted`]); lets the daemon surface
+    /// broadcast loss instead of only logging it.
+    inbound_gaps: Arc<AtomicU64>,
     cancel: CancellationToken,
     response_handler: Option<ResponseHandlerFn>,
     inbound_read_timeout: Duration,
@@ -130,6 +186,8 @@ impl ConnectionManager {
             inbound_tx,
             pair_request_tx,
             connection_semaphore: Arc::new(Semaphore::new(max_connections)),
+            handshake_semaphore: Arc::new(Semaphore::new(max_connections)),
+            inbound_gaps: Arc::new(AtomicU64::new(0)),
             cancel,
             response_handler,
             inbound_read_timeout,
@@ -146,6 +204,25 @@ impl ConnectionManager {
 
     pub fn subscribe_inbound(&self) -> broadcast::Receiver<Arc<Envelope>> {
         self.inbound_tx.subscribe()
+    }
+
+    /// Like [`Self::subscribe_inbound`], but the returned receiver folds
+    /// broadcast lag into a shared gap counter. `recv` reports the same
+    /// `RecvError::Lagged(n)` a raw receiver does, so a consumer can both
+    /// observe and count evictions.
+    pub fn subscribe_inbound_counted(&self) -> InboundReceiver {
+        InboundReceiver {
+            rx: self.inbound_tx.subscribe(),
+            gaps: self.inbound_gaps.clone(),
+        }
+    }
+
+    /// Cumulative inbound envelopes that counted subscribers observed as
+    /// evicted by broadcast lag. Zero until a counted subscription is used;
+    /// the daemon can poll this after a `RecvError::Lagged` to reconcile
+    /// and notify clients about delivery gaps instead of only warning.
+    pub fn inbound_gap_count(&self) -> u64 {
+        self.inbound_gaps.load(Ordering::Relaxed)
     }
 
     pub fn subscribe_pair_requests(&self) -> broadcast::Receiver<PairRequest> {
@@ -273,6 +350,13 @@ impl ConnectionManager {
                     // At-most-once wins; surface the error to the caller.
                     return Err(first_error);
                 }
+                // A retry can only make progress while the whole-exchange
+                // budget still has time left. Once it is exhausted, a redial
+                // could only fail with a generic budget error that would
+                // replace this informative failure; preserve the first error.
+                if Instant::now() >= deadline {
+                    return Err(first_error);
+                }
                 self.send_once(directory, peer, envelope, deadline).await
             }
         }
@@ -333,123 +417,10 @@ impl ConnectionManager {
             .local_addr()
             .context("failed to get local address")
     }
-
-    fn spawn_accept_loop(&self) {
-        let manager = self.clone();
-        self.tasks.spawn(async move {
-            loop {
-                tokio::select! {
-                    _ = manager.cancel.cancelled() => {
-                        info!("QUIC accept loop shutting down");
-                        break;
-                    }
-                    incoming = manager.endpoint.accept() => {
-                        let Some(connecting) = incoming else { break };
-                        let remote_addr = connecting.remote_address();
-                        // Capture EVERY peer's enrollment epoch BEFORE awaiting
-                        // the handshake: inbound handshakes are not tracked by
-                        // per-peer dial tokens and the authenticated peer is not
-                        // known until the TLS identity is derived, so the
-                        // snapshot is what lets admission reject a handshake
-                        // that started before ITS OWN peer's revocation
-                        // committed, even if that peer was re-enrolled before
-                        // the handshake completed. Unrelated peers' epochs are
-                        // ignored at admission, so their revocations cannot
-                        // interfere.
-                        let epochs_at_handshake_start = manager.capture_enrollment_epochs();
-                        match with_handshake_remote_addr(remote_addr, connecting.into_future()).await {
-                            Ok(connection) => {
-                                manager
-                                    .accept_connection(connection, epochs_at_handshake_start)
-                                    .await
-                            }
-                            Err(err) => warn!(error = %err, "failed to accept QUIC connection"),
-                        }
-                    }
-                }
-            }
-        });
-    }
-
-    async fn accept_connection(
-        &self,
-        connection: quinn::Connection,
-        epochs_at_handshake_start: HashMap<AgentId, u64>,
-    ) {
-        let permit = match self.connection_semaphore.clone().try_acquire_owned() {
-            Ok(permit) => permit,
-            Err(_) => {
-                warn!(
-                    max = self.max_connections,
-                    "rejecting connection: limit reached"
-                );
-                connection.close(0u32.into(), b"connection limit reached");
-                return;
-            }
-        };
-        let peer =
-            match derive_peer_id_from_connection(&connection).and_then(|id| AgentId::parse(&id)) {
-                Ok(peer) => peer,
-                Err(err) => {
-                    warn!(error = %err, "failed to derive authenticated peer identity");
-                    connection.close(0u32.into(), b"invalid peer identity");
-                    return;
-                }
-            };
-        debug!(peer = %peer, remote = ?connection.remote_address(), "accepted QUIC connection");
-        // TLS pinning already rejects unknown peers, but a handshake that
-        // started before revocation committed can still complete. Two gates
-        // run under the registry's admission lock: unchanged per-peer
-        // enrollment epoch (captured before THIS peer's handshake began) AND
-        // current enrollment in the published pins. The epoch half
-        // linearizes against `close_peer`'s epoch bump; the enrollment half
-        // against the pin publication that completes `remove_peer`. A stale
-        // handshake either fails the gate or is closed moments later by the
-        // revocation itself — never left live, and never admitted against
-        // restored trust.
-        let captured_epoch = epochs_at_handshake_start.get(&peer).copied().unwrap_or(0);
-        let gate_peer = peer.clone();
-        let admission = self
-            .registry
-            .admit_gated(
-                peer.clone(),
-                connection.clone(),
-                Direction::Inbound,
-                self.admission_gate(gate_peer, captured_epoch),
-            )
-            .await;
-        if let Admission::Accepted { generation } = admission {
-            self.spawn_connection_loop(peer, generation, connection, permit);
-        }
-    }
-
-    fn spawn_connection_loop(
-        &self,
-        peer: AgentId,
-        generation: u64,
-        connection: quinn::Connection,
-        permit: OwnedSemaphorePermit,
-    ) {
-        let manager = self.clone();
-        self.tasks.spawn(async move {
-            let stable_id = connection.stable_id();
-            run_connection(
-                connection,
-                manager.local_agent_id.clone(),
-                manager.inbound_tx.clone(),
-                manager.cancel.clone(),
-                manager.response_handler.clone(),
-                manager.inbound_read_timeout,
-            )
-            .await;
-            drop(permit);
-            manager
-                .registry
-                .release_if_current(&peer, generation, stable_id)
-                .await;
-        });
-    }
 }
+
+#[path = "quic_transport_accept.rs"]
+mod accept;
 
 #[path = "quic_transport_dial.rs"]
 mod dial;

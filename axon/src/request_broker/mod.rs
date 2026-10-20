@@ -7,9 +7,10 @@ use tokio::sync::{Mutex, oneshot};
 use uuid::Uuid;
 
 use crate::manifest::Manifest;
-use crate::message::{AgentId, Envelope, MAX_MESSAGE_SIZE, MessageKind};
+use crate::message::{AgentId, Envelope, MessageKind};
 
 mod describe;
+mod reply_admission;
 
 pub const MAX_PENDING_REQUESTS: usize = 1024;
 /// Completed-request responses are cached so transport-level retries can be
@@ -293,13 +294,19 @@ impl RequestBroker {
                 true,
             ),
             Err(_) => {
+                let mut state = self.state.lock().await;
+                // A reply can land after the deadline fires but before this
+                // branch locks; return the recorded outcome instead of a
+                // timeout that would diverge requester and handler.
+                if let Some(recorded) = state.completed.replay(&delivery.key) {
+                    return recorded;
+                }
                 let timeout_response = self.error_response(
                     &delivery.request,
                     "timeout",
                     "request handler timed out",
                     true,
                 );
-                let mut state = self.state.lock().await;
                 if state.pending.remove(&delivery.key).is_some() {
                     state
                         .completed
@@ -356,17 +363,11 @@ impl RequestBroker {
         };
         let response =
             Envelope::response_to(&pending.request, self.local_agent_id.clone(), kind, payload);
-        // Reject BEFORE consuming the pending entry: transport framing would
-        // silently drop an over-limit response while IPC already reported
-        // success. A rejected reply leaves the request pending so the
-        // handler can send a smaller one.
-        if response
-            .wire_encode()
-            .map(|bytes| bytes.len() > MAX_MESSAGE_SIZE as usize)
-            .unwrap_or(true)
-        {
-            // Leave the request pending so the handler can send a smaller
-            // reply.
+        // Reject BEFORE consuming the pending entry: a response the
+        // requester's daemon cannot frame as its `send` reply would fail
+        // after the handler was already acked. A rejected reply leaves the
+        // request pending so the handler can send a smaller one.
+        if !reply_admission::admits(pending.request.id, &response) {
             state.pending.insert(key, pending);
             return Err(BrokerError::InvalidPayload);
         }

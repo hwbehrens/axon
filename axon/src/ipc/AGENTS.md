@@ -9,6 +9,8 @@ Spec compliance (`spec/IPC.md`) > security > usability.
 ## File responsibilities
 
 - `protocol.rs`: IPC command/reply schema, serialization.
+- `bounds.rs`: bounded construction of variable-length replies (`peers`, `who_can`) with an explicit `truncated` marker.
+- `bind.rs`: private-mode (0600) socket binding via a 0700 staging dir and rename.
 - `server.rs`: Listener lifecycle, client accept, broadcast.
 - `client_handler.rs`: Per-client command dispatch, inbound event delivery.
 - `auth.rs`: Unix peer credential authentication.
@@ -17,7 +19,8 @@ Spec compliance (`spec/IPC.md`) > security > usability.
 ## Guardrails
 
 - Command semantics must match `spec/IPC.md` §3.
-- EVERY outbound line passes `encode_reply_line`/`error_reply_line`, which enforce the 65,536-byte limit including the trailing newline: oversized replies fail explicitly with `message_too_large`, oversized broadcasts are dropped with a warning, oversized handler deliveries fail to the broker's terminal-error path — never truncate (DEC-022/DEC-023). The client-handler's malformed-command replies go through the same encoder.
+- EVERY outbound line passes `encode_reply_line`/`error_reply_line`, which enforce the 65,536-byte limit including the trailing newline: oversized replies fail explicitly with `message_too_large`, oversized broadcasts are dropped with a warning, oversized handler deliveries fail to the broker's terminal-error path — never truncate (DEC-022/DEC-023). The client-handler's malformed-command replies go through the same encoder. `peers` and `who_can` replies are instead bounded BY CONSTRUCTION (`bounds.rs`) so they always fit; dropped detail is marked `truncated`.
+- Replies are enqueued with `try_send` and queue overflow disconnects the lagging client: a non-reading client must never stall the daemon control loop (control commands reply inline).
 - `req_id` is bounded at ingress (`MAX_REQ_ID_BYTES`); overlong values are rejected with `invalid_command` and never echoed — an unbounded echo could make any reply frame exceed the limit.
 - Bounded queues must overflow-disconnect lagging clients, not silently drop messages.
 - Validate all inbound data before forwarding to IPC subscribers.

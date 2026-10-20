@@ -122,3 +122,97 @@ fn legacy_raw_key_is_rejected() {
     let msg = result.unwrap_err().to_string();
     assert!(msg.contains("invalid identity.key"));
 }
+
+#[test]
+fn private_key_is_created_at_0600_before_any_bytes_exist() {
+    // A test that only inspects the final mode cannot catch the
+    // write-then-chmod window: the file must be restrictive from the moment
+    // it exists (mode applies at open(2)), while it is still empty.
+    let dir = tempdir().expect("tempdir");
+    let path = PathBuf::from(dir.path()).join("identity.key");
+
+    let file = create_private_key_file(&path).expect("create key file");
+    let meta = file.metadata().expect("metadata");
+    assert_eq!(meta.permissions().mode() & 0o777, 0o600);
+    assert_eq!(meta.len(), 0, "the file must be observed before content");
+}
+
+#[test]
+fn private_key_creation_refuses_to_clobber_an_existing_key() {
+    let dir = tempdir().expect("tempdir");
+    let path = PathBuf::from(dir.path()).join("identity.key");
+    fs::write(&path, "preexisting").expect("seed file");
+
+    let err = write_seed_as_base64(&path, &[1u8; 32]).expect_err("clobber must fail");
+    assert!(
+        err.to_string().contains("failed to write private key"),
+        "unexpected error: {err:#}"
+    );
+    assert_eq!(fs::read_to_string(&path).expect("read"), "preexisting");
+}
+
+#[test]
+fn load_refuses_symlinked_identity_key() {
+    let dir = tempdir().expect("tempdir");
+    let paths = AxonPaths::from_root(PathBuf::from(dir.path()));
+    paths.ensure_root_exists().expect("ensure root");
+
+    let target = PathBuf::from(dir.path()).join("real-identity.key");
+    fs::write(&target, STANDARD.encode([3u8; 32])).expect("seed target");
+    std::os::unix::fs::symlink(&target, &paths.identity_key).expect("symlink");
+
+    let err = Identity::load_or_generate(&paths).expect_err("symlink must be refused");
+    assert!(
+        err.to_string().contains("non-regular identity.key"),
+        "unexpected error: {err:#}"
+    );
+}
+
+#[test]
+fn load_refuses_fifo_identity_key_without_blocking() {
+    use std::time::Duration;
+
+    let dir = tempdir().expect("tempdir");
+    let paths = AxonPaths::from_root(PathBuf::from(dir.path()));
+    paths.ensure_root_exists().expect("ensure root");
+    let fifo_c =
+        std::ffi::CString::new(paths.identity_key.to_str().expect("utf8 path")).expect("cstring");
+    assert_eq!(
+        unsafe { libc::mkfifo(fifo_c.as_ptr(), 0o600) },
+        0,
+        "mkfifo fixture"
+    );
+
+    // Regression shape: an identity.key FIFO must be refused by the type
+    // check, never opened (an open with no writer would block forever). The
+    // timeout converts that hang into a test failure.
+    let probe_paths = AxonPaths::from_root(PathBuf::from(dir.path()));
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(Identity::load_or_generate(&probe_paths).map(|_| ()));
+    });
+    let result = rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("load must not hang on a FIFO identity.key");
+    let err = result.expect_err("FIFO identity.key must be refused");
+    assert!(
+        err.to_string().contains("non-regular identity.key"),
+        "unexpected error: {err:#}"
+    );
+}
+
+#[test]
+fn load_refuses_oversized_identity_key_before_decoding() {
+    let dir = tempdir().expect("tempdir");
+    let paths = AxonPaths::from_root(PathBuf::from(dir.path()));
+    paths.ensure_root_exists().expect("ensure root");
+
+    let oversized = "A".repeat(MAX_IDENTITY_KEY_BYTES + 1);
+    fs::write(&paths.identity_key, oversized).expect("write oversized key");
+
+    let err = Identity::load_or_generate(&paths).expect_err("oversized key must be refused");
+    assert!(
+        err.to_string().contains("exceeds the"),
+        "oversized input must be refused before decoding, got: {err:#}"
+    );
+}

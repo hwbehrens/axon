@@ -15,9 +15,9 @@ test-integration:
 test-e2e:
 	cargo test --test daemon_lifecycle --test daemon_e2e
 
-# Black-box CLI contract tests
+# Black-box CLI contract tests (config and doctor contracts are gate coverage too)
 test-cli:
-	cargo test --test cli_contract
+	cargo test --test cli_contract --test cli_contract_config --test doctor_contract
 
 # All tests (unit + integration + e2e)
 test-all:
