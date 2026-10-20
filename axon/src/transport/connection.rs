@@ -47,8 +47,10 @@ pub(crate) async fn read_framed(stream: &mut quinn::RecvStream) -> Result<Vec<u8
 /// `ambiguous` is true once payload bytes may already have reached the peer:
 /// retrying such a send can duplicate application delivery, which violates
 /// AXON's documented at-most-once guarantee for fire-and-forget messages.
-/// Failures that occur before any payload byte is written are provably
-/// undelivered and safe to refresh-and-retry.
+/// The boundary is PAYLOAD bytes, not connection establishment: a failure
+/// after the peer is connected but before any byte was written is still
+/// provably undelivered, so it stays non-ambiguous and safe to
+/// refresh-and-retry.
 ///
 /// `timed_out` marks budget exhaustion so callers can surface the distinct
 /// `timeout` contract instead of `peer_unreachable` (spec/IPC.md §5).
@@ -79,7 +81,8 @@ impl SendError {
         }
     }
 
-    /// Budget exhaustion before delivery (dial/handshake/write deadlines).
+    /// Budget exhaustion before any payload byte was written (dial lock,
+    /// resolution, handshake, stream open, and the pre-write frame check).
     pub(crate) fn pre_send_timeout(inner: anyhow::Error) -> Self {
         Self {
             inner,
@@ -113,12 +116,16 @@ pub(crate) fn retry_permitted(kind: &MessageKind, error: &SendError) -> bool {
     kind.expects_response() || !error.ambiguous
 }
 
-/// Remaining budget before an absolute exchange deadline.
+/// Remaining budget before an absolute exchange deadline for a phase in
+/// which NO payload byte has been written yet: exhaustion is provably
+/// undelivered, so the failure stays non-ambiguous and a fire-and-forget
+/// retry remains at-most-once.
 ///
-/// Recomputed immediately before EVERY await so no phase receives a fresh
-/// full budget: dialing, stream open, frame write, and response read all
-/// share one whole-exchange deadline. A caller asking for a 1-second
-/// exchange must never wait longer than 1 second in total.
+/// Recomputed immediately before EVERY pre-delivery await so no phase
+/// receives a fresh full budget: dialing, the stream open, and the
+/// pre-write frame check all share one whole-exchange deadline. A caller
+/// asking for a 1-second exchange must never wait longer than 1 second in
+/// total.
 pub(crate) fn remaining_budget(
     deadline: Instant,
     phase: &'static str,
@@ -126,6 +133,19 @@ pub(crate) fn remaining_budget(
     deadline
         .checked_duration_since(Instant::now())
         .ok_or_else(|| SendError::pre_send_timeout(anyhow!("send budget exhausted before {phase}")))
+}
+
+/// Remaining budget for a phase after payload bytes may already have reached
+/// the peer (request frame write, response read): budget exhaustion there
+/// must be classified ambiguous so the daemon keeps the delivery-status
+/// warning instead of claiming the peer was never reached.
+pub(crate) fn remaining_budget_after_write(
+    deadline: Instant,
+    phase: &'static str,
+) -> Result<Duration, SendError> {
+    deadline
+        .checked_duration_since(Instant::now())
+        .ok_or_else(|| SendError::timeout(anyhow!("send budget exhausted before {phase}")))
 }
 
 pub(crate) async fn send_unidirectional(
@@ -183,7 +203,7 @@ pub(crate) async fn send_request(
     // Stream credits are peer-controlled: an unbounded write here would let
     // a trusted peer stall the exchange past its deadline.
     tokio::time::timeout(
-        remaining_budget(deadline, "request frame write")?,
+        remaining_budget_after_write(deadline, "request frame write")?,
         write_framed(&mut send, &bytes),
     )
     .await
@@ -193,7 +213,7 @@ pub(crate) async fn send_request(
         SendError::ambiguous(anyhow::Error::new(err).context("failed to finish request stream"))
     })?;
 
-    let response_budget = remaining_budget(deadline, "response read")?;
+    let response_budget = remaining_budget_after_write(deadline, "response read")?;
     let timeout_label = if response_budget.as_millis() < 1000 {
         format!("{}ms", response_budget.as_millis())
     } else {

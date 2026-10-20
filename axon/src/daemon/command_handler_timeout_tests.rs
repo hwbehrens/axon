@@ -347,20 +347,21 @@ async fn dial_phase_timeout_is_reported_as_timeout_not_unreachable() {
 
     // The 1-second request/describe budgets and the fixed 10-second message
     // budget are all spent inside the dial: the kind must not change the
-    // `timeout` classification, and the wording must say the peer was never
-    // reached instead of claiming a response was awaited.
+    // `timeout` classification, and the wording must say the send stopped
+    // before any payload byte was written instead of claiming a response
+    // was awaited or that the peer was never connected.
     for (command, expected) in [
         (
             json!({"cmd": "send", "to": peer, "kind": "request",
                    "payload": {"question": "hello?"}, "timeout_secs": 1,
                    "req_id": "req-dial-timeout"}),
-            "request timed out before connecting",
+            "request timed out before it was sent",
         ),
         (
             json!({"cmd": "send", "to": peer, "kind": "describe",
                    "payload": {"service": "capabilities"}, "timeout_secs": 1,
                    "req_id": "req-dial-describe-timeout"}),
-            "describe timed out before connecting",
+            "describe timed out before it was sent",
         ),
         (
             json!({"cmd": "send", "to": peer, "kind": "message",

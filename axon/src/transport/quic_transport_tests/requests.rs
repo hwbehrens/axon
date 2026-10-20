@@ -116,6 +116,60 @@ async fn unknown_bidi_kind_is_answered_with_unsupported_kind() {
     );
 }
 
+/// Producer-level pin for the post-connect, pre-write phase: `send_request`
+/// checks the remaining budget before opening the bidi stream on an ALREADY
+/// connected peer. Exhaustion there must be non-ambiguous and keep the
+/// stream-open phase detail, so the daemon neither claims the peer was never
+/// reached nor drops the inner reason, and a fire-and-forget retry would
+/// still be at-most-once.
+#[tokio::test]
+async fn expired_budget_fails_before_the_bidi_stream_open_without_ambiguity() {
+    let pair = make_transport_pair().await;
+    let agent_a = AgentId::parse(pair.id_a.agent_id()).unwrap();
+    let peer_b = AgentId::parse(pair.id_b.agent_id()).unwrap();
+    let addr = pair.transport_b.local_addr().unwrap();
+    let connection = pair
+        .transport_a
+        .ensure_connection(&DialPeer {
+            agent_id: peer_b.clone(),
+            addr,
+        })
+        .await
+        .expect("connect");
+    assert!(
+        pair.transport_a.has_connection(&peer_b).await,
+        "the peer must be connected before the stream-open phase begins"
+    );
+
+    let request = Envelope::new(
+        agent_a.clone(),
+        peer_b,
+        MessageKind::Request,
+        json!({"question": "budget already gone?"}),
+    );
+    let err = crate::transport::connection::send_request(
+        &connection,
+        request,
+        &agent_a,
+        Instant::now() - Duration::from_secs(1),
+    )
+    .await
+    .expect_err("an exhausted budget must fail");
+
+    assert!(
+        err.timed_out,
+        "budget exhaustion must stay timed_out: {err}"
+    );
+    assert!(
+        !err.ambiguous,
+        "no payload byte can have been written before the stream opened: {err}"
+    );
+    assert!(
+        err.to_string().contains("bidi stream open"),
+        "the daemon needs the stream-open phase detail: {err}"
+    );
+}
+
 #[tokio::test]
 async fn send_with_timeout_honors_custom_request_timeout() {
     let handler: ResponseHandlerFn = Arc::new(|request| {

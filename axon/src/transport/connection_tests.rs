@@ -97,6 +97,49 @@ fn remaining_budget_is_recomputed_against_the_absolute_deadline() {
 }
 
 #[test]
+fn budget_exhaustion_classifies_phases_by_payload_delivery() {
+    // PRE-delivery phases (dial lock, resolution, handshake, stream open,
+    // and the fire-and-forget frame check) can only fail before a payload
+    // byte exists: they stay non-ambiguous so an at-most-once retry remains
+    // safe and the daemon can keep the transport's phase detail without
+    // claiming a response was awaited.
+    let past = Instant::now() - Duration::from_secs(1);
+    for phase in [
+        "per-peer dial lock",
+        "QUIC handshake",
+        "bidi stream open",
+        "uni frame write",
+    ] {
+        let error = remaining_budget(past, phase).expect_err("exhausted deadline");
+        assert!(error.timed_out, "{phase} must stay a timeout: {error}");
+        assert!(
+            !error.ambiguous,
+            "{phase} happens before any payload byte was written"
+        );
+        assert!(
+            error.inner.to_string().contains(phase),
+            "the phase detail must survive for {phase}: {error}"
+        );
+    }
+
+    // POST-delivery phases (request frame write, response read) may already
+    // have delivered the request: classify them ambiguous so the daemon
+    // keeps the delivery-status warning instead of claiming the peer was
+    // never reached.
+    for phase in ["request frame write", "response read"] {
+        let error = remaining_budget_after_write(past, phase).expect_err("exhausted deadline");
+        assert!(
+            error.timed_out && error.ambiguous,
+            "{phase} may already be delivered, so it must be ambiguous: {error}"
+        );
+        assert!(
+            error.inner.to_string().contains(phase),
+            "the phase detail must survive for {phase}: {error}"
+        );
+    }
+}
+
+#[test]
 fn checked_deadline_overflow_never_panics() {
     // Mirrors send_to's deadline construction: hostile durations must
     // overflow into an error, not an Instant-add panic that leaks caller

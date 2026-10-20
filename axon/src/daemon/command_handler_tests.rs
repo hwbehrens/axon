@@ -247,11 +247,10 @@ fn pre_delivery_failure_keeps_the_transport_message() {
 }
 
 #[test]
-fn dial_phase_timeout_names_the_unreached_peer_not_a_response_wait() {
-    // A no-payload-byte timeout stopped in the dial phase (lock,
-    // resolution, or handshake): the reply must say the peer was never
-    // reached and keep the transport's phase detail, not reuse the
-    // response-wait wording.
+fn pre_send_timeout_keeps_the_transport_detail_without_a_response_claim() {
+    // A no-payload-byte timeout (dial lock, resolution, handshake, stream
+    // open) must keep the transport's phase detail without claiming a
+    // response was awaited.
     for (kind, operation) in [
         (IpcSendKind::Request, "request"),
         (IpcSendKind::Describe, "describe"),
@@ -261,8 +260,8 @@ fn dial_phase_timeout_names_the_unreached_peer_not_a_response_wait() {
         assert!(
             failure
                 .message
-                .starts_with(&format!("{operation} timed out before connecting")),
-            "dial-phase {operation} wording must not imply a response wait: {}",
+                .starts_with(&format!("{operation} timed out before it was sent")),
+            "pre-send {operation} wording must not imply a response wait: {}",
             failure.message
         );
         assert!(
@@ -272,10 +271,90 @@ fn dial_phase_timeout_names_the_unreached_peer_not_a_response_wait() {
         );
         assert!(
             !failure.message.contains("waiting for a response"),
-            "a peer that was never reached cannot have awaited a response: {}",
+            "no payload byte was written, so no response awaited: {}",
             failure.message
         );
     }
+}
+
+#[test]
+fn post_connect_stream_open_timeout_does_not_claim_the_peer_was_unreached() {
+    // The stream-open budget check runs AFTER the peer is connected but
+    // BEFORE any payload byte is written: it must stay non-ambiguous and
+    // keep the exact phase detail. Before the fix every remaining_budget
+    // error was worded "timed out before connecting to the peer", which is
+    // false on this path and dropped the request's phase detail.
+    for kind in [IpcSendKind::Request, IpcSendKind::Describe] {
+        let failure = send_failure(
+            kind,
+            crate::transport::SendError {
+                inner: anyhow::anyhow!("send budget exhausted before bidi stream open"),
+                ambiguous: false,
+                timed_out: true,
+            },
+        );
+        assert_eq!(failure.code, IpcErrorCode::Timeout);
+        assert!(
+            failure
+                .message
+                .contains("send budget exhausted before bidi stream open"),
+            "the stream-open phase detail must survive: {}",
+            failure.message
+        );
+        assert!(
+            !failure.message.contains("connecting to the peer"),
+            "the peer was already connected when the stream open failed: {}",
+            failure.message
+        );
+        assert!(
+            !failure.message.contains("waiting for a response"),
+            "no request byte was written, so no response was awaited: {}",
+            failure.message
+        );
+        assert!(!failure.message.contains("delivery status unknown"));
+    }
+}
+
+#[test]
+fn post_write_timeout_wording_is_kind_aware() {
+    // Budget exhaustion after the request bytes were written is ambiguous:
+    // the response-wait wording and the duplicate-delivery warning apply to
+    // every kind, and a describe must not borrow the request wording.
+    let response_read = || crate::transport::SendError {
+        inner: anyhow::anyhow!("send budget exhausted before response read"),
+        ambiguous: true,
+        timed_out: true,
+    };
+
+    let request = send_failure(IpcSendKind::Request, response_read());
+    assert_eq!(request.code, IpcErrorCode::Timeout);
+    assert!(
+        request
+            .message
+            .starts_with("request timed out waiting for a response;"),
+        "{}",
+        request.message
+    );
+    assert!(
+        request.message.contains("delivery status unknown"),
+        "a post-write timeout must warn that a retry could duplicate: {}",
+        request.message
+    );
+
+    let describe = send_failure(IpcSendKind::Describe, response_read());
+    assert_eq!(describe.code, IpcErrorCode::Timeout);
+    assert!(
+        describe
+            .message
+            .starts_with("describe timed out waiting for a response;"),
+        "a describe timeout must not reuse the request wording: {}",
+        describe.message
+    );
+    assert!(
+        describe.message.contains("delivery status unknown"),
+        "a post-write timeout must warn that a retry could duplicate: {}",
+        describe.message
+    );
 }
 
 #[test]

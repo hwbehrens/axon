@@ -361,40 +361,39 @@ async fn send(
 /// phase-aware: `ambiguous` means payload bytes may already have reached
 /// the peer, so the delivery status is surfaced explicitly (a retry could
 /// duplicate); a non-ambiguous timeout stopped before any payload byte was
-/// written (dial lock, resolution, handshake), so it must not imply the
-/// peer was reached and a response awaited.
+/// written (dial lock, resolution, handshake, stream open). The peer may
+/// still be connected then, so the wording only states that the send did
+/// not happen and keeps the transport's phase detail — never claiming the
+/// peer was never reached or that a response was awaited.
 fn send_failure(kind: IpcSendKind, err: SendError) -> CommandFailure {
     if err.timed_out {
         let message = if err.ambiguous {
-            if kind == IpcSendKind::Message {
-                // A fire-and-forget send never waits for a response.
-                "send timed out; delivery status unknown".to_string()
-            } else {
-                // Post-write request exchanges (response wait, frame write)
-                // produced no reply; keep the response-phase wording and
-                // warn that a retry could duplicate delivery.
-                format!(
-                    "{}; delivery status unknown",
-                    IpcErrorCode::Timeout.message()
-                )
+            // Post-write phases (frame write, response read): the payload may
+            // already have been delivered, so warn that a retry could duplicate
+            // and keep the wording kind-aware: a describe is not a request.
+            match kind {
+                IpcSendKind::Message => "send timed out; delivery status unknown".to_string(),
+                IpcSendKind::Request => {
+                    "request timed out waiting for a response; delivery status unknown".to_string()
+                }
+                IpcSendKind::Describe => {
+                    "describe timed out waiting for a response; delivery status unknown".to_string()
+                }
             }
-        } else if kind == IpcSendKind::Message {
-            // The request-oriented default message would misdescribe a
-            // fire-and-forget send, which waits for no response.
-            "message send timed out before delivery".to_string()
         } else {
-            // No payload byte was written: keep the transport's dial-phase
-            // detail (peer address, handshake, lock) instead of the static
-            // response-wait message, which would claim the peer was reached.
-            let operation = if kind == IpcSendKind::Describe {
-                "describe"
-            } else {
-                "request"
-            };
-            format!(
-                "{operation} timed out before connecting to the peer: {}",
-                err.inner
-            )
+            // No payload byte was written: keep the transport's phase detail and
+            // word the failure so it is true whether or not the peer was connected.
+            match kind {
+                IpcSendKind::Message => {
+                    format!("message send timed out before delivery: {}", err.inner)
+                }
+                IpcSendKind::Request => {
+                    format!("request timed out before it was sent: {}", err.inner)
+                }
+                IpcSendKind::Describe => {
+                    format!("describe timed out before it was sent: {}", err.inner)
+                }
+            }
         };
         return CommandFailure::new(IpcErrorCode::Timeout, message);
     }

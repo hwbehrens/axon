@@ -53,6 +53,40 @@ fn retry_permitted_allows_only_at_most_once_safe_combinations() {
         &MessageKind::Message,
         &ambiguous
     ));
+
+    let ambiguous_timeout = crate::transport::connection::SendError {
+        inner: anyhow::anyhow!("send budget exhausted before response read"),
+        ambiguous: true,
+        timed_out: true,
+    };
+    let pre_send_timeout = crate::transport::connection::SendError {
+        inner: anyhow::anyhow!("send budget exhausted before bidi stream open"),
+        ambiguous: false,
+        timed_out: true,
+    };
+
+    // Deliberate request-retry behavior: DEC-016's single transport-level
+    // retry does not depend on ambiguity (reply correlation is specified as
+    // at-most-one-reply), so the newly ambiguous request-frame-write and
+    // response-read budget failures keep retrying exactly once.
+    assert!(crate::transport::connection::retry_permitted(
+        &MessageKind::Request,
+        &ambiguous_timeout
+    ));
+    assert!(crate::transport::connection::retry_permitted(
+        &MessageKind::Request,
+        &pre_send_timeout
+    ));
+    // A fire-and-forget budget failure after the first byte may have been
+    // written is never retried; the pre-write budget checks stay retryable.
+    assert!(!crate::transport::connection::retry_permitted(
+        &MessageKind::Message,
+        &ambiguous_timeout
+    ));
+    assert!(crate::transport::connection::retry_permitted(
+        &MessageKind::Message,
+        &pre_send_timeout
+    ));
 }
 
 #[tokio::test]
