@@ -357,19 +357,44 @@ async fn send(
 /// Map a transport send failure onto an instructive IPC error
 /// (spec/IPC.md §4.1, §5, Q-011). Budget exhaustion is `timeout` for EVERY
 /// kind — a fire-and-forget `message` send has a budget too, and the spec
-/// forbids reporting a timeout as `peer_unreachable`. `ambiguous` means
-/// payload bytes may already have reached the peer, so the delivery status
-/// is surfaced explicitly (a retry could duplicate).
+/// forbids reporting a timeout as `peer_unreachable`. The wording is
+/// phase-aware: `ambiguous` means payload bytes may already have reached
+/// the peer, so the delivery status is surfaced explicitly (a retry could
+/// duplicate); a non-ambiguous timeout stopped before any payload byte was
+/// written (dial lock, resolution, handshake), so it must not imply the
+/// peer was reached and a response awaited.
 fn send_failure(kind: IpcSendKind, err: SendError) -> CommandFailure {
     if err.timed_out {
         let message = if err.ambiguous {
-            "send timed out; delivery status unknown".to_string()
+            if kind == IpcSendKind::Message {
+                // A fire-and-forget send never waits for a response.
+                "send timed out; delivery status unknown".to_string()
+            } else {
+                // Post-write request exchanges (response wait, frame write)
+                // produced no reply; keep the response-phase wording and
+                // warn that a retry could duplicate delivery.
+                format!(
+                    "{}; delivery status unknown",
+                    IpcErrorCode::Timeout.message()
+                )
+            }
         } else if kind == IpcSendKind::Message {
             // The request-oriented default message would misdescribe a
             // fire-and-forget send, which waits for no response.
             "message send timed out before delivery".to_string()
         } else {
-            IpcErrorCode::Timeout.message().to_string()
+            // No payload byte was written: keep the transport's dial-phase
+            // detail (peer address, handshake, lock) instead of the static
+            // response-wait message, which would claim the peer was reached.
+            let operation = if kind == IpcSendKind::Describe {
+                "describe"
+            } else {
+                "request"
+            };
+            format!(
+                "{operation} timed out before connecting to the peer: {}",
+                err.inner
+            )
         };
         return CommandFailure::new(IpcErrorCode::Timeout, message);
     }
@@ -467,3 +492,7 @@ pub(crate) fn reserve_slot(counter: &AtomicUsize, max: usize) -> Option<()> {
 #[cfg(test)]
 #[path = "command_handler_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "command_handler_timeout_tests.rs"]
+mod timeout_tests;

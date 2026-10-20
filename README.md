@@ -132,6 +132,7 @@ axon request --timeout 10 <agent_id> "What is the capital of France?"
 axon notify <agent_id> "ready"
 
 # Structured JSON payload for notify
+# (still deadline-bounded: a timed-out send exits 3, like `request`)
 axon notify --json <agent_id> '{"state":"ready"}'
 
 # Enroll a peer from an axon:// token
@@ -198,7 +199,7 @@ axon --help
   - `0`: success
   - `1`: local/runtime failure after argument parsing (I/O, daemon socket connect/decode, etc.)
   - `2`: CLI parse/usage failure (Clap), daemon/application-level failure reply (`"ok": false`), or `request` remote envelope with `kind=error`
-  - `3`: `request` timeout (`{"ok": false, "error": "timeout"}`)
+  - `3`: any send-kind timeout — `request`, `notify` (message), or IPC `send` with `describe` — reported as `{"ok": false, "error": "timeout"}`. The kind does not matter: every send kind is deadline-bounded (spec/IPC.md §4.1), so a `notify` that exhausts its budget exits `3` like `request`
 - IPC inbound event delivery:
   - connected clients receive inbound broadcast events
   - per-client delivery uses bounded queues; lagging clients are disconnected instead of silently dropped
