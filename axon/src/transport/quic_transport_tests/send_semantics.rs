@@ -67,8 +67,9 @@ fn retry_permitted_allows_only_at_most_once_safe_combinations() {
 
     // Deliberate request-retry behavior: DEC-016's single transport-level
     // retry does not depend on ambiguity (reply correlation is specified as
-    // at-most-one-reply), so the newly ambiguous request-frame-write and
-    // response-read budget failures keep retrying exactly once.
+    // at-most-one-reply), so both ambiguous post-write budget failures
+    // (in-flight frame write, response read) and non-ambiguous pre-send
+    // budget failures keep retrying exactly once.
     assert!(crate::transport::connection::retry_permitted(
         &MessageKind::Request,
         &ambiguous_timeout
@@ -121,6 +122,59 @@ async fn uni_failure_before_any_write_is_classified_pre_send() {
         !err.ambiguous,
         "open-stream failure happens before any payload byte is written"
     );
+}
+
+/// Producer-level pin for the in-flight open boundary: once the peer's uni
+/// stream-credit window is full, `open_uni` awaits and the whole-exchange
+/// budget can expire AFTER the pre-check passed but BEFORE a stream exists.
+/// A timed-out open returns no stream and `write_framed` never ran, so the
+/// failure must stay non-ambiguous and keep the open phase detail.
+#[tokio::test]
+async fn in_flight_uni_open_timeout_is_classified_pre_send() {
+    let pair = make_transport_pair().await;
+    let agent_a = AgentId::parse(pair.id_a.agent_id()).unwrap();
+    let agent_b = AgentId::parse(pair.id_b.agent_id()).unwrap();
+    let addr = pair.transport_b.local_addr().unwrap();
+    let connection = pair
+        .transport_a
+        .ensure_connection(&DialPeer {
+            agent_id: agent_b.clone(),
+            addr,
+        })
+        .await
+        .expect("connect");
+
+    // Exhaust the peer-advertised uni stream credit (16) and hold every
+    // stream open: the peer replenishes MAX_STREAMS only when its receive
+    // side releases a stream, and its handlers are blocked reading our
+    // never-finished frames.
+    let mut held = Vec::new();
+    for _ in 0..16 {
+        held.push(connection.open_uni().await.expect("uni stream credit"));
+    }
+
+    let envelope = Envelope::new(agent_a, agent_b, MessageKind::Message, json!({}));
+    let err = crate::transport::connection::send_unidirectional(
+        &connection,
+        envelope,
+        Instant::now() + Duration::from_millis(300),
+    )
+    .await
+    .expect_err("open must not complete while the credit window is full");
+
+    assert!(
+        err.timed_out,
+        "budget exhaustion must stay timed_out: {err}"
+    );
+    assert!(
+        !err.ambiguous,
+        "a timed-out open wrote no payload byte: {err}"
+    );
+    assert!(
+        err.to_string().contains("uni stream open"),
+        "the daemon needs the open phase detail: {err}"
+    );
+    drop(held);
 }
 
 #[tokio::test]

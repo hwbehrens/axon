@@ -170,6 +170,65 @@ async fn expired_budget_fails_before_the_bidi_stream_open_without_ambiguity() {
     );
 }
 
+/// Producer-level pin for the in-flight open boundary: once the peer's bidi
+/// stream-credit window is full, `open_bi` awaits and the whole-exchange
+/// budget can expire AFTER the pre-check passed but BEFORE a stream exists.
+/// A timed-out open returns no stream and `write_framed` never ran, so the
+/// failure must stay non-ambiguous and keep the open phase detail.
+#[tokio::test]
+async fn in_flight_bidi_open_timeout_is_classified_pre_send() {
+    let pair = make_transport_pair().await;
+    let agent_a = AgentId::parse(pair.id_a.agent_id()).unwrap();
+    let peer_b = AgentId::parse(pair.id_b.agent_id()).unwrap();
+    let addr = pair.transport_b.local_addr().unwrap();
+    let connection = pair
+        .transport_a
+        .ensure_connection(&DialPeer {
+            agent_id: peer_b.clone(),
+            addr,
+        })
+        .await
+        .expect("connect");
+
+    // Exhaust the peer-advertised bidi stream credit (8) and hold both
+    // halves of each stream: the peer replenishes MAX_STREAMS only when its
+    // receive side releases a stream, and its handlers are blocked reading
+    // our never-finished frames.
+    let mut held = Vec::new();
+    for _ in 0..8 {
+        held.push(connection.open_bi().await.expect("bidi stream credit"));
+    }
+
+    let request = Envelope::new(
+        agent_a.clone(),
+        peer_b,
+        MessageKind::Request,
+        json!({ "question": "any credit left?" }),
+    );
+    let err = crate::transport::connection::send_request(
+        &connection,
+        request,
+        &agent_a,
+        Instant::now() + Duration::from_millis(300),
+    )
+    .await
+    .expect_err("open must not complete while the credit window is full");
+
+    assert!(
+        err.timed_out,
+        "budget exhaustion must stay timed_out: {err}"
+    );
+    assert!(
+        !err.ambiguous,
+        "a timed-out open wrote no payload byte: {err}"
+    );
+    assert!(
+        err.to_string().contains("bidi stream open"),
+        "the daemon needs the open phase detail: {err}"
+    );
+    drop(held);
+}
+
 #[tokio::test]
 async fn send_with_timeout_honors_custom_request_timeout() {
     let handler: ResponseHandlerFn = Arc::new(|request| {

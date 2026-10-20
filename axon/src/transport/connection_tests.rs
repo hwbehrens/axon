@@ -98,17 +98,20 @@ fn remaining_budget_is_recomputed_against_the_absolute_deadline() {
 
 #[test]
 fn budget_exhaustion_classifies_phases_by_payload_delivery() {
-    // PRE-delivery phases (dial lock, resolution, handshake, stream open,
-    // and the fire-and-forget frame check) can only fail before a payload
+    // PRE-delivery budget checks (dial lock, resolution, handshake, stream
+    // open, and EVERY pre-write frame check) can only fail before a payload
     // byte exists: they stay non-ambiguous so an at-most-once retry remains
     // safe and the daemon can keep the transport's phase detail without
-    // claiming a response was awaited.
+    // claiming a response was awaited. The request-frame-write check runs
+    // before `write_framed` is polled, so it belongs to this group even
+    // though the in-flight write timeout arm stays ambiguous.
     let past = Instant::now() - Duration::from_secs(1);
     for phase in [
         "per-peer dial lock",
         "QUIC handshake",
         "bidi stream open",
         "uni frame write",
+        "request frame write",
     ] {
         let error = remaining_budget(past, phase).expect_err("exhausted deadline");
         assert!(error.timed_out, "{phase} must stay a timeout: {error}");
@@ -122,19 +125,46 @@ fn budget_exhaustion_classifies_phases_by_payload_delivery() {
         );
     }
 
-    // POST-delivery phases (request frame write, response read) may already
-    // have delivered the request: classify them ambiguous so the daemon
-    // keeps the delivery-status warning instead of claiming the peer was
-    // never reached.
-    for phase in ["request frame write", "response read"] {
-        let error = remaining_budget_after_write(past, phase).expect_err("exhausted deadline");
+    // The response-read check runs after `write_framed` returned Ok and
+    // `send.finish()` succeeded: the request may already be delivered, so
+    // it stays ambiguous and the daemon keeps the delivery-status warning.
+    let error =
+        remaining_budget_after_write(past, "response read").expect_err("exhausted deadline");
+    assert!(
+        error.timed_out && error.ambiguous,
+        "response read may already be delivered, so it must be ambiguous: {error}"
+    );
+    assert!(
+        error.inner.to_string().contains("response read"),
+        "the phase detail must survive for response read: {error}"
+    );
+}
+
+#[test]
+fn in_flight_timeout_arms_classify_by_payload_boundary() {
+    // A timed-out stream open returns no stream, so `write_framed` never
+    // ran: the open arms must classify as pre-send (non-ambiguous) and keep
+    // the phase detail for the daemon's "before it was sent" wording.
+    for phase in ["uni stream open", "bidi stream open"] {
+        let error = SendError::pre_send_timeout(anyhow!("{phase} exceeded send budget"));
+        assert!(error.timed_out && !error.ambiguous, "{error}");
+        assert!(
+            error.to_string().contains(phase),
+            "the phase detail must survive for {phase}: {error}"
+        );
+    }
+
+    // In-flight frame-write and response-read timeouts can race a partial
+    // write and stay ambiguous so the daemon surfaces the delivery-status
+    // warning instead of claiming the peer was never reached.
+    for inner in [
+        anyhow!("request frame write exceeded send budget"),
+        anyhow!("request timed out after 100ms"),
+    ] {
+        let error = SendError::timeout(inner);
         assert!(
             error.timed_out && error.ambiguous,
-            "{phase} may already be delivered, so it must be ambiguous: {error}"
-        );
-        assert!(
-            error.inner.to_string().contains(phase),
-            "the phase detail must survive for {phase}: {error}"
+            "in-flight post-write timeouts must stay ambiguous: {error}"
         );
     }
 }

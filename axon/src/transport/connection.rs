@@ -135,8 +135,9 @@ pub(crate) fn remaining_budget(
         .ok_or_else(|| SendError::pre_send_timeout(anyhow!("send budget exhausted before {phase}")))
 }
 
-/// Remaining budget for a phase after payload bytes may already have reached
-/// the peer (request frame write, response read): budget exhaustion there
+/// Remaining budget for a phase that runs after payload bytes may already
+/// have reached the peer (the response-read pre-check, which follows a
+/// successful `write_framed` and `send.finish()`): budget exhaustion there
 /// must be classified ambiguous so the daemon keeps the delivery-status
 /// warning instead of claiming the peer was never reached.
 pub(crate) fn remaining_budget_after_write(
@@ -162,7 +163,10 @@ pub(crate) async fn send_unidirectional(
         connection.open_uni(),
     )
     .await
-    .map_err(|_| SendError::timeout(anyhow!("uni stream open exceeded send budget")))?
+    // A timed-out open returns no stream and `write_framed` never ran, so
+    // zero payload bytes can exist: keep it non-ambiguous like the budget
+    // pre-check above.
+    .map_err(|_| SendError::pre_send_timeout(anyhow!("uni stream open exceeded send budget")))?
     .map_err(|err| {
         SendError::pre_send(anyhow::Error::new(err).context("failed to open uni stream"))
     })?;
@@ -196,14 +200,22 @@ pub(crate) async fn send_request(
         connection.open_bi(),
     )
     .await
-    .map_err(|_| SendError::timeout(anyhow!("bidi stream open exceeded send budget")))?
+    // A timed-out open returns no stream and `write_framed` never ran, so
+    // zero payload bytes can exist: keep it non-ambiguous like the budget
+    // pre-check above.
+    .map_err(|_| SendError::pre_send_timeout(anyhow!("bidi stream open exceeded send budget")))?
     .map_err(|err| {
         SendError::pre_send(anyhow::Error::new(err).context("failed to open bidi stream"))
     })?;
     // Stream credits are peer-controlled: an unbounded write here would let
     // a trusted peer stall the exchange past its deadline.
+    //
+    // The budget pre-check runs before `write_framed` is ever polled, so its
+    // exhaustion means zero payload bytes and must stay non-ambiguous. The
+    // in-flight timeout arm below stays ambiguous: a stalled write may
+    // already have pushed part or all of the frame.
     tokio::time::timeout(
-        remaining_budget_after_write(deadline, "request frame write")?,
+        remaining_budget(deadline, "request frame write")?,
         write_framed(&mut send, &bytes),
     )
     .await
