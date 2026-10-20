@@ -37,6 +37,7 @@ TLS security > protocol correctness > performance.
 - The accept loop must never await a handshake inline: every `Incoming` runs on its own tracked task, bounded by the pre-auth `handshake_semaphore`, so one half-open handshake cannot delay later inbound connections. The authoritative connection limit stays on `connection_semaphore` (checked only after mTLS completes).
 - Outbound dials order configured locators before observed candidates and cap each endpoint to a fair share of the remaining exchange budget, so an unvalidated blackholed endpoint cannot starve the rest.
 - A send retry only runs while the whole-exchange deadline still has time left; otherwise the informative first error is preserved.
+- Dial-path deadline failures keep their timeout classification end to end: the dial lock, locator resolution, and QUIC handshake return `SendError::pre_send_timeout` (timed out, non-ambiguous — no payload was written), never a rewrapped `pre_send`. The daemon therefore reports `timeout` for every budget-exhausting send, never `peer_unreachable` (`spec/IPC.md` §5, Q-011).
 - Inbound broadcast gaps are made observable through `subscribe_inbound_counted` + `inbound_gap_count`; the raw `subscribe_inbound` API stays source-compatible.
 
 ## Test targets

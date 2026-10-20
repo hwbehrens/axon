@@ -1,8 +1,10 @@
 //! Daemon-artifact tests: the single-instance lock file and the IPC socket.
 //!
 //! The lock's authority is the daemon's `flock(2)`, not its PID line, so
-//! these tests hold a real flock to represent a running daemon and pin that a
-//! live-but-unrelated PID is a stale artifact, not a running process.
+//! these tests hold a real flock to represent a running daemon, pin that a
+//! live-but-unrelated PID without the flock is manual-only (never deleted by
+//! fix mode, because the daemon's own startup backstop refuses to start
+//! beside it), and pin that dead or malformed records stay auto-fixable.
 
 use std::fs::{self, File, OpenOptions};
 use std::os::unix::fs::PermissionsExt;
@@ -98,14 +100,25 @@ async fn held_lock_with_socket_is_healthy() {
     assert!(check_named(&report, "ipc_socket").ok);
 }
 
-/// R8: a PID line naming a live process is not evidence of a running
-/// daemon. Without the flock the file is a stale artifact (PID reuse, or a
-/// file left by a crashed daemon), and fix mode may remove it.
+/// R8/R-DOCTOR: a PID line naming a live process is not evidence of a
+/// running daemon, but it is also the exact state the daemon's own startup
+/// backstop refuses to start beside. Fix mode must therefore leave the
+/// record and the socket alone; only once the process is gone does the same
+/// record become a stale artifact fix mode may remove.
 #[tokio::test]
-async fn live_unrelated_pid_without_the_lock_is_stale() {
+async fn live_pid_without_the_lock_is_manual_only() {
     let root = tempdir().expect("tempdir");
     let paths = AxonPaths::from_root(root.path().to_path_buf());
-    fs::write(&paths.daemon_lock, std::process::id().to_string()).expect("pid file");
+    // This process is a live PID that does not hold the lock. Do not fork a
+    // helper: a child inherits any flock descriptor another test thread holds
+    // and keeps that lock alive until it execs, which makes parallel flock
+    // tests flaky.
+    let live_pid = std::process::id();
+    fs::write(&paths.daemon_lock, live_pid.to_string()).expect("pid file");
+    // A socket that may belong to the still-running pre-flock daemon.
+    let listener = tokio::net::UnixListener::bind(&paths.socket).expect("bind socket");
+    drop(listener);
+    assert!(paths.socket.exists());
 
     let mut report = DoctorReport::new(&paths, false);
     check_daemon_artifacts(&paths, &args(false), &mut report).expect("check runs");
@@ -115,19 +128,48 @@ async fn live_unrelated_pid_without_the_lock_is_stale() {
         !pid_check.ok,
         "a live PID without the flock must not report a running daemon"
     );
-    assert!(pid_check.fixable);
     assert!(
-        pid_check.message.contains("no process holds the lock"),
-        "the reason must name the missing lock: {}",
+        !pid_check.fixable,
+        "doctor must not delete a live-PID guard record"
+    );
+    assert!(
+        pid_check
+            .message
+            .contains(&format!("live process {live_pid}")),
+        "the reason must name the live process: {}",
         pid_check.message
+    );
+    assert!(
+        !check_named(&report, "ipc_socket").fixable,
+        "the socket may belong to the recorded daemon"
     );
     assert!(!report.ok);
 
+    // Fix mode must leave both artifacts untouched: deleting them would let
+    // a second daemon start beside the recorded live process, which the
+    // daemon's own backstop refuses to do.
     let mut fix_report = DoctorReport::new(&paths, true);
     check_daemon_artifacts(&paths, &args(true), &mut fix_report).expect("fix runs");
-    assert!(fix_report.ok);
-    assert!(check_named(&fix_report, "daemon_pid").ok);
-    assert!(!paths.daemon_lock.exists(), "stale lock is removed by fix");
+    assert!(
+        fix_report.fixes_applied.is_empty(),
+        "fix mode must not touch a live-PID lock or its socket: {:?}",
+        fix_report.fixes_applied
+    );
+    assert!(!fix_report.ok, "manual-only findings keep failing closed");
+    assert!(paths.daemon_lock.exists(), "fix must not remove the guard");
+    assert!(
+        paths.socket.exists(),
+        "fix must not remove the live daemon's socket"
+    );
+
+    // Once the process is gone the same record is provably stale.
+    fs::write(&paths.daemon_lock, dead_pid().to_string()).expect("dead pid file");
+
+    let mut second_fix = DoctorReport::new(&paths, true);
+    check_daemon_artifacts(&paths, &args(true), &mut second_fix).expect("fix runs");
+    assert!(second_fix.ok);
+    assert!(!paths.daemon_lock.exists());
+    assert!(!paths.socket.exists());
 }
 
 /// The flock wins over a stale or recycled PID line: the daemon is running

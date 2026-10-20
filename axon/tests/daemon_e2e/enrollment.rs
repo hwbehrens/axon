@@ -82,7 +82,10 @@ async fn add_peer_via_ipc_connects_without_restart() {
 }
 
 /// An enrolled but unreachable peer fails sends with an instructive error
-/// instead of hanging or silently dropping.
+/// instead of hanging or silently dropping. A dead UDP locator is
+/// indistinguishable from a silent peer, so the dial exhausts the
+/// whole-exchange budget and the send must be reported as `timeout`,
+/// never `peer_unreachable` (spec/IPC.md §5, Q-011).
 #[tokio::test]
 async fn send_to_unreachable_enrolled_peer_returns_error() {
     let root = tempfile::tempdir().unwrap();
@@ -111,8 +114,7 @@ async fn send_to_unreachable_enrolled_peer_returns_error() {
         .unwrap();
     drop(directory);
 
-    let daemon = spawn(root, paths, identity.clone(), free_port());
-    wait_for_socket(&daemon.paths.socket).await;
+    let daemon = spawn_ready(root, paths, identity.clone()).await;
 
     let reply = ipc_command(
         &daemon.paths.socket,
@@ -125,8 +127,9 @@ async fn send_to_unreachable_enrolled_peer_returns_error() {
     )
     .await;
     assert_eq!(
-        reply["error"], "peer_unreachable",
-        "unreachable enrolled peer must produce a typed error: {reply}"
+        reply["error"], "timeout",
+        "a dead locator exhausts the dial budget and must be reported as \
+         timeout, never peer_unreachable: {reply}"
     );
 
     daemon.stop().await;
@@ -161,8 +164,7 @@ async fn ipc_stays_responsive_during_reconnect_churn_and_shutdown_is_bounded() {
         .unwrap();
     drop(directory);
 
-    let daemon = spawn(root, paths, identity.clone(), free_port());
-    wait_for_socket(&daemon.paths.socket).await;
+    let daemon = spawn_ready(root, paths, identity.clone()).await;
 
     // Hold an IPC client open across the churn and the shutdown.
     let client = UnixStream::connect(&daemon.paths.socket).await.unwrap();

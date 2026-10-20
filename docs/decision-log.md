@@ -10,6 +10,7 @@ Each entry: ID, date, subsystem, one-paragraph summary covering motivation, deci
 
 | ID | Date | Subsystem | Title |
 |---|---|---|---|
+| DEC-028 | 2026-10-19 | daemon, app/doctor, docs | `daemon.pid` authority: the `flock` is authoritative, live-PID records are manual-only for doctor |
 | DEC-027 | 2026-10-19 | daemon, config, docs | Daemon startup ordering: state-root/lock first, then config, identity, peers, IPC, QUIC, discovery |
 | DEC-026 | 2026-02-17 | message, manifest, request_broker, ipc, daemon | Capability manifests: daemon-answered `describe`, `serve`-time publication, `who_can` derived view |
 | DEC-025 | 2026-09-01 | transport, daemon | Structural revocation pairing (`revoke_peer`) and fail-closed epoch-lock poisoning |
@@ -41,6 +42,12 @@ Each entry: ID, date, subsystem, one-paragraph summary covering motivation, deci
 ---
 
 ## Entries
+
+### DEC-028: `daemon.pid` authority — the `flock` is authoritative, live-PID records are manual-only for doctor
+
+Date: 2026-10-19 | Subsystem: daemon, app/doctor, docs
+
+`daemon.pid` has exactly one mutual-exclusion authority: the `flock(2)` a daemon holds for its lifetime. The PID line is a diagnostic publication, so a dead, empty, or malformed record never blocks startup and `doctor --fix` may remove it; the kernel releases a crashed daemon's lock when its descriptor closes. Two consequences are now explicit. **(1) Fail-closed backstop:** `DaemonLock::acquire` refuses to start when it wins the flock but the lock file names a live foreign process, because a pre-flock AXON daemon (or a daemon whose lock file was replaced) may still be running against the same state root. This deliberately trades availability for safety under PID reuse: a leftover record whose PID an unrelated live process later recycles keeps refusing startup until the record is removed, and the error names the file plus the removal guidance. No config flag disables the guard; PID reuse may refuse startup, never admit a second daemon. **(2) Doctor parity:** `axon doctor` classifies a lock with no live `flock` holder as stale only when its PID record is dead, empty, or malformed. A record naming a live process is a manual-only finding — `--fix` must never delete the record or the IPC socket, because both may belong to the recorded pre-flock daemon. Without that parity, `doctor --fix` could delete the guard record and the live daemon's socket, defeating the daemon's own backstop and enabling two daemons on one state root. The Hegel doctor machine models the live-PID-without-flock state as manual-only and asserts fix mode leaves the record in place.
 
 ### DEC-027: Daemon startup ordering — state-root/lock first, then config, identity, peers, IPC, QUIC, discovery
 

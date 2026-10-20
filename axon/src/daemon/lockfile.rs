@@ -20,8 +20,18 @@ const MAX_RELEASE_CAPTURE_ATTEMPTS: usize = 8;
 /// Mutual exclusion is an OS-level `flock(2)` on the lock file, not the file
 /// contents: the file's PID line is a diagnostic publication, while the
 /// kernel lock is the authority. A crashed daemon's lock is released by the
-/// kernel when its descriptor closes, so stale or malformed files never
-/// block startup, and PID reuse cannot lock a healthy daemon out.
+/// kernel when its descriptor closes, so a dead or malformed PID record never
+/// blocks startup.
+///
+/// Transitional backstop: a PID record naming a live foreign process is
+/// refused even after this process wins the flock, because a pre-flock AXON
+/// daemon (or a daemon whose lock file was replaced) may still be running
+/// against the same state root. The trade-off is fail-closed by design: if a
+/// crash leaves such a record and an unrelated process later recycles that
+/// PID, startup keeps failing until the record is removed; the error names
+/// the file and the removal guidance, and `axon doctor` reports the same
+/// state as manual-only instead of deleting the guard itself (DEC-028). PID
+/// reuse may therefore refuse startup, never admit a second daemon.
 pub(crate) struct DaemonLock {
     path: PathBuf,
     file: File,

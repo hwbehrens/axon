@@ -7,6 +7,12 @@
 //! file is a diagnostic publication: a live process that merely shares that
 //! PID (recycled PID, unrelated holder) must never make doctor report a
 //! running daemon, and malformed or dead content must never hide one.
+//!
+//! A lock file with no live holder is normally a stale leftover that fix mode
+//! may remove, but one whose PID line names a live process is the exact state
+//! the daemon's own startup backstop refuses to start beside (a pre-flock
+//! daemon may still be running). Doctor reports it as manual-only and never
+//! deletes the record or the socket that may belong to that daemon (DEC-028).
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{ErrorKind, Read};
@@ -28,6 +34,7 @@ pub(in crate::app::doctor) fn check_daemon_artifacts(
     let lock_path = &paths.daemon_lock;
     let lock_state = inspect_daemon_lock(lock_path)?;
     let daemon_running = matches!(&lock_state, DaemonLockState::Held { .. });
+    let live_backstop = matches!(&lock_state, DaemonLockState::LiveBackstop { .. });
 
     match lock_state {
         DaemonLockState::Missing => report.add_check(
@@ -45,6 +52,16 @@ pub(in crate::app::doctor) fn check_daemon_artifacts(
             false,
             format!(
                 "daemon.pid is not a regular file: {} (manual cleanup required)",
+                lock_path.display()
+            ),
+        ),
+        DaemonLockState::LiveBackstop { pid } => report.add_check(
+            "daemon_pid",
+            false,
+            false,
+            format!(
+                "daemon.pid names live process {pid} that does not hold the lock: \
+                 manual removal required (remove {} only if that process is not an AXON daemon)",
                 lock_path.display()
             ),
         ),
@@ -119,6 +136,20 @@ pub(in crate::app::doctor) fn check_daemon_artifacts(
             false,
             format!("socket present ({})", paths.socket.display()),
         );
+    } else if live_backstop {
+        // The socket may belong to the pre-flock daemon the PID record
+        // guards; deleting it could strand a live daemon or admit a second
+        // one, exactly what the daemon's backstop exists to prevent.
+        report.add_check(
+            "ipc_socket",
+            false,
+            false,
+            format!(
+                "socket present but daemon.pid names a live process that does not hold the lock: \
+                 manual cleanup required ({})",
+                paths.socket.display()
+            ),
+        );
     } else if args.fix {
         fs::remove_file(&paths.socket)
             .with_context(|| format!("failed removing stale socket: {}", paths.socket.display()))?;
@@ -149,8 +180,16 @@ enum DaemonLockState {
     Held {
         published: PidLine,
     },
-    /// Nobody holds the `flock`; the file is a leftover artifact.
+    /// Nobody holds the `flock` and the PID line does not name a live
+    /// process: the file is a leftover artifact fix mode may remove.
     Stale(StaleLock),
+    /// Nobody holds the `flock`, but the PID line names a live process the
+    /// daemon's own startup backstop refuses to start beside. Removing the
+    /// record could admit a second daemon while a pre-flock daemon still
+    /// runs, so doctor reports it as manual-only and never deletes it.
+    LiveBackstop {
+        pid: u32,
+    },
     /// The path is not a regular file; doctor never deletes such a path.
     NonRegular,
 }
@@ -165,7 +204,9 @@ struct StaleLock {
 }
 
 /// The diagnostic PID line published inside the lock file. Never liveness
-/// evidence on its own.
+/// evidence on its own, but a live value decides fix-mode classification:
+/// the daemon's startup backstop treats such a record as a possible
+/// pre-flock daemon, so doctor reports it as manual-only.
 enum PidLine {
     Missing,
     Invalid(String),
@@ -221,10 +262,20 @@ fn inspect_daemon_lock(path: &Path) -> Result<DaemonLockState> {
 
     match try_lock_exclusive(&file) {
         Ok(()) => {
-            // The lock is ours, so no daemon holds it. Keep it held until the
-            // fix (or the end of the check) releases it.
-            let detail = read_pid_line(&file)?.detail();
-            Ok(DaemonLockState::Stale(StaleLock { file, detail }))
+            // The lock is ours, so no daemon holds it. Mirror the daemon's
+            // startup backstop: a record naming a live process may be
+            // guarding a still-running pre-flock daemon, so it is
+            // manual-only. Otherwise keep the lock held until the fix (or
+            // the end of the check) releases it.
+            match read_pid_line(&file)? {
+                PidLine::Valid(pid) if pid_is_alive(pid) => {
+                    Ok(DaemonLockState::LiveBackstop { pid })
+                }
+                published => Ok(DaemonLockState::Stale(StaleLock {
+                    file,
+                    detail: published.detail(),
+                })),
+            }
         }
         Err(err) if err.kind() == ErrorKind::WouldBlock => Ok(DaemonLockState::Held {
             published: read_pid_line(&file)?,

@@ -10,7 +10,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Instant;
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow};
 use tokio_util::sync::CancellationToken;
 
 use crate::message::AgentId;
@@ -142,7 +142,11 @@ impl ConnectionManager {
                 .await
             {
                 Ok(connection) => return Ok(connection),
-                Err(err) => last_error = Some(SendError::pre_send(err)),
+                // `dial` preserves the timeout classification: a handshake
+                // or lock-wait deadline failure must stay `timed_out` so the
+                // daemon reports `timeout`, never `peer_unreachable`
+                // (spec/IPC.md §5, Q-011).
+                Err(err) => last_error = Some(err),
             }
         }
         Err(last_error.unwrap_or_else(|| {
@@ -151,7 +155,9 @@ impl ConnectionManager {
     }
 
     pub async fn ensure_connection(&self, peer: &DialPeer) -> Result<quinn::Connection> {
-        self.dial(peer, Instant::now() + DIAL_TIMEOUT).await
+        self.dial(peer, Instant::now() + DIAL_TIMEOUT)
+            .await
+            .map_err(|err| err.inner)
     }
 
     /// Dial with a bounded handshake under the whole-exchange `deadline`.
@@ -159,7 +165,11 @@ impl ConnectionManager {
     /// lock, the handshake, and the admission gate all share one deadline,
     /// so a caller's 1-second exchange can never spend its whole budget on
     /// the lock wait and then receive a fresh full budget for the handshake.
-    async fn dial(&self, peer: &DialPeer, deadline: Instant) -> Result<quinn::Connection> {
+    async fn dial(
+        &self,
+        peer: &DialPeer,
+        deadline: Instant,
+    ) -> Result<quinn::Connection, SendError> {
         if let Some(existing) = self.registry.live_slot(&peer.agent_id).await {
             return Ok(existing);
         }
@@ -185,18 +195,23 @@ impl ConnectionManager {
         // than taking its turn and discovering the revocation afterwards.
         let _guard = tokio::select! {
             _ = dial_cancel.cancelled() => {
-                bail!("dial to {} was cancelled", peer.agent_id);
+                return Err(SendError::pre_send(anyhow!(
+                    "dial to {} was cancelled",
+                    peer.agent_id
+                )));
             }
             guard = tokio::time::timeout(
                 super::super::connection::remaining_budget(deadline, "per-peer dial lock")
-                    .map_err(|err| anyhow!("dial to {} failed: {err}", peer.agent_id))?,
+                    .map_err(|err| SendError::pre_send_timeout(
+                        anyhow!("dial to {} failed: {err}", peer.agent_id)
+                    ))?,
                 peer_lock.lock(),
             ) => {
                 guard.map_err(|_| {
-                    anyhow!(
+                    SendError::pre_send_timeout(anyhow!(
                         "timed out waiting for the per-peer dial lock for {}",
                         peer.agent_id
-                    )
+                    ))
                 })?
             }
         };
@@ -207,11 +222,12 @@ impl ConnectionManager {
             .connection_semaphore
             .clone()
             .try_acquire_owned()
-            .map_err(|_| anyhow!("connection limit reached"))?;
+            .map_err(|_| SendError::pre_send(anyhow!("connection limit reached")))?;
         let connecting = self
             .endpoint
             .connect(peer.addr, peer.agent_id.as_str())
-            .with_context(|| format!("failed to begin QUIC connect to {}", peer.addr))?;
+            .with_context(|| format!("failed to begin QUIC connect to {}", peer.addr))
+            .map_err(SendError::pre_send)?;
         let remote_addr = connecting.remote_address();
         // The handshake is the only long await before slot installation; it
         // is bounded by the REMAINING exchange budget (recomputed after the
@@ -219,23 +235,38 @@ impl ConnectionManager {
         // and cancellation-aware so revocation tears it down immediately.
         let connection = tokio::select! {
             _ = dial_cancel.cancelled() => {
-                bail!("dial to {} was cancelled", peer.agent_id);
+                return Err(SendError::pre_send(anyhow!(
+                    "dial to {} was cancelled",
+                    peer.agent_id
+                )));
             }
             result = tokio::time::timeout(
                 super::super::connection::remaining_budget(deadline, "QUIC handshake")
-                    .map_err(|err| anyhow!("dial to {} failed: {err}", peer.agent_id))?,
+                    .map_err(|err| SendError::pre_send_timeout(
+                        anyhow!("dial to {} failed: {err}", peer.agent_id)
+                    ))?,
                 with_handshake_remote_addr(remote_addr, connecting),
             ) => result
-                .map_err(|_| anyhow!("QUIC handshake timed out with {}", peer.addr))?
-                .with_context(|| format!("QUIC handshake failed with {}", peer.addr))?,
+                // The handshake deadline is budget exhaustion: keep it
+                // `timed_out` (and non-ambiguous — no payload was written)
+                // so the daemon maps it to `timeout`.
+                .map_err(|_| SendError::pre_send_timeout(anyhow!(
+                    "QUIC handshake timed out with {}",
+                    peer.addr
+                )))?
+                .with_context(|| format!("QUIC handshake failed with {}", peer.addr))
+                .map_err(SendError::pre_send)?,
         };
-        let authenticated = AgentId::parse(&derive_peer_id_from_connection(&connection)?)?;
+        let authenticated = AgentId::parse(
+            &derive_peer_id_from_connection(&connection).map_err(SendError::pre_send)?,
+        )
+        .map_err(SendError::pre_send)?;
         if authenticated != peer.agent_id {
             connection.close(0u32.into(), b"authenticated peer mismatch");
-            bail!(
+            return Err(SendError::pre_send(anyhow!(
                 "authenticated peer {authenticated} does not match {}",
                 peer.agent_id
-            );
+            )));
         }
         // Revocation race guard: the handshake may have started before the
         // peer was revoked. Two gates run inside the registry's admission
@@ -268,11 +299,11 @@ impl ConnectionManager {
                 Ok(connection)
             }
             Admission::Existing(existing) => Ok(existing),
-            Admission::Rejected => bail!(
+            Admission::Rejected => Err(SendError::pre_send(anyhow!(
                 "peer {} was revoked or admission could not be verified \
                  during connection setup",
                 peer.agent_id
-            ),
+            ))),
         }
     }
 }

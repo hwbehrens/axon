@@ -14,6 +14,9 @@
 //! A running daemon is modeled by holding the real `flock` the daemon holds:
 //! the PID line is only a diagnostic, so writing a live process's PID into
 //! the file (rule `write_live_process_pid`) must never make it healthy.
+//! Because the daemon's own startup backstop refuses to start beside a live
+//! recorded PID, that state is a manual-only finding fix mode must never
+//! delete, guarding the pre-flock daemon the record may describe.
 
 use std::fs::{self, File, OpenOptions};
 use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
@@ -131,20 +134,50 @@ impl DoctorArtifactsMachine {
         pid_healthy && socket_healthy
     }
 
+    /// Whether the lock path names a live process while no `flock` is held
+    /// on it: the daemon's startup backstop refuses to start beside that
+    /// record, and doctor treats it as manual-only rather than deleting the
+    /// guard. Mirrors doctor's classification, including its pid bounds.
+    fn lock_names_live_pid_without_flock(&self) -> bool {
+        if self.lock_held_on_path() {
+            return false;
+        }
+        let Ok(raw) = fs::read_to_string(self.pid_path()) else {
+            return false;
+        };
+        let Ok(pid) = raw.trim().parse::<u32>() else {
+            return false;
+        };
+        if pid == 0 || pid > i32::MAX as u32 {
+            return false;
+        }
+        // SAFETY: kill(pid, 0) sends no signal; it only probes existence
+        // and permission to signal.
+        let rc = unsafe { libc::kill(pid as libc::pid_t, 0) };
+        rc == 0
+            || matches!(
+                std::io::Error::last_os_error().raw_os_error(),
+                Some(code) if code == libc::EPERM
+            )
+    }
+
     /// Problems doctor cannot repair by deleting files.
     fn manual_only_remainder(&self) -> bool {
+        let live_pid_without_flock = self.lock_names_live_pid_without_flock();
         let running_without_socket = self.lock_held_on_path() && !self.paths.socket.exists();
         let regular_file_socket = fs::symlink_metadata(&self.paths.socket)
             .map(|meta| !meta.file_type().is_socket())
             .unwrap_or(false);
-        running_without_socket || regular_file_socket
+        live_pid_without_flock || running_without_socket || regular_file_socket
     }
 }
 
 #[hegel::state_machine]
 impl DoctorArtifactsMachine {
     /// Write the (live) PID of this test process without holding the lock:
-    /// a PID line alone is never evidence of a running daemon.
+    /// a PID line alone is never evidence of a running daemon, and because
+    /// the daemon's startup backstop refuses to start beside a live recorded
+    /// PID, doctor must report it as manual-only rather than delete it.
     #[rule]
     fn write_live_process_pid(&mut self, _tc: TestCase) {
         fs::write(self.pid_path(), std::process::id().to_string()).expect("pid file");
@@ -273,6 +306,12 @@ impl DoctorArtifactsMachine {
 
         if self.manual_only_remainder() {
             assert!(!recheck.ok, "manual-only problems must keep failing closed");
+            if self.lock_names_live_pid_without_flock() {
+                assert!(
+                    fs::symlink_metadata(self.paths.daemon_lock.clone()).is_ok(),
+                    "fix mode must never delete a lock that names a live process"
+                );
+            }
         } else {
             assert!(
                 recheck.ok || !fix_sweep.fixes_applied.is_empty(),

@@ -17,53 +17,88 @@ mod capabilities;
 mod drain;
 mod enrollment;
 mod lease;
+mod ports;
 mod saturation;
 mod traffic;
 
-use std::collections::HashSet;
-use std::sync::{Mutex, OnceLock};
-
-fn free_port() -> u16 {
-    // Parallel e2e tests each spawn daemons; a naive bind-and-release probe
-    // can hand the same port to two tests, making one daemon unbindable or
-    // pointing dials at the wrong daemon. Register every handed-out port for
-    // the lifetime of the test binary so in-process allocations are unique.
-    // (Cross-process collisions remain possible but are out of scope here.)
-    static CLAIMED: OnceLock<Mutex<HashSet<u16>>> = OnceLock::new();
-    let claimed = CLAIMED.get_or_init(|| Mutex::new(HashSet::new()));
-    loop {
-        let port = std::net::UdpSocket::bind("127.0.0.1:0")
-            .unwrap()
-            .local_addr()
-            .unwrap()
-            .port();
-        if claimed.lock().unwrap().insert(port) {
-            return port;
-        }
-    }
-}
+use ports::{PORT_BIND_ATTEMPTS, free_port, is_port_conflict, spawn_ready, wait_for_ready};
 
 struct RunningDaemon {
     paths: AxonPaths,
     identity: Identity,
     cancel: CancellationToken,
-    task: tokio::task::JoinHandle<anyhow::Result<()>>,
-    _root: TempDir,
+    task: Option<tokio::task::JoinHandle<anyhow::Result<()>>>,
+    root: TempDir,
 }
 
 impl RunningDaemon {
-    async fn stop(self) {
+    async fn stop(mut self) {
         self.cancel.cancel();
-        tokio::time::timeout(Duration::from_secs(5), self.task)
+        let task = self.task.take().expect("daemon task already joined");
+        tokio::time::timeout(Duration::from_secs(5), task)
             .await
             .expect("shutdown timeout")
             .expect("daemon task")
             .expect("daemon result");
     }
+
+    /// Cancel and join without asserting the daemon's own result; used by
+    /// teardown paths that race in-flight sends.
+    async fn cancel_and_join(mut self) {
+        self.cancel.cancel();
+        if let Some(task) = self.task.take() {
+            let _ = tokio::time::timeout(Duration::from_secs(30), task).await;
+        }
+    }
+
+    /// Reclaim the identity, paths, and root after a failed startup wait so
+    /// a retry can reuse the caller's seeded state with a fresh port.
+    async fn into_parts(mut self) -> (TempDir, AxonPaths, Identity) {
+        self.cancel.cancel();
+        if let Some(task) = self.task.take() {
+            let _ = tokio::time::timeout(Duration::from_secs(5), task).await;
+        }
+        (self.root, self.paths, self.identity)
+    }
 }
 
 async fn prepare_pair() -> (RunningDaemon, RunningDaemon) {
-    let pending = prepare_identities();
+    prepare_pair_with(free_port, free_port, None).await
+}
+
+/// Start a mutually-enrolled pair, retrying the whole pair with fresh ports
+/// when a daemon loses the probe-to-bind race. The retry re-enrolls: the
+/// persisted locators must name the ports the daemons actually bound, so
+/// only the pairing as a whole can be recreated. `budget_a` injects daemon
+/// A's send budget for capacity tests.
+async fn prepare_pair_with(
+    mut port_a: impl FnMut() -> u16,
+    mut port_b: impl FnMut() -> u16,
+    budget_a: Option<usize>,
+) -> (RunningDaemon, RunningDaemon) {
+    let mut attempt = 1;
+    loop {
+        let pending = prepare_identities_with(&mut port_a, &mut port_b);
+        enroll_pair(&pending).await;
+        match start_pair(pending, budget_a).await {
+            Ok(pair) => return pair,
+            Err(error) if attempt < PORT_BIND_ATTEMPTS && is_port_conflict(&error) => {
+                eprintln!(
+                    "[diag] pair startup hit a port conflict (attempt {attempt}/{PORT_BIND_ATTEMPTS}): \
+                     {error:#}; retrying with fresh ports"
+                );
+                attempt += 1;
+            }
+            Err(error) => {
+                panic!("daemon pair failed to start after {attempt} attempt(s): {error:#}")
+            }
+        }
+    }
+}
+
+/// Enroll both identities with each other's locator. Enrollment must land in
+/// peers.json before the daemons load it.
+async fn enroll_pair(pending: &PendingPair) {
     let directory_a = PeerDirectory::load(
         AgentId::parse(pending.identity_a.agent_id()).unwrap(),
         PeerStore::new(pending.paths_a.peers.clone()),
@@ -96,8 +131,6 @@ async fn prepare_pair() -> (RunningDaemon, RunningDaemon) {
         .unwrap();
     drop(directory_a);
     drop(directory_b);
-    // Enrollment must land in peers.json before the daemons load it.
-    start_pair(pending).await
 }
 
 /// Identities, paths, and ports prepared but not yet started, so callers
@@ -114,6 +147,13 @@ struct PendingPair {
 }
 
 fn prepare_identities() -> PendingPair {
+    prepare_identities_with(free_port, free_port)
+}
+
+fn prepare_identities_with(
+    mut port_a: impl FnMut() -> u16,
+    mut port_b: impl FnMut() -> u16,
+) -> PendingPair {
     let root_a = tempfile::tempdir().unwrap();
     let root_b = tempfile::tempdir().unwrap();
     let paths_a = AxonPaths::from_root(PathBuf::from(root_a.path()));
@@ -129,12 +169,15 @@ fn prepare_identities() -> PendingPair {
         paths_b,
         identity_a,
         identity_b,
-        port_a: free_port(),
-        port_b: free_port(),
+        port_a: port_a(),
+        port_b: port_b(),
     }
 }
 
-async fn start_pair(pending: PendingPair) -> (RunningDaemon, RunningDaemon) {
+async fn start_pair(
+    pending: PendingPair,
+    budget_a: Option<usize>,
+) -> anyhow::Result<(RunningDaemon, RunningDaemon)> {
     let PendingPair {
         root_a,
         root_b,
@@ -145,25 +188,60 @@ async fn start_pair(pending: PendingPair) -> (RunningDaemon, RunningDaemon) {
         port_a,
         port_b,
     } = pending;
-    let daemon_a = spawn(root_a, paths_a, identity_a.clone(), port_a);
-    let daemon_b = spawn(root_b, paths_b, identity_b.clone(), port_b);
-    wait_for_socket(&daemon_a.paths.socket).await;
-    wait_for_socket(&daemon_b.paths.socket).await;
-    (daemon_a, daemon_b)
+    let mut daemon_a = spawn_with_budget(root_a, paths_a, identity_a, port_a, budget_a);
+    let mut daemon_b = spawn(root_b, paths_b, identity_b, port_b);
+    let ready_a = wait_for_ready(&mut daemon_a).await;
+    let ready_b = wait_for_ready(&mut daemon_b).await;
+    match (ready_a, ready_b) {
+        (Ok(()), Ok(())) => Ok((daemon_a, daemon_b)),
+        (Err(error), _) | (_, Err(error)) => {
+            // A ready sibling must not keep running (or keep holding its
+            // port) while the caller retries the pair.
+            drop(daemon_a.into_parts().await);
+            drop(daemon_b.into_parts().await);
+            Err(error)
+        }
+    }
 }
 
 /// Spawn two daemons with fresh identities but NO enrolled peers.
 async fn spawn_pair() -> (RunningDaemon, RunningDaemon, Identity, Identity, u16, u16) {
-    let pending = prepare_identities();
-    let identity_a = pending.identity_a.clone();
-    let identity_b = pending.identity_b.clone();
-    let port_a = pending.port_a;
-    let port_b = pending.port_b;
-    let (daemon_a, daemon_b) = start_pair(pending).await;
-    (daemon_a, daemon_b, identity_a, identity_b, port_a, port_b)
+    let mut attempt = 1;
+    loop {
+        let pending = prepare_identities();
+        let identity_a = pending.identity_a.clone();
+        let identity_b = pending.identity_b.clone();
+        let port_a = pending.port_a;
+        let port_b = pending.port_b;
+        match start_pair(pending, None).await {
+            Ok((daemon_a, daemon_b)) => {
+                return (daemon_a, daemon_b, identity_a, identity_b, port_a, port_b);
+            }
+            Err(error) if attempt < PORT_BIND_ATTEMPTS && is_port_conflict(&error) => {
+                eprintln!(
+                    "[diag] pair startup hit a port conflict (attempt {attempt}/{PORT_BIND_ATTEMPTS}): \
+                     {error:#}; retrying with fresh ports"
+                );
+                attempt += 1;
+            }
+            Err(error) => {
+                panic!("daemon pair failed to start after {attempt} attempt(s): {error:#}")
+            }
+        }
+    }
 }
 
 fn spawn(root: TempDir, paths: AxonPaths, identity: Identity, port: u16) -> RunningDaemon {
+    spawn_with_budget(root, paths, identity, port, None)
+}
+
+fn spawn_with_budget(
+    root: TempDir,
+    paths: AxonPaths,
+    identity: Identity,
+    port: u16,
+    max_inflight_sends: Option<usize>,
+) -> RunningDaemon {
     let cancel = CancellationToken::new();
     let task_cancel = cancel.clone();
     let root_path = root.path().to_path_buf();
@@ -173,7 +251,7 @@ fn spawn(root: TempDir, paths: AxonPaths, identity: Identity, port: u16) -> Runn
             disable_mdns: true,
             axon_root: Some(root_path),
             cancel: Some(task_cancel),
-            max_inflight_sends: None,
+            max_inflight_sends,
         })
         .await
     });
@@ -181,19 +259,8 @@ fn spawn(root: TempDir, paths: AxonPaths, identity: Identity, port: u16) -> Runn
         paths,
         identity,
         cancel,
-        task,
-        _root: root,
-    }
-}
-
-async fn wait_for_socket(path: &Path) {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-    while !path.exists() {
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "socket did not appear"
-        );
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        task: Some(task),
+        root,
     }
 }
 

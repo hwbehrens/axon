@@ -440,4 +440,59 @@ mod timeout_mapping_e2e {
         daemon_a.stop().await;
         daemon_b.stop().await;
     }
+
+    /// A bound-but-silent UDP locator: only the dial budget can end the
+    /// attempt. Before R-DIAL both kinds came back as `peer_unreachable`
+    /// although the deadline was exhausted (spec/IPC.md §5, Q-011).
+    #[tokio::test]
+    async fn dial_phase_timeout_is_reported_as_timeout_not_unreachable() {
+        let daemon = RunningDaemon::spawn().await;
+        let sink = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind silent locator");
+        let sink_addr = sink.local_addr().expect("sink addr").to_string();
+        // A verified identity that runs nowhere; enrollment needs a token.
+        let root = tempfile::tempdir().expect("tempdir peer");
+        let paths = AxonPaths::from_root(PathBuf::from(root.path()));
+        let identity = crate::identity::Identity::load_or_generate(&paths).expect("identity");
+        let peer = identity.agent_id().to_string();
+        let token = peer_token::encode(identity.public_key_base64(), &sink_addr).expect("token");
+        let reply = ipc_command(
+            &daemon.paths.socket,
+            json!({"cmd": "add_peer", "token": token}),
+        )
+        .await;
+        assert_eq!(reply["ok"], true, "enrollment failed: {reply}");
+
+        // The 1-second request budget and the fixed 10-second message budget
+        // are both spent inside the dial: the kind must not change the
+        // `timeout` classification or the kind-aware wording.
+        for (command, expected) in [
+            (
+                json!({"cmd": "send", "to": peer, "kind": "request",
+                       "payload": {"question": "hello?"}, "timeout_secs": 1,
+                       "req_id": "req-dial-timeout"}),
+                "timed out",
+            ),
+            (
+                json!({"cmd": "send", "to": peer, "kind": "message",
+                       "payload": {"note": "into the void"}}),
+                "message send timed out before delivery",
+            ),
+        ] {
+            let reply = ipc_command(&daemon.paths.socket, command).await;
+            assert_eq!(
+                reply["error"], "timeout",
+                "dial budget exhaustion must be timeout, not peer_unreachable: {reply}"
+            );
+            assert!(
+                reply["message"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains(expected),
+                "timeout wording must match the kind ({expected}): {reply}"
+            );
+        }
+
+        drop(sink);
+        daemon.stop().await;
+    }
 }

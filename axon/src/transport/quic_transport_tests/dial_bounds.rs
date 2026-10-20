@@ -144,4 +144,56 @@ async fn exhausted_budget_preserves_the_first_error() {
         err.to_string().contains("QUIC handshake timed out"),
         "budget-exhausted retry must not replace the informative first error: {err}"
     );
+    // R-DIAL: the handshake deadline is budget exhaustion, so the failure
+    // must stay classified as a timeout (spec/IPC.md §5, Q-011). Before the
+    // fix every `dial()` error was rewrapped as `pre_send` (`timed_out`
+    // false) and the daemon reported `peer_unreachable`.
+    assert!(
+        err.timed_out,
+        "handshake budget exhaustion must stay timed_out: {err}"
+    );
+    assert!(
+        !err.ambiguous,
+        "no payload byte was written, so the failure is not ambiguous: {err}"
+    );
+}
+
+/// The fire-and-forget (message) kind uses the same dial path, so its
+/// classification must not depend on the kind: a dial that exhausts its
+/// deadline is still `timed_out` (the daemon then maps it to `timeout`).
+#[tokio::test]
+async fn message_dial_timeout_keeps_the_timeout_classification() {
+    let pair = make_transport_pair().await;
+    let agent_a = AgentId::parse(pair.id_a.agent_id()).unwrap();
+
+    let dir_c = tempdir().expect("tempdir c");
+    let paths_c = AxonPaths::from_root(PathBuf::from(dir_c.path()));
+    let id_c = Identity::load_or_generate(&paths_c).expect("identity c");
+    let agent_c = AgentId::parse(id_c.agent_id()).unwrap();
+    let identity_c = PeerIdentity::from_public_key(id_c.public_key_base64()).unwrap();
+    let sink = blackhole_udp();
+    pair.directory_a
+        .enroll(
+            identity_c,
+            vec![PeerLocator::Socket(sink.local_addr().unwrap())],
+        )
+        .await
+        .expect("enroll blackholed peer");
+
+    let message = Envelope::new(
+        agent_a,
+        agent_c.clone(),
+        MessageKind::Message,
+        json!({"note": "fire and forget"}),
+    );
+    let err = pair
+        .transport_a
+        .send_to(&pair.directory_a, &agent_c, message, Duration::from_secs(2))
+        .await
+        .expect_err("blackholed dial must fail");
+    assert!(
+        err.timed_out,
+        "a message dial timeout must stay timed_out: {err}"
+    );
+    assert!(!err.ambiguous, "the message never reached the wire: {err}");
 }

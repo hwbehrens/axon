@@ -30,14 +30,30 @@ async fn serve_lease_is_not_leaked_when_client_closes_before_reading_ack() {
     // makes the regression reliable rather than schedule-dependent (the
     // independent review measured ~3% per cycle, with every fresh daemon
     // leaking by 300 cycles).
-    for round in 0..300 {
+    //
+    // The daemon rejects connections beyond its 64-client bound, and under
+    // host load its reaping can lag this loop. A rejected connection queued
+    // no serve, so the round is retried (bounded) instead of failing the
+    // race guard on a bound the daemon enforces by design.
+    let mut queued = 0;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+    while queued < 300 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "daemon stopped accepting serve clients after {queued} rounds"
+        );
         let mut stream = UnixStream::connect(&daemon_b.paths.socket).await.unwrap();
-        stream.write_all(b"{\"cmd\":\"serve\"}\n").await.unwrap();
+        if stream.write_all(b"{\"cmd\":\"serve\"}\n").await.is_err() {
+            drop(stream);
+            tokio::time::sleep(Duration::from_millis(1)).await;
+            continue;
+        }
         drop(stream);
+        queued += 1;
         // Let the server reap the dead client before opening the next one so
         // the 64-client bound is never approached.
         tokio::task::yield_now().await;
-        if round % 64 == 63 {
+        if queued % 64 == 0 {
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
     }

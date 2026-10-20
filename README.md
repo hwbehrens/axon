@@ -276,7 +276,7 @@ The daemon normalizes the state root directory (default `~/.axon`, or `<state_ro
 
 There is deliberately no legacy migration layer: remove or back up `known_peers.json`, then re-enroll peers. Do not edit `peers.json` while the daemon is running; use `axon connect` and `axon forget`.
 
-The daemon uses `daemon.pid` as a runtime lock file to prevent two daemons from sharing one state root. It is removed on clean shutdown; stale locks are replaced after the recorded process is no longer running.
+The daemon uses `daemon.pid` as a runtime lock file to prevent two daemons from sharing one state root. It is removed on clean shutdown; stale locks are replaced after the recorded process is no longer running. A lock file whose PID line names a live process is never replaced automatically, and `axon doctor --fix` reports it as manual-only.
 
 ### Internal constants
 
@@ -325,6 +325,7 @@ These are compile-time constants and cannot be changed via configuration.
 | `MAX_CLIENT_QUEUE` | `1024` | `daemon/mod.rs` | Per-IPC-client outbound message queue depth; overflow disconnects lagging clients. |
 | `MAX_INFLIGHT_SENDS` | `256` | `daemon/mod.rs` | Maximum concurrent outbound IPC send operations; excess `send` commands are rejected with `send_capacity_exceeded`, while control commands remain responsive. |
 | `MAX_ACQUIRE_ATTEMPTS` | `8` | `daemon/lockfile.rs` | Bounded retries when acquiring the `daemon.pid` lock; real acquisition succeeds on the first attempt. |
+| `MAX_RELEASE_CAPTURE_ATTEMPTS` | `8` | `daemon/lockfile.rs` | Bounded private recovery names tried while capturing the `daemon.pid` entry during release; exhaustion fails the release instead of unlinking another process's file. |
 | Maximum reconnect backoff | `30s` | `transport/reconnect.rs` | Maximum delay between versioned reconnect attempts. |
 | Stale cleanup interval | `5s` | `daemon/mod.rs` | How often the daemon checks for and removes stale discovered peers. |
 | Reconnect interval | `1s` | `daemon/mod.rs` | How often the daemon checks for peers needing reconnection. |
