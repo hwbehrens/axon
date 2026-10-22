@@ -35,7 +35,11 @@ Correct identity observations > zero-config LAN discovery > extensibility.
   a fresh `observed_at`. That interval MUST stay below the peer directory's
   `OBSERVATION_STALE_TIMEOUT` (60s); otherwise live peers expire. Do not
   remove the refresh without replacing it with another liveness source.
-- `ServiceRemoved` is emitted when a PTR record expires and maps to `Lost`.
+- `ServiceRemoved` maps to `Lost`. It is emitted when the instance's PTR
+  record expires, when its last SRV record expires, and when a re-resolved
+  instance becomes invalid (empty host or no addresses). The last case is new
+  since 0.11.5, which kept such an instance and re-queried it instead, so a
+  peer can now drop out whole until its records resolve again.
 - The dependency's DNS record cache is unbounded and not inspectable, so AXON
   bounds only what it tracks and forwards: `MAX_TRACKED_SERVICES` services
   and at most `MAX_OBSERVATIONS_PER_PEER` live observations per Agent ID.

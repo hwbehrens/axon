@@ -10,8 +10,9 @@
 //! module compensates by re-emitting its last-known observation set every
 //! [`MDNS_REFRESH_INTERVAL`] — strictly shorter than the peer directory's
 //! stale timeout — with a fresh `observed_at`. `ServiceRemoved` (which the
-//! dependency does emit when a PTR record expires) still closes the loop with
-//! `Lost`, so a withdrawn peer disappears on the TTL boundary.
+//! dependency emits when a PTR or the last SRV record expires, or a
+//! re-resolved instance becomes invalid) still closes the loop with `Lost`,
+//! so a withdrawn peer disappears on the TTL boundary.
 //!
 //! The dependency's DNS record cache is neither bounded nor inspectable, so
 //! AXON cannot evict hostile entries from it. AXON bounds only what it tracks
@@ -202,7 +203,7 @@ impl ServiceTracker {
 
     /// Re-emit every tracked observation with a fresh `observed_at`.
     ///
-    /// `mdns-sd` 0.11.5 does not re-emit `ServiceResolved` for unchanged
+    /// `mdns-sd` 0.21.5 does not re-emit `ServiceResolved` for unchanged
     /// records, so without this the peer directory's stale sweep would expire
     /// a live peer and never re-learn it until its records change. Walking
     /// `insertion_order` (kept in exact sync with the service map) makes the
@@ -279,7 +280,7 @@ pub async fn run_mdns_discovery(
             _ = cancel.cancelled() => break,
             _ = refresh_interval.tick() => {
                 // Unchanged records never produce another `ServiceResolved`
-                // (mdns-sd 0.11.5); replaying the cached observations with a
+                // (mdns-sd 0.21.5); replaying the cached observations with a
                 // fresh timestamp is what keeps live peers from expiring.
                 for event in tracker.refresh_events(Instant::now()) {
                     if tx.send(event).await.is_err() {

@@ -236,7 +236,7 @@ fn removal_compacts_stale_queue_entries() {
 // ---------------------------------------------------------------------------
 // I2 — liveness under unchanged mDNS records
 //
-// mdns-sd 0.11.5 emits ServiceResolved only when a record is new or changes,
+// mdns-sd 0.21.5 emits ServiceResolved only when a record is new or changes,
 // so a live peer that keeps re-announcing identical records would go stale at
 // the directory's 60s timeout and never come back. These tests pin the
 // refresh contract that keeps such peers alive, using an explicit clock
