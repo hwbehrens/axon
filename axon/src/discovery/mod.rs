@@ -1,6 +1,6 @@
 //! Bonjour/mDNS peer discovery.
 //!
-//! # Dependency behavior (`mdns-sd` 0.11.5)
+//! # Dependency behavior (`mdns-sd` 0.21.5)
 //!
 //! The dependency emits [`ServiceEvent::ServiceResolved`] only when a record
 //! is new or changes. A healthy peer that keeps re-announcing unchanged
@@ -10,8 +10,9 @@
 //! module compensates by re-emitting its last-known observation set every
 //! [`MDNS_REFRESH_INTERVAL`] — strictly shorter than the peer directory's
 //! stale timeout — with a fresh `observed_at`. `ServiceRemoved` (which the
-//! dependency does emit when a PTR record expires) still closes the loop with
-//! `Lost`, so a withdrawn peer disappears on the TTL boundary.
+//! dependency emits when a PTR or the last SRV record expires, or a
+//! re-resolved instance becomes invalid) still closes the loop with `Lost`,
+//! so a withdrawn peer disappears on the TTL boundary.
 //!
 //! The dependency's DNS record cache is neither bounded nor inspectable, so
 //! AXON cannot evict hostile entries from it. AXON bounds only what it tracks
@@ -20,6 +21,8 @@
 //! Malformed advertisements are rejected with debug-level logging rather than
 //! per-record warnings, because a hostile or misbehaving link can generate
 //! them faster than any human can read.
+
+mod record;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::net::IpAddr;
@@ -31,6 +34,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
+use crate::discovery::record::ResolvedRecord;
 use crate::message::AgentId;
 use crate::peer_directory::{
     MAX_OBSERVATIONS_PER_PEER, ObservationId, ObservationSource, PeerObservation,
@@ -199,7 +203,7 @@ impl ServiceTracker {
 
     /// Re-emit every tracked observation with a fresh `observed_at`.
     ///
-    /// `mdns-sd` 0.11.5 does not re-emit `ServiceResolved` for unchanged
+    /// `mdns-sd` 0.21.5 does not re-emit `ServiceResolved` for unchanged
     /// records, so without this the peer directory's stale sweep would expire
     /// a live peer and never re-learn it until its records change. Walking
     /// `insertion_order` (kept in exact sync with the service map) makes the
@@ -276,7 +280,7 @@ pub async fn run_mdns_discovery(
             _ = cancel.cancelled() => break,
             _ = refresh_interval.tick() => {
                 // Unchanged records never produce another `ServiceResolved`
-                // (mdns-sd 0.11.5); replaying the cached observations with a
+                // (mdns-sd 0.21.5); replaying the cached observations with a
                 // fresh timestamp is what keeps live peers from expiring.
                 for event in tracker.refresh_events(Instant::now()) {
                     if tx.send(event).await.is_err() {
@@ -295,7 +299,7 @@ pub async fn run_mdns_discovery(
                 match event {
                     ServiceEvent::ServiceResolved(info) => {
                         let fullname = info.get_fullname().to_string();
-                        match parse_resolved_service(&local_agent_id, &info) {
+                        match parse_resolved_service(&local_agent_id, info.as_ref()) {
                             Ok(observations) => {
                                 for event in tracker.observe_resolution(fullname, observations) {
                                     if tx.send(event).await.is_err() {
@@ -363,23 +367,22 @@ async fn withdraw_and_shutdown(mdns: &ServiceDaemon, fullname: &str) {
 
 fn parse_resolved_service(
     local_agent_id: &AgentId,
-    info: &ServiceInfo,
+    info: &impl ResolvedRecord,
 ) -> Result<Vec<PeerObservation>> {
-    let Some(agent_id_raw) = info.get_property_val_str("agent_id") else {
+    let Some(agent_id_raw) = info.property("agent_id") else {
         return Ok(Vec::new());
     };
     let agent_id = AgentId::parse(agent_id_raw).context("invalid advertised Agent ID")?;
     if &agent_id == local_agent_id {
         return Ok(Vec::new());
     }
-    let Some(public_key) = info.get_property_val_str("pubkey") else {
+    let Some(public_key) = info.property("pubkey") else {
         return Ok(Vec::new());
     };
-    let display_name = service_display_name(info.get_fullname());
+    let display_name = service_display_name(info.fullname());
     let mut addresses: Vec<IpAddr> = info
-        .get_addresses()
-        .iter()
-        .copied()
+        .addresses()
+        .into_iter()
         .filter(is_dialable_candidate)
         .collect();
     addresses.sort_by_key(|address| (!address.is_ipv4(), *address));
@@ -393,8 +396,8 @@ fn parse_resolved_service(
     addresses
         .into_iter()
         .map(|address| {
-            let endpoint = std::net::SocketAddr::new(address, info.get_port());
-            let id = ObservationId::new(format!("mdns:{}:{endpoint}", info.get_fullname()))?;
+            let endpoint = std::net::SocketAddr::new(address, info.port());
+            let id = ObservationId::new(format!("mdns:{}:{endpoint}", info.fullname()))?;
             PeerObservation::new(
                 id,
                 agent_id.clone(),

@@ -9,11 +9,10 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
-quinn-proto = { version = "0.10", features = ["arbitrary"] }
 axon = { path = ".." }
 serde_json = "1"
 tokio = { version = "1", features = ["rt", "io-util", "net", "macros"] }
-serde_yaml = "0.9"
+serde-saphyr = "2"
 
 [[bin]]
 name = "fuzz_envelope_decode"

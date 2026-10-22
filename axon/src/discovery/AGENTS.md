@@ -9,6 +9,8 @@ Correct identity observations > zero-config LAN discovery > extensibility.
 ## File responsibilities
 
 - `mod.rs`: Bonjour/mDNS service registration, browsing, validation, and observation events.
+- `record.rs`: `ResolvedRecord` adapter so parsing accepts both `ServiceInfo`
+  (built locally, used by tests) and `ResolvedService` (browse results).
 
 ## Guardrails
 
@@ -20,7 +22,12 @@ Correct identity observations > zero-config LAN discovery > extensibility.
 - WAN discovery and static peer configuration are out of scope.
 - Instance names are attacker-controlled: sanitize control characters and bound length before a display name reaches tables, logs, or IPC.
 
-## Dependency behavior (mdns-sd 0.11.5)
+## Dependency behavior (mdns-sd 0.21.5)
+
+- `ServiceEvent::ServiceResolved` carries a `Box<ResolvedService>`; addresses
+  arrive as `ScopedIp` values (`to_ip_addr()` drops the interface scope).
+  Parse through `record::ResolvedRecord` instead of matching the concrete
+  record type, so the local `ServiceInfo` path used by tests keeps working.
 
 - `ServiceResolved` fires only for **new or changed** records. A live peer that
   keeps re-announcing unchanged records emits nothing, so the browse loop
@@ -28,7 +35,11 @@ Correct identity observations > zero-config LAN discovery > extensibility.
   a fresh `observed_at`. That interval MUST stay below the peer directory's
   `OBSERVATION_STALE_TIMEOUT` (60s); otherwise live peers expire. Do not
   remove the refresh without replacing it with another liveness source.
-- `ServiceRemoved` is emitted when a PTR record expires and maps to `Lost`.
+- `ServiceRemoved` maps to `Lost`. It is emitted when the instance's PTR
+  record expires, when its last SRV record expires, and when a re-resolved
+  instance becomes invalid (empty host or no addresses). The last case is new
+  since 0.11.5, which kept such an instance and re-queried it instead, so a
+  peer can now drop out whole until its records resolve again.
 - The dependency's DNS record cache is unbounded and not inspectable, so AXON
   bounds only what it tracks and forwards: `MAX_TRACKED_SERVICES` services
   and at most `MAX_OBSERVATIONS_PER_PEER` live observations per Agent ID.

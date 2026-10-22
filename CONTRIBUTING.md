@@ -154,6 +154,7 @@ Every PR body **must** include a self-assessment score line in the format `**Sco
 
 - Never log or expose private keys, secrets, or sensitive data.
 - All crypto uses established crates (`ed25519-dalek`, `quinn`, `rustls`). No hand-rolled crypto.
+- Dependency updates: `cargo audit` must stay clean for both `axon/Cargo.lock` and `axon/fuzz/Cargo.lock` (CI enforces it). Adopt only releases published at least 7 days ago; when an advisory fix requires a newer release, record the exception and the advisory in `docs/decision-log.md` (see DEC-029).
 
 ## Testing Requirements
 

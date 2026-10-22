@@ -155,18 +155,30 @@ pub async fn load_persisted_config(path: &Path) -> Result<PersistedConfig> {
             return Err(err).with_context(|| format!("failed to read config: {}", path.display()));
         }
     };
-    serde_yaml::from_str(&raw).map_err(|err| {
+    serde_saphyr::from_str(&raw).map_err(|err| {
         let message = format!("failed to parse config: {}: {err}", path.display());
         // Only mention the legacy `peers` migration path when that is actually
         // what failed; generic YAML errors must not carry misleading guidance.
-        if err.to_string().contains("unknown field `peers`") {
+        // Match the structured error: the rendered message embeds source
+        // lines, so any config whose text mentions the field would match.
+        if is_legacy_peers_error(&err) {
+            // The rendered error ends in an annotated source snippet, so the
+            // hint goes on its own line rather than trailing the snippet.
             anyhow::anyhow!(
-                "{message}. Legacy `peers` entries are unsupported; re-enroll peers with `axon connect`."
+                "{message}\nLegacy `peers` entries are unsupported; re-enroll peers with `axon connect`."
             )
         } else {
             anyhow::anyhow!(message)
         }
     })
+}
+
+/// Whether parsing failed on the removed top-level `peers` field.
+fn is_legacy_peers_error(err: &serde_saphyr::Error) -> bool {
+    matches!(
+        err.without_snippet(),
+        serde_saphyr::Error::SerdeUnknownField { field, .. } if field == "peers"
+    )
 }
 
 pub async fn save_persisted_config(path: &Path, config: &PersistedConfig) -> Result<()> {
@@ -175,7 +187,7 @@ pub async fn save_persisted_config(path: &Path, config: &PersistedConfig) -> Res
             .await
             .with_context(|| format!("failed to create config directory: {}", parent.display()))?;
     }
-    let serialized = serde_yaml::to_string(config)
+    let serialized = serde_saphyr::to_string(config)
         .with_context(|| format!("failed to serialize config: {}", path.display()))?;
 
     // Temp-file + rename: a crash between write and replace must never leave a

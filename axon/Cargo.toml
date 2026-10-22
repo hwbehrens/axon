@@ -11,26 +11,31 @@ categories = ["network-programming", "command-line-utilities"]
 [dependencies]
 tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["rt"] }
-quinn = "0.11"
-rustls = { version = "0.23", features = ["ring"] }
-rcgen = "0.13"
-ed25519-dalek = { version = "2", features = ["rand_core"] }
-mdns-sd = "0.11"
+# `aws-lc-rs` is deliberately not enabled: AXON installs the `ring` crypto provider and
+# performs its own certificate pinning, so pulling in AWS-LC (and its cmake/bindgen C build)
+# only adds attack surface. `platform-verifier` is likewise unused — peers are verified
+# against the pinning snapshot, not the OS trust store. `tls12` is off because QUIC
+# requires TLS 1.3 and both pinning verifiers reject TLS 1.2 signatures.
+quinn = { version = "0.11", default-features = false, features = ["log", "runtime-tokio", "rustls-ring", "bloom"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std"] }
+rcgen = { version = "0.14", default-features = false, features = ["ring"] }
+ed25519-dalek = "3"
+mdns-sd = "0.21"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }
-serde_yaml = "0.9"
+serde-saphyr = "2"
 clap = { version = "4", features = ["derive"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-sha2 = "0.10"
-base64 = "0.22"
+sha2 = "0.11"
+base64 = "0.23"
 uuid = { version = "1", features = ["v4", "serde"] }
 anyhow = "1"
-x509-parser = "0.16"
-getrandom = "0.2"
+x509-parser = "0.18"
+getrandom = "0.4"
 libc = "0.2" # Required for Unix peer credentials (Linux SO_PEERCRED, macOS getpeereid) — no std-only API
 clap_complete = { version = "4", optional = true }
-clap_mangen = { version = "0.2", optional = true }
+clap_mangen = { version = "0.3", optional = true }
 
 [features]
 generate-docs = ["dep:clap_complete", "dep:clap_mangen"]
@@ -38,9 +43,9 @@ generate-docs = ["dep:clap_complete", "dep:clap_mangen"]
 [dev-dependencies]
 tempfile = "3"
 proptest = "1"
-hegeltest = "0.31"
+hegeltest = "0.49"
 tokio = { version = "1", features = ["test-util"] }
-criterion = { version = "0.5", features = ["html_reports"] }
+criterion = { version = "0.8", features = ["html_reports"] }
 
 [[bench]]
 name = "message_bench"

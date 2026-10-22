@@ -9,9 +9,13 @@ use super::*;
 /// Hegel stateful test for [`PeerDirectory`].
 ///
 /// Rules apply discovery and enrollment actions; invariants are checked by
-/// the engine after every rule application. When an invariant breaks,
-/// Hegel shrinks to a minimal rule sequence, which is why this replaces
-/// the previous hand-rolled proptest op list.
+/// the engine after every rule application. Every invariant is declared
+/// `always_run`: since hegeltest 0.49 a plain `#[invariant]` is only sampled
+/// between steps (probability `1 / step_count`), which would check these
+/// trust invariants about once per test case between the initial and final
+/// state. When an invariant breaks, Hegel shrinks to a minimal rule
+/// sequence, which is why this replaces the previous hand-rolled proptest
+/// op list.
 struct DirectoryMachine {
     rt: tokio::runtime::Runtime,
     root: TempDir,
@@ -284,7 +288,7 @@ impl DirectoryMachine {
 
     /// The TLS pin set is exactly the enrolled set — never candidates,
     /// never revoked identities.
-    #[invariant]
+    #[invariant(always_run)]
     fn pin_set_equals_enrolled_trust(&self, _tc: TestCase) {
         let pins = self.directory.pinning_snapshot();
         let pins = pins.read().expect("pin snapshot lock").as_ref().clone();
@@ -299,7 +303,7 @@ impl DirectoryMachine {
     /// conflicting identities survive — and quarantines RELEASE when the
     /// conflicting claim disappears. Safety alone misses release bugs: a
     /// missing conflict recompute left survivors undialable forever.
-    #[invariant]
+    #[invariant(always_run)]
     fn conflicted_endpoints_are_quarantined_not_evicting(&self, _tc: TestCase) {
         let conflicted = self.conflicted_ports();
         for view in self.rt.block_on(self.directory.list()) {
@@ -352,7 +356,7 @@ impl DirectoryMachine {
     /// recorded observation is indexed. Ghost entries are invisible to
     /// expiry and would leak forever — this is the invariant that would
     /// have caught round-seven's revocation race (DEC-022).
-    #[invariant]
+    #[invariant(always_run)]
     fn observation_index_stays_ghost_free(&self, _tc: TestCase) {
         self.rt
             .block_on(self.directory.state.read())
@@ -372,7 +376,7 @@ impl DirectoryMachine {
     /// suite disk-bound — so their rejection behavior is pinned by
     /// `limits_tests.rs` instead; this invariant remains as a tripwire
     /// that catches any regression that lets a bound be exceeded at all.
-    #[invariant]
+    #[invariant(always_run)]
     fn directory_bounds_hold(&self, _tc: TestCase) {
         let state = self.rt.block_on(self.directory.state.read());
         assert!(
@@ -402,7 +406,7 @@ impl DirectoryMachine {
     }
 
     /// Durable intent always equals the live enrolled set.
-    #[invariant]
+    #[invariant(always_run)]
     fn durable_intent_matches_live_authority(&self, _tc: TestCase) {
         let stored: BTreeMap<String, String> = self
             .rt
@@ -419,7 +423,7 @@ impl DirectoryMachine {
     }
 
     /// A fresh process restores the identical pin set from disk.
-    #[invariant]
+    #[invariant(always_run)]
     fn restart_restores_durable_pins(&self, _tc: TestCase) {
         let reloaded = self
             .rt
@@ -444,5 +448,5 @@ impl DirectoryMachine {
 /// nightly runs.
 #[hegel::test(test_cases = 80)]
 fn directory_state_machine_preserves_trust_invariants(tc: TestCase) {
-    stateful::run(DirectoryMachine::new(), tc);
+    stateful::machine(DirectoryMachine::new()).run(tc);
 }

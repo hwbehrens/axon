@@ -363,19 +363,19 @@ See `axon/Cargo.toml` for current pinned versions. The versions below are indica
 ```toml
 [dependencies]
 tokio = { version = "1", features = ["full"] }
-quinn = "0.10"
-rustls = { version = "0.21", features = ["dangerous_configuration"] }  # Custom cert validation
-rcgen = "0.11"
-ed25519-dalek = "2"
-mdns-sd = "0.11"
+quinn = { version = "0.11", default-features = false, features = ["rustls-ring", "runtime-tokio"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }  # Custom cert verifiers
+rcgen = { version = "0.14", default-features = false, features = ["ring"] }
+ed25519-dalek = "3"
+mdns-sd = "0.21"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-serde_yaml = "0.9"
+serde-saphyr = "2"
 clap = { version = "4", features = ["derive"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-sha2 = "0.10"
-base64 = "0.22"
+sha2 = "0.11"
+base64 = "0.23"
 uuid = { version = "1", features = ["v4"] }
 anyhow = "1"
 ```

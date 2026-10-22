@@ -17,6 +17,38 @@ fn derive_agent_id_is_40_chars_with_prefix() {
     assert_ne!(id, derive_agent_id(&other.verifying_key()));
 }
 
+/// Pins seed -> public key -> Agent ID to literal values computed outside
+/// this crate. RFC 8032 section 7.1 TEST 1 fixes the key pair; the Agent ID is
+/// `ed25519.` + hex(SHA-256(public key)[..16]). A drift here would silently
+/// rotate every Agent ID and invalidate every enrolled pin.
+#[test]
+fn derive_agent_id_matches_known_vector() {
+    fn hex(text: &str) -> [u8; 32] {
+        let mut bytes = [0u8; 32];
+        for (byte, pair) in bytes.iter_mut().zip(text.as_bytes().chunks(2)) {
+            *byte = u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap();
+        }
+        bytes
+    }
+    let seed = hex("9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60");
+    let public_key = hex("d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a");
+
+    let verifying_key = SigningKey::from_bytes(&seed).verifying_key();
+
+    assert_eq!(verifying_key.to_bytes(), public_key);
+    assert_eq!(
+        derive_agent_id(&verifying_key),
+        "ed25519.21fe31dfa154a261626bf854046fd227"
+    );
+    let advertised = "11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=";
+    assert_eq!(STANDARD.encode(public_key), advertised);
+    let agent_id = AgentId::from_pubkey_base64(advertised).expect("valid base64 public key");
+    assert_eq!(
+        agent_id.as_str(),
+        "ed25519.21fe31dfa154a261626bf854046fd227"
+    );
+}
+
 #[test]
 fn derive_agent_id_is_deterministic() {
     let key = SigningKey::from_bytes(&[42u8; 32]);

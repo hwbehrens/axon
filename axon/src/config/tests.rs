@@ -136,6 +136,93 @@ async fn parse_error_context_is_accurate_without_legacy_peers() {
 }
 
 #[tokio::test]
+async fn legacy_peer_hint_ignores_field_name_in_source_text() {
+    let root = tempdir().expect("tempdir");
+    let path = root.path().join("config.yaml");
+    // The rendered parse error quotes this line, comment included.
+    tokio::fs::write(&path, "port: nope # unknown field `peers`\n")
+        .await
+        .expect("write config");
+
+    let error = load_persisted_config(&path)
+        .await
+        .expect_err("invalid port must fail");
+    assert!(
+        !error.to_string().contains("Legacy `peers` entries"),
+        "hint must key on the structured error, not rendered text: {error}"
+    );
+}
+
+#[tokio::test]
+async fn duplicate_keys_are_rejected() {
+    let root = tempdir().expect("tempdir");
+    let path = root.path().join("config.yaml");
+    tokio::fs::write(&path, "port: 7200\nport: 7300\n")
+        .await
+        .expect("write config");
+
+    load_persisted_config(&path)
+        .await
+        .expect_err("duplicate keys must fail closed");
+}
+
+/// Pins every observable difference from `serde_yaml` 0.9 found by the
+/// differential probe for the `serde-saphyr` swap (DEC-030), so a future
+/// parser change surfaces here instead of in a user's `config.yaml`. `name`
+/// and `port` values still pass through [`PersistedConfig::validate`];
+/// `advertise_addr` has no semantic gate.
+#[tokio::test]
+async fn yaml_semantics_that_changed_with_the_parser_swap() {
+    let alice_7200 = PersistedConfig {
+        name: Some("alice".to_string()),
+        port: Some(7200),
+        advertise_addr: None,
+    };
+    let port_7200 = PersistedConfig {
+        port: Some(7200),
+        ..PersistedConfig::default()
+    };
+    let cases: [(&str, Option<PersistedConfig>); 8] = [
+        // Previously rejected, now coerced or accepted.
+        ("name: 'alice'\nport: \"7200\"\n", Some(alice_7200)),
+        ("port: \"+7200\"\n", Some(port_7200.clone())),
+        ("port: 7_200\n", Some(port_7200.clone())),
+        ("\tport: 7200\n", Some(port_7200.clone())),
+        ("<<: {port: 7200}\n", Some(port_7200)),
+        ("null\n", Some(PersistedConfig::default())),
+        // Previously the raw base64 text, now decoded.
+        (
+            "name: !!binary YWxpY2U=\n",
+            Some(PersistedConfig {
+                name: Some("alice".to_string()),
+                ..PersistedConfig::default()
+            }),
+        ),
+        // Previously loaded as port 7200, now refuses to load (fail closed).
+        ("port: !!str 7200\n", None),
+    ];
+
+    let root = tempdir().expect("tempdir");
+    let path = root.path().join("config.yaml");
+    for (document, expected) in cases {
+        tokio::fs::write(&path, document)
+            .await
+            .expect("write config");
+        let loaded = load_persisted_config(&path).await;
+        match expected {
+            Some(expected) => {
+                let config = loaded.unwrap_or_else(|err| panic!("{document:?} must load: {err}"));
+                assert_eq!(config, expected, "{document:?}");
+                config.validate().expect("coerced values pass validation");
+            }
+            None => {
+                loaded.expect_err(&format!("{document:?} must be rejected"));
+            }
+        }
+    }
+}
+
+#[tokio::test]
 async fn persisted_config_roundtrips() {
     let root = tempdir().expect("tempdir");
     let path = root.path().join("config.yaml");
