@@ -55,3 +55,7 @@ impl ResolvedRecord for ResolvedService {
             .collect()
     }
 }
+
+#[cfg(test)]
+#[path = "record_tests.rs"]
+mod tests;
