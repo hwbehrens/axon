@@ -444,5 +444,5 @@ impl DirectoryMachine {
 /// nightly runs.
 #[hegel::test(test_cases = 80)]
 fn directory_state_machine_preserves_trust_invariants(tc: TestCase) {
-    stateful::run(DirectoryMachine::new(), tc);
+    stateful::machine(DirectoryMachine::new()).run(tc);
 }

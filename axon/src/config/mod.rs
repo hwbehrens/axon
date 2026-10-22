@@ -155,7 +155,7 @@ pub async fn load_persisted_config(path: &Path) -> Result<PersistedConfig> {
             return Err(err).with_context(|| format!("failed to read config: {}", path.display()));
         }
     };
-    serde_yaml::from_str(&raw).map_err(|err| {
+    serde_saphyr::from_str(&raw).map_err(|err| {
         let message = format!("failed to parse config: {}: {err}", path.display());
         // Only mention the legacy `peers` migration path when that is actually
         // what failed; generic YAML errors must not carry misleading guidance.
@@ -175,7 +175,7 @@ pub async fn save_persisted_config(path: &Path, config: &PersistedConfig) -> Res
             .await
             .with_context(|| format!("failed to create config directory: {}", parent.display()))?;
     }
-    let serialized = serde_yaml::to_string(config)
+    let serialized = serde_saphyr::to_string(config)
         .with_context(|| format!("failed to serialize config: {}", path.display()))?;
 
     // Temp-file + rename: a crash between write and replace must never leave a

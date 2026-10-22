@@ -10,5 +10,5 @@ use axon::config::PersistedConfig;
 
 fuzz_target!(|data: &[u8]| {
     let text = String::from_utf8_lossy(data);
-    let _ = serde_yaml::from_str::<PersistedConfig>(&text);
+    let _ = serde_saphyr::from_str::<PersistedConfig>(&text);
 });

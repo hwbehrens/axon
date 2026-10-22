@@ -1,6 +1,7 @@
+use std::hint::black_box;
 use std::sync::Arc;
 
-use criterion::{Criterion, black_box, criterion_group, criterion_main};
+use criterion::{Criterion, criterion_group, criterion_main};
 use serde_json::json;
 use uuid::Uuid;
 

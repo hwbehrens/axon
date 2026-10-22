@@ -1,6 +1,6 @@
 //! Bonjour/mDNS peer discovery.
 //!
-//! # Dependency behavior (`mdns-sd` 0.11.5)
+//! # Dependency behavior (`mdns-sd` 0.21.5)
 //!
 //! The dependency emits [`ServiceEvent::ServiceResolved`] only when a record
 //! is new or changes. A healthy peer that keeps re-announcing unchanged
@@ -21,6 +21,8 @@
 //! per-record warnings, because a hostile or misbehaving link can generate
 //! them faster than any human can read.
 
+mod record;
+
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::net::IpAddr;
 use std::time::{Duration, Instant};
@@ -31,6 +33,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
+use crate::discovery::record::ResolvedRecord;
 use crate::message::AgentId;
 use crate::peer_directory::{
     MAX_OBSERVATIONS_PER_PEER, ObservationId, ObservationSource, PeerObservation,
@@ -295,7 +298,7 @@ pub async fn run_mdns_discovery(
                 match event {
                     ServiceEvent::ServiceResolved(info) => {
                         let fullname = info.get_fullname().to_string();
-                        match parse_resolved_service(&local_agent_id, &info) {
+                        match parse_resolved_service(&local_agent_id, info.as_ref()) {
                             Ok(observations) => {
                                 for event in tracker.observe_resolution(fullname, observations) {
                                     if tx.send(event).await.is_err() {
@@ -363,23 +366,22 @@ async fn withdraw_and_shutdown(mdns: &ServiceDaemon, fullname: &str) {
 
 fn parse_resolved_service(
     local_agent_id: &AgentId,
-    info: &ServiceInfo,
+    info: &impl ResolvedRecord,
 ) -> Result<Vec<PeerObservation>> {
-    let Some(agent_id_raw) = info.get_property_val_str("agent_id") else {
+    let Some(agent_id_raw) = info.property("agent_id") else {
         return Ok(Vec::new());
     };
     let agent_id = AgentId::parse(agent_id_raw).context("invalid advertised Agent ID")?;
     if &agent_id == local_agent_id {
         return Ok(Vec::new());
     }
-    let Some(public_key) = info.get_property_val_str("pubkey") else {
+    let Some(public_key) = info.property("pubkey") else {
         return Ok(Vec::new());
     };
-    let display_name = service_display_name(info.get_fullname());
+    let display_name = service_display_name(info.fullname());
     let mut addresses: Vec<IpAddr> = info
-        .get_addresses()
-        .iter()
-        .copied()
+        .addresses()
+        .into_iter()
         .filter(is_dialable_candidate)
         .collect();
     addresses.sort_by_key(|address| (!address.is_ipv4(), *address));
@@ -393,8 +395,8 @@ fn parse_resolved_service(
     addresses
         .into_iter()
         .map(|address| {
-            let endpoint = std::net::SocketAddr::new(address, info.get_port());
-            let id = ObservationId::new(format!("mdns:{}:{endpoint}", info.get_fullname()))?;
+            let endpoint = std::net::SocketAddr::new(address, info.port());
+            let id = ObservationId::new(format!("mdns:{}:{endpoint}", info.fullname()))?;
             PeerObservation::new(
                 id,
                 agent_id.clone(),

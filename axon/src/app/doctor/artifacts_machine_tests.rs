@@ -330,5 +330,5 @@ impl DoctorArtifactsMachine {
 
 #[hegel::test(test_cases = 20)]
 fn doctor_artifacts_state_machine_holds_doctor_contract(tc: TestCase) {
-    stateful::run(DoctorArtifactsMachine::new(), tc);
+    stateful::machine(DoctorArtifactsMachine::new()).run(tc);
 }

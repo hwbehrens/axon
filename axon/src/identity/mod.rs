@@ -34,7 +34,7 @@ impl Identity {
             Some(key) => key,
             None => {
                 let mut seed = [0u8; 32];
-                getrandom::getrandom(&mut seed)
+                getrandom::fill(&mut seed)
                     .map_err(|err| anyhow!("failed to gather randomness: {err}"))?;
                 let key = SigningKey::from_bytes(&seed);
                 write_seed_as_base64(&paths.identity_key, &seed)?;
