@@ -94,8 +94,23 @@ jobs:
       # Keep CI aligned with `make lint`: --all-targets also lints tests and
       # benches. The separate axon/fuzz package is not part of this workspace;
       # the fuzz job compiles and runs it.
-      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo clippy --locked --all-targets -- -D warnings
         working-directory: axon
+
+  # Keeps both lockfiles advisory-clean (CONTRIBUTING.md § Security).
+  audit:
+    name: audit
+    needs: [fmt]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo install cargo-audit --locked
+      - run: cargo audit
+        working-directory: axon
+      - run: cargo audit
+        working-directory: axon/fuzz
 
   test:
     name: test
@@ -108,7 +123,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: axon
-      - run: cargo test
+      - run: cargo test --locked
         working-directory: axon
 
   bench:
@@ -122,7 +137,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: axon
-      - run: cargo bench --no-run
+      - run: cargo bench --locked --no-run
         working-directory: axon
 
   fuzz:
@@ -137,6 +152,11 @@ jobs:
         with:
           workspaces: axon/fuzz
       - run: cargo install cargo-fuzz
+      # cargo-fuzz has no --locked flag; fail here instead of letting it
+      # silently re-resolve a stale fuzz lockfile.
+      - name: Verify fuzz lockfile is current
+        working-directory: axon/fuzz
+        run: cargo metadata --locked --format-version 1 > /dev/null
       - name: Fuzz all targets (short run)
         working-directory: axon
         run: make fuzz
