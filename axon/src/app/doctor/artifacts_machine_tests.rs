@@ -2,7 +2,8 @@
 //!
 //! Rules drive the AXON root through artifact combinations (lock files,
 //! socket paths, their contents, a held flock); invariants pin the doctor
-//! contract after every transition:
+//! contract after every transition (both are `always_run`, because hegeltest
+//! 0.49 otherwise samples invariants between steps):
 //!
 //! - in check mode, `report.ok` mirrors actual artifact health exactly;
 //! - in fix mode, actionable problems are repaired and never fabricated;
@@ -282,7 +283,7 @@ impl DoctorArtifactsMachine {
     }
 
     /// Invariant: in check mode the report verdict mirrors artifact health.
-    #[invariant]
+    #[invariant(always_run)]
     fn check_mode_verdict_mirrors_artifact_health(&self, _tc: TestCase) {
         let report = self.sweep(false);
         assert_eq!(
@@ -299,7 +300,7 @@ impl DoctorArtifactsMachine {
     /// Invariant: fix mode repairs everything actionable, so a follow-up
     /// check-mode sweep is healthy whenever no manual-only remainder exists;
     /// manual-only remainders keep failing closed.
-    #[invariant]
+    #[invariant(always_run)]
     fn fix_mode_converges_except_manual_remainders(&self, _tc: TestCase) {
         let fix_sweep = self.sweep(true);
         let recheck = self.sweep(false);
