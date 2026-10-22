@@ -10,6 +10,8 @@ Each entry: ID, date, subsystem, one-paragraph summary covering motivation, deci
 
 | ID | Date | Subsystem | Title |
 |---|---|---|---|
+| DEC-030 | 2026-10-22 | config, fuzz | Replace deprecated `serde_yaml` with pure-Rust `serde-saphyr` |
+| DEC-029 | 2026-10-22 | transport, identity | TLS stack is `ring`-only: no `aws-lc-rs`, no platform verifier |
 | DEC-028 | 2026-10-19 | daemon, app/doctor, docs | `daemon.pid` authority: the `flock` is authoritative, live-PID records are manual-only for doctor |
 | DEC-027 | 2026-10-19 | daemon, config, docs | Daemon startup ordering: state-root/lock first, then config, identity, peers, IPC, QUIC, discovery |
 | DEC-026 | 2026-02-17 | message, manifest, request_broker, ipc, daemon | Capability manifests: daemon-answered `describe`, `serve`-time publication, `who_can` derived view |
@@ -42,6 +44,18 @@ Each entry: ID, date, subsystem, one-paragraph summary covering motivation, deci
 ---
 
 ## Entries
+
+### DEC-030: Replace deprecated `serde_yaml` with pure-Rust `serde-saphyr`
+
+Date: 2026-10-22 | Subsystem: config, fuzz
+
+`config.yaml` was parsed and serialized by `serde_yaml`, which has been deprecated since 2024 and is built on `unsafe-libyaml`, an archived C-to-Rust transliteration that receives no fixes (RUSTSEC-2024-0449). Two maintained alternatives were considered: `serde_yaml_ng`/`serde_norway` forks keep the same unmaintained parser underneath, so they only move the advisory. The parser is now `serde-saphyr` 2, which is pure Rust and is the migration path named by the advisory itself. A differential probe over the accepted/rejected corpus (`Config`, `PersistedConfig`, and the fuzz corpus) matched `serde_yaml` on every case except quoted scalars, which `serde-saphyr` coerces (`port: "7200"` now deserializes); semantic validation still rejects port `0` and blank names, and `deny_unknown_fields` still produces the 'unknown field `peers`' message the legacy-migration hint keys on. The YAML surface is local config only — no wire format or spec-covered artifact depends on it — so the looser scalar coercion does not widen a remote trust boundary. The `fuzz_config_yaml` target follows the swap.
+
+### DEC-029: TLS stack is `ring`-only: no `aws-lc-rs`, no platform verifier
+
+Date: 2026-10-22 | Subsystem: transport, identity
+
+AXON installs `rustls::crypto::ring::default_provider()` and decides admission solely from the immutable pinning snapshot, so neither the OS trust store nor AWS-LC plays any part in peer verification. Default dependency features said otherwise: `rustls` defaults pulled `aws-lc-rs`/`aws-lc-sys` (a C build retained in every binary) and `quinn` defaults pulled `rustls-platform-verifier`, which pulls `webpki-root-certs`. Both were dead weight and both accumulated advisories in the 2026-10 batch (five in `aws-lc-sys`, one in `webpki-root-certs`). `rustls` is now `default-features = false` with `["ring", "logging", "std", "tls12"]`, and `quinn` is `default-features = false` with `["log", "runtime-tokio", "rustls-ring", "bloom"]`; `bloom` keeps the connection-ID lookup behavior unchanged. One capability is forfeited by construction: `prefer-post-quantum` requires `aws-lc-rs`, so no hybrid PQ key exchange was (or could be) offered while `ring` is the installed provider; a future requirement for PQ means revisiting this entry, not quietly re-enabling the default features. The same refresh pinned `rustls-webpki` 0.103.16 — published two days before the refresh, ahead of the usual release cooldown — because it is the first release that fixes RUSTSEC-2026-0382 (acceptance of distrusted intermediates).
 
 ### DEC-028: `daemon.pid` authority — the `flock` is authoritative, live-PID records are manual-only for doctor
 
