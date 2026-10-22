@@ -136,6 +136,37 @@ async fn parse_error_context_is_accurate_without_legacy_peers() {
 }
 
 #[tokio::test]
+async fn duplicate_keys_are_rejected() {
+    let root = tempdir().expect("tempdir");
+    let path = root.path().join("config.yaml");
+    tokio::fs::write(&path, "port: 7200\nport: 7300\n")
+        .await
+        .expect("write config");
+
+    load_persisted_config(&path)
+        .await
+        .expect_err("duplicate keys must fail closed");
+}
+
+/// Documents the one deserialization behavior that changed with the `serde-saphyr`
+/// swap: quoted scalars are coerced to their target type instead of being
+/// rejected. Anything this test accepts must still pass [`PersistedConfig::validate`],
+/// so coercion cannot bypass the semantic checks.
+#[tokio::test]
+async fn quoted_scalars_are_coerced() {
+    let root = tempdir().expect("tempdir");
+    let path = root.path().join("config.yaml");
+    tokio::fs::write(&path, "name: 'alice'\nport: \"7200\"\n")
+        .await
+        .expect("write config");
+
+    let config = Config::load(&path).await.expect("load config");
+
+    assert_eq!(config.name.as_deref(), Some("alice"));
+    assert_eq!(config.port, Some(7200));
+}
+
+#[tokio::test]
 async fn persisted_config_roundtrips() {
     let root = tempdir().expect("tempdir");
     let path = root.path().join("config.yaml");
