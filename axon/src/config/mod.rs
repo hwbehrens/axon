@@ -159,14 +159,26 @@ pub async fn load_persisted_config(path: &Path) -> Result<PersistedConfig> {
         let message = format!("failed to parse config: {}: {err}", path.display());
         // Only mention the legacy `peers` migration path when that is actually
         // what failed; generic YAML errors must not carry misleading guidance.
-        if err.to_string().contains("unknown field `peers`") {
+        // Match the structured error: the rendered message embeds source
+        // lines, so any config whose text mentions the field would match.
+        if is_legacy_peers_error(&err) {
+            // The rendered error ends in an annotated source snippet, so the
+            // hint goes on its own line rather than trailing the snippet.
             anyhow::anyhow!(
-                "{message}. Legacy `peers` entries are unsupported; re-enroll peers with `axon connect`."
+                "{message}\nLegacy `peers` entries are unsupported; re-enroll peers with `axon connect`."
             )
         } else {
             anyhow::anyhow!(message)
         }
     })
+}
+
+/// Whether parsing failed on the removed top-level `peers` field.
+fn is_legacy_peers_error(err: &serde_saphyr::Error) -> bool {
+    matches!(
+        err.without_snippet(),
+        serde_saphyr::Error::SerdeUnknownField { field, .. } if field == "peers"
+    )
 }
 
 pub async fn save_persisted_config(path: &Path, config: &PersistedConfig) -> Result<()> {
